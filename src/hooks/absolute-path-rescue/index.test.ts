@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import * as os from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 
 import type { PluginInput } from '@opencode-ai/plugin';
 
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 import { createAbsolutePathRescueHook, findRescuedSuffix } from './index';
 
 describe('absolute-path-rescue hook', () => {
@@ -27,15 +27,15 @@ describe('absolute-path-rescue hook', () => {
     hook['tool.execute.before']({ tool }, args === undefined ? {} : { args });
 
   beforeAll(async () => {
-    tempRoot = await mkdtemp(path.join(os.tmpdir(), 'absolute-path-rescue-'));
+    tempRoot = createTmpDir();
     workspace = path.join(tempRoot, 'Parent', 'Child', 'Project');
     await mkdir(path.join(workspace, 'src'), { recursive: true });
     await writeFile(path.join(workspace, 'src', 'app.ts'), 'export {}');
     await writeFile(path.join(workspace, 'README.md'), '# root readme');
   });
 
-  afterAll(async () => {
-    await rm(tempRoot, { recursive: true, force: true });
+  afterAll(() => {
+    removeTmpDir(tempRoot);
   });
 
   test('rewrites a dropped-segment absolute path to the existing suffix', async () => {
@@ -89,7 +89,7 @@ describe('absolute-path-rescue hook', () => {
 
   test('leaves a guess with no existing confined suffix untouched', async () => {
     const hook = createHook(workspace);
-    const unrelated = path.join(os.tmpdir(), 'elsewhere', 'nope');
+    const unrelated = path.join(tempRoot, 'elsewhere', 'nope');
     const args = { filePath: unrelated };
 
     await runHook(hook, 'read', args);
@@ -99,7 +99,7 @@ describe('absolute-path-rescue hook', () => {
 
   test('rejects guesses containing .. segments entirely', () => {
     // Literal string: path.join would normalize the .. away.
-    const dotted = `${os.tmpdir()}/__slim_missing_1143__/../../src`;
+    const dotted = `${tempRoot}/__slim_missing_1143__/../../src`;
     expect(findRescuedSuffix(dotted, workspace)).toBeNull();
   });
 

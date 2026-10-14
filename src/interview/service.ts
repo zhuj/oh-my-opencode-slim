@@ -9,7 +9,6 @@ import {
   isInternalInitiatorPart,
   log,
 } from '../utils';
-import { parseModelReference } from '../utils/session';
 import {
   appendInterviewAnswers,
   claimInterviewDocument,
@@ -70,8 +69,10 @@ import type {
   InterviewFileItem,
   InterviewListItem,
   InterviewMessage,
+  InterviewQuestion,
   InterviewRecord,
   InterviewState,
+  SpecBlock,
 } from './types';
 
 const COMMAND_NAME = 'interview';
@@ -99,6 +100,13 @@ function resolveMode(input: {
   if (!input.stateFromText && input.hasMessages) return 'completed';
   return 'awaiting-agent';
 }
+
+/**
+ * Whole-transcript reads one sync may spend waiting for the agent's reply to a
+ * just-submitted turn: `TRANSCRIPT_READ_ATTEMPTS` polls plus a final read.
+ */
+const TRANSCRIPT_READ_ATTEMPTS = 8;
+const TRANSCRIPT_READ_RETRY_DELAY_MS = 250;
 
 /**
  * Cap on retained abandoned interview records. Abandoned interviews are kept
@@ -175,6 +183,22 @@ function openBrowser(url: string): void {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/** Derived values only; the document is still read under lock on every poll. */
+interface InterviewSyncSnapshot {
+  fingerprint: string;
+  parseKey: string;
+  parsed: ReturnType<typeof findLatestAssistantState>;
+  fallbackState: ReturnType<typeof buildFallbackState>;
+  document: string;
+  blocks: SpecBlock[];
+  summary: string;
+  questions: InterviewQuestion[];
+  lastParseError?: string;
+  hasParsedState: boolean;
+  /** Length of the WHOLE transcript, which gates the empty-read belt below. */
+  wholeTranscriptLength: number;
 }
 
 export function createInterviewService(
@@ -255,8 +279,12 @@ export function createInterviewService(
   const activeInterviewIds = new Map<string, string>();
   const interviewsById = new Map<string, InterviewRecord>();
   const activeSyncs = new Map<string, Promise<InterviewState>>();
+  const syncSnapshots = new Map<string, InterviewSyncSnapshot>();
   const sessionBusy = new Map<string, boolean>();
-  const sessionModel = new Map<string, string>();
+  const sessionModel = new Map<
+    string,
+    { readonly providerID: string; readonly modelID: string }
+  >();
   const browserOpened = new Set<string>(); // Track interviews that have opened browser
   let resolveBaseUrl: (() => Promise<string>) | null = null;
   let onStateChange:
@@ -359,20 +387,25 @@ export function createInterviewService(
     return sessionRuntime.messages(sessionID);
   }
 
+  /** Preserve the original retry success criterion, including streaming tails. */
+  function endsOnAssistantTurn(messages: InterviewMessage[]): boolean {
+    const last = messages[messages.length - 1];
+    return messages.length > 0 && last?.info?.role === 'assistant';
+  }
+
   async function loadMessagesWithRetry(
-    sessionID: string,
+    interview: InterviewRecord,
   ): Promise<InterviewMessage[]> {
-    for (let i = 0; i < 8; i++) {
-      const messages = await loadMessages(sessionID);
-      if (messages.length > 0) {
-        const last = messages[messages.length - 1];
-        if (last?.info?.role === 'assistant') {
-          return messages;
-        }
+    for (let attempt = 0; attempt < TRANSCRIPT_READ_ATTEMPTS; attempt++) {
+      const messages = await loadMessages(interview.sessionID);
+      if (endsOnAssistantTurn(messages)) {
+        return messages;
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await new Promise((resolve) =>
+        setTimeout(resolve, TRANSCRIPT_READ_RETRY_DELAY_MS),
+      );
     }
-    return loadMessages(sessionID);
+    return loadMessages(interview.sessionID);
   }
 
   function isUserVisibleMessage(message: InterviewMessage): boolean {
@@ -438,6 +471,7 @@ export function createInterviewService(
         finalizationPending.delete(record.id);
         finalizationReady.delete(record.id);
         browserOpened.delete(record.id);
+        syncSnapshots.delete(record.id);
       });
   }
 
@@ -746,6 +780,89 @@ export function createInterviewService(
       });
     }
   }
+  /** Avoid poll-driven writes while still detecting external spec edits. */
+  async function rewriteSpecSection(
+    interview: InterviewRecord,
+    existingDocument: string,
+    state: InterviewAssistantState,
+  ): Promise<string> {
+    const currentSummary = extractSummarySection(existingDocument);
+    const currentTitle = extractTitle(existingDocument);
+    // `rewriteInterviewDocument` substitutes its own fallbacks for an omitted
+    // title and an empty summary, so mirror both before comparing.
+    const nextTitle = state.title || currentTitle || interview.idea;
+    const nextSummary =
+      state.summary.trim() || 'Waiting for interview answers.';
+    if (currentSummary === nextSummary && currentTitle === nextTitle) {
+      return existingDocument;
+    }
+    return rewriteInterviewDocument(interview, state.summary, state.title);
+  }
+
+  /**
+   * Resolve `mode` from the cached snapshot plus the live session-busy flag,
+   * so a reused snapshot still tracks abandonment and busy transitions.
+   */
+  function resolveSnapshotMode(
+    interview: InterviewRecord,
+    snapshot: InterviewSyncSnapshot,
+    isBusy: boolean,
+  ): InterviewState['mode'] {
+    if (interview.status === 'abandoned') {
+      return 'abandoned';
+    }
+    if (snapshot.hasParsedState && snapshot.questions.length === 0) {
+      return 'completed';
+    }
+    if (isBusy) {
+      return 'awaiting-agent';
+    }
+    if (snapshot.questions.length > 0) {
+      return 'awaiting-user';
+    }
+    if (snapshot.lastParseError) {
+      return 'error';
+    }
+    // An empty WHOLE-transcript read (impossible on v1 runtimes; reachable on
+    // v2 only via bridge retention loss) must not read as 'completed' — the
+    // answer form would vanish for a live interview. Keyed on the whole
+    // transcript, NOT the post-base slice: an empty post-base slice
+    // legitimately awaits the first answer.
+    if (
+      !snapshot.hasParsedState &&
+      snapshot.wholeTranscriptLength > 0 &&
+      sessionBusy.get(interview.sessionID) === false
+    ) {
+      return 'completed';
+    }
+    return 'awaiting-agent';
+  }
+
+  function toInterviewState(
+    interview: InterviewRecord,
+    snapshot: InterviewSyncSnapshot,
+    url: string,
+  ): InterviewState {
+    const isBusy = sessionBusy.get(interview.sessionID) === true;
+    return {
+      interview,
+      url: `${url}/interview/${interview.id}`,
+      markdownPath: relativeInterviewPath(
+        ctx.directory,
+        interview.markdownPath,
+      ),
+      mode: resolveSnapshotMode(interview, snapshot, isBusy),
+      lastParseError: snapshot.lastParseError,
+      isBusy,
+      summary: snapshot.summary,
+      questions: snapshot.questions.map((question) => ({
+        ...question,
+        options: [...question.options],
+      })),
+      document: snapshot.document,
+      blocks: snapshot.blocks.map((block) => ({ ...block })),
+    };
+  }
 
   async function performSyncInterview(
     interview: InterviewRecord,
@@ -770,11 +887,33 @@ export function createInterviewService(
       };
     }
     const allMessages = retryMessages
-      ? await loadMessagesWithRetry(interview.sessionID)
+      ? await loadMessagesWithRetry(interview)
       : await loadMessages(interview.sessionID);
+    const interviewState = await refreshInterviewSnapshot(
+      interview,
+      allMessages,
+    );
+
+    // Push state to dashboard if callback is set (dashboard mode)
+    if (onStateChange) {
+      onStateChange(interview.id, interviewState);
+    }
+
+    return interviewState;
+  }
+
+  async function refreshInterviewSnapshot(
+    interview: InterviewRecord,
+    allMessages: InterviewMessage[],
+  ): Promise<InterviewState> {
     const interviewMessages = allMessages
       .slice(interview.baseMessageCount)
       .filter(isUserVisibleMessage);
+    // Compare exact serialized input, not a tail/length heuristic: messages
+    // may be edited in place, including earlier messages of the same length.
+    const fingerprint = JSON.stringify(interviewMessages);
+    const cached = syncSnapshots.get(interview.id);
+    const sameTranscript = cached?.fingerprint === fingerprint;
     const latestAssistant = [...interviewMessages]
       .reverse()
       .find((message) => message.info?.role === 'assistant');
@@ -788,7 +927,8 @@ export function createInterviewService(
     const isCleanFinalResponse =
       finalizationPending.has(interview.id) &&
       finalizationReady.has(interview.id) &&
-      latestAssistantText.length > 0;
+      latestAssistantText.length > 0 &&
+      !/<interview_state>/i.test(latestAssistantText);
     const remembered = memoryFor(interview.id).lastAppliedState;
     const toolMessageID = turnFor(interview.sessionID).toolMessageID;
     // The assistant message the current state was applied for: the tool path
@@ -827,9 +967,27 @@ export function createInterviewService(
       return hasInterviewStateBlock(flattenMessage(message));
     });
 
-    const parsed = isCleanFinalResponse
-      ? { state: null, latestAssistantError: undefined }
-      : findLatestAssistantState(newerAssistantMessages, maxQuestions);
+    const parseKey = JSON.stringify({
+      candidates: newerAssistantMessages.map((message) => ({
+        id: message.info?.id,
+        text: flattenMessage(message),
+      })),
+      appliedMessageID,
+      toolMessageID,
+      latestAssistantId,
+      isCleanFinalResponse,
+      hasNewerStateBearingText,
+    });
+    const parsed =
+      isCleanFinalResponse || newerAssistantMessages.length === 0
+        ? { state: null, latestAssistantError: undefined }
+        : cached?.parseKey === parseKey
+          ? cached.parsed
+          : findLatestAssistantState(newerAssistantMessages, maxQuestions);
+    const fallbackState =
+      sameTranscript && cached
+        ? cached.fallbackState
+        : buildFallbackState(interviewMessages);
 
     const rememberedForLatest =
       remembered && !hasNewerStateBearingText ? remembered : undefined;
@@ -930,7 +1088,6 @@ export function createInterviewService(
       );
     }
 
-    const fallbackState = buildFallbackState(interviewMessages);
     const effectivePatchError =
       patchError?.message ?? memoryFor(interview.id).lastPatchError;
     const effectiveState = effectivePatchError
@@ -954,7 +1111,17 @@ export function createInterviewService(
         contextWindow: patchError.contextWindow,
       };
     }
-    const blocks = parseSpecBlocks(document);
+    const stableBlocks =
+      cached?.document === document ? cached.blocks : parseSpecBlocks(document);
+    const questions = state.questions.map((question) => ({
+      ...question,
+      options: [...question.options],
+    }));
+    // A consumed state supplies questions, not permission to restore an older
+    // spec. With no patch, the document remains authoritative for its summary.
+    const summary = effectiveState?.patch?.trim()
+      ? state.summary
+      : extractSummarySection(document);
 
     const interviewState: InterviewState = {
       interview,
@@ -984,17 +1151,28 @@ export function createInterviewService(
         ? 'The spec patch did not apply.'
         : (latestAssistantError ?? memory.answerHistoryError),
       isBusy: sessionBusy.get(interview.sessionID) === true,
-      summary: state.summary,
-      questions: state.questions,
+      summary,
+      questions,
       document,
-      blocks,
+      blocks: stableBlocks.map((block) => ({ ...block })),
     };
-
-    // Push state to dashboard if callback is set (dashboard mode)
-    if (onStateChange) {
-      onStateChange(interview.id, interviewState);
-    }
-
+    const snapshot: InterviewSyncSnapshot = {
+      fingerprint,
+      parseKey,
+      parsed,
+      fallbackState,
+      document,
+      blocks: stableBlocks,
+      summary,
+      questions: questions.map((question) => ({
+        ...question,
+        options: [...question.options],
+      })),
+      lastParseError: interviewState.lastParseError,
+      hasParsedState: parsed.state !== null,
+      wholeTranscriptLength: allMessages.length,
+    };
+    syncSnapshots.set(interview.id, snapshot);
     return interviewState;
   }
 
@@ -1178,7 +1356,7 @@ export function createInterviewService(
                   printState,
                 )
               : buildPatchMissingRepairPrompt(maxQuestions, printState),
-            model ? (parseModelReference(model) ?? undefined) : undefined,
+            model,
           );
         } catch (error) {
           sessionBusy.set(sessionID, false);
@@ -1430,11 +1608,7 @@ export function createInterviewService(
         interview.completed = false;
         reopenedCompletion = true;
       }
-      await sessionRuntime.continue(
-        sessionID,
-        promptWithPatchNote,
-        model ? (parseModelReference(model) ?? undefined) : undefined,
-      );
+      await sessionRuntime.continue(sessionID, promptWithPatchNote, model);
       promptSent = true;
     } finally {
       if (!promptSent) {
@@ -1780,7 +1954,7 @@ export function createInterviewService(
       const providerID = info?.info?.providerID;
       const modelID = info?.info?.modelID;
       if (sessionID && providerID && modelID) {
-        sessionModel.set(sessionID, `${providerID}/${modelID}`);
+        sessionModel.set(sessionID, { providerID, modelID });
       }
       return;
     }

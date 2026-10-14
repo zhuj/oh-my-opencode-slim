@@ -22,6 +22,7 @@ import {
   BACKGROUND_JOB_BOARD_METADATA_KEY,
   createTaskSessionManagerHook,
 } from './task-session-manager';
+import { testSnapshotStore } from './task-session-manager/test-snapshot-store';
 import type { MessageWithParts } from './types';
 import { isMessageWithParts } from './types';
 
@@ -77,6 +78,7 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
     {
       maxSessionsPerAgent: 2,
       backgroundJobBoard: board,
+      backgroundJobSnapshotStore: testSnapshotStore,
       shouldManageSession: (sessionID) =>
         sessionAgentMap.get(sessionID) === 'orchestrator',
       registerSessionAsOrchestrator: (sessionID) => {

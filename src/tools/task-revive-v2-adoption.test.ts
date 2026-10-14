@@ -42,6 +42,7 @@ function harness(
     foreign?: boolean;
     parentTranscript?: unknown[];
     admit?: (prompt: Prompt) => Promise<unknown>;
+    waitIdle?: () => Promise<void>;
   } = {},
 ) {
   spyOn(opencodeClient, 'getClient').mockImplementation(
@@ -51,7 +52,11 @@ function harness(
     { id: 'old-user', type: 'user', time: { created: 1 } },
     ...(options.busy ? [] : [assistant('old-answer', 'old result', 2)]),
   ];
-  const wait = mock(async () => {});
+  const waitEntered = Promise.withResolvers<void>();
+  const wait = mock(async () => {
+    waitEntered.resolve();
+    await options.waitIdle?.();
+  });
   const interrupt = mock(async () => {});
   const synthetic = mock(async () => ({}));
   let queued: Prompt | undefined;
@@ -149,6 +154,7 @@ function harness(
     synthetic,
     interrupt,
     wait,
+    waitEntered: waitEntered.promise,
     revive,
     recover,
     probe,
@@ -171,6 +177,32 @@ function harness(
   };
 }
 
+test('waits for the existing V2 session to become idle before queueing revive', async () => {
+  const idle = Promise.withResolvers<void>();
+  const h = harness({ busy: true, waitIdle: () => idle.promise });
+  const pending = h.revive();
+
+  await h.waitEntered;
+  expect(h.wait).toHaveBeenCalledTimes(1);
+  expect(h.prompt).not.toHaveBeenCalled();
+
+  idle.resolve();
+  await pending;
+  expect(h.prompt).toHaveBeenCalledTimes(1);
+});
+
+test('does not queue revive if the session becomes active during the idle wait', async () => {
+  const idle = Promise.withResolvers<void>();
+  const h = harness({ busy: true, waitIdle: () => idle.promise });
+  const pending = h.revive();
+  await h.waitEntered;
+  h.run().lastLiveBusyAt = Date.now() + 1;
+  idle.resolve();
+
+  await expect(pending).rejects.toThrow('became active while waiting for idle');
+  expect(h.prompt).not.toHaveBeenCalled();
+});
+
 test('queue remains available while a revived continuation is pending', async () => {
   const h = harness({ busy: true });
   await h.revive();
@@ -186,7 +218,7 @@ test('v2 adapter wakes an idle untracked owned session once and delivers its new
   expect(h.input.client.session.status).toBeUndefined();
   expect(await h.revive()).toContain('status: started');
   expect(h.prompt).toHaveBeenCalledTimes(1);
-  expect(h.wait).not.toHaveBeenCalled();
+  expect(h.wait).toHaveBeenCalledTimes(1);
   expect(h.interrupt).not.toHaveBeenCalled();
   expect(h.synthetic).not.toHaveBeenCalled();
   h.append(assistant('new-answer', 'new result'));
@@ -229,7 +261,7 @@ test('busy queue ignores old completion and errors, then delivers only the new t
   expect(h.board.get(childID)?.resultSummary).toBe('continued result');
   expect(h.synthetic).toHaveBeenCalledTimes(1);
   expect(h.prompt).toHaveBeenCalledTimes(1);
-  expect(h.wait).not.toHaveBeenCalled();
+  expect(h.wait).toHaveBeenCalledTimes(1);
   expect(h.interrupt).not.toHaveBeenCalled();
 });
 
@@ -321,7 +353,7 @@ test('a host-proven alias queues into its original busy child', async () => {
   });
   expect(await h.revive('exp-1')).toContain('status: started');
   expect(h.prompt).toHaveBeenCalledTimes(1);
-  expect(h.wait).not.toHaveBeenCalled();
+  expect(h.wait).toHaveBeenCalledTimes(1);
   expect(h.interrupt).not.toHaveBeenCalled();
 });
 

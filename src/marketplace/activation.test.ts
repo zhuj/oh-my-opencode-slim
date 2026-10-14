@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import {
   type MarketplaceActivationStore,
   type MarketplaceSelectedPackageLoad,
@@ -88,6 +88,70 @@ function fixture(
 }
 
 describe('marketplace activation planning', () => {
+  test('normalizes MCP namespaces once per available name across packages', () => {
+    const available = ['foo.bar', 'foo_bar', 'foo_bar_extra', 'plain'];
+    const packages = [
+      stored('team/first', 'first', { mcps: ['foo.bar', 'plain'] }),
+      stored('team/second', 'second', { mcps: ['foo.bar', 'plain'] }),
+    ];
+    const original = String.prototype.replace;
+    const replace = spyOn(String.prototype, 'replace');
+    replace.mockImplementation(original);
+    let namespaceCalls = 0;
+    try {
+      const { result } = fixture(
+        ['team/first', 'team/second'],
+        packages,
+        new Map(),
+        { mcps: available },
+      );
+      namespaceCalls = replace.mock.calls.filter(
+        ([pattern]) =>
+          pattern instanceof RegExp && pattern.source === '[^a-zA-Z0-9_-]',
+      ).length;
+      expect(result.diagnostics.map(({ message }) => message)).toEqual([
+        'team/first has ambiguous MCP action namespaces: foo.bar and foo_bar, foo.bar and foo_bar_extra',
+        'team/second has ambiguous MCP action namespaces: foo.bar and foo_bar, foo.bar and foo_bar_extra',
+      ]);
+    } finally {
+      replace.mockRestore();
+    }
+    expect(namespaceCalls).toBe(available.length);
+  });
+
+  test('filters disabled dependencies without scanning disabled arrays', () => {
+    const disabledSkills = ['blocked-skill'];
+    const disabledMcps = ['blocked-mcp'];
+    const skillIncludes = spyOn(disabledSkills, 'includes');
+    const mcpIncludes = spyOn(disabledMcps, 'includes');
+    try {
+      const { result } = fixture(
+        ['team/blocked'],
+        [
+          stored('team/blocked', 'blocked', {
+            skills: ['blocked-skill'],
+            mcps: ['blocked-mcp'],
+          }),
+        ],
+        new Map(),
+        {
+          skills: ['allowed-skill', 'blocked-skill'],
+          mcps: ['allowed-mcp', 'blocked-mcp'],
+          disabledSkills,
+          disabledMcps,
+        },
+      );
+      expect(result.diagnostics[0]?.message).toBe(
+        'team/blocked requires unavailable skill blocked-skill, MCP blocked-mcp',
+      );
+      expect(skillIncludes).not.toHaveBeenCalled();
+      expect(mcpIncludes).not.toHaveBeenCalled();
+    } finally {
+      skillIncludes.mockRestore();
+      mcpIncludes.mockRestore();
+    }
+  });
+
   test('admits only selected packages, not merely installed packages', () => {
     const { result } = fixture(
       ['team/selected'],

@@ -150,9 +150,10 @@ function makeChains(
 const retryMgr = (
   ids: string[],
   onChanged?: (sessionID: string, model: string) => void,
+  chains?: Record<string, string[]>,
 ): ForegroundFallbackManager =>
   new ForegroundFallbackManager(
-    { orchestrator: ids.map((id) => `test/${id}`) },
+    chains ?? { orchestrator: ids.map((id) => `test/${id}`) },
     true,
     { directory: '/test' } as any,
     0, // Existing hook-switch tests isolate switching from host retry budgets.
@@ -1957,6 +1958,46 @@ describe('foreground fallback redo: host retry budget', () => {
     });
   });
 
+  test.each([
+    ['test/b#high', 'high'],
+    [{ id: 'test/b#high', variant: 'fast' }, 'fast'],
+  ] as const)(
+    'v2 retry uses the effective variant for %j',
+    async (fallback, variant) => {
+      const { manager } = makeManager({ chain: ['test/a', fallback] });
+      const switchModel = mock(async () => {});
+
+      await manager.handleV2Retry(
+        retryEvent('merged-variant-hook', 'a', { retry: false }),
+        switchModel,
+      );
+
+      expect(switchModel).toHaveBeenCalledWith('merged-variant-hook', {
+        providerID: 'test',
+        id: 'b',
+        variant,
+      });
+    },
+  );
+
+  test('v2 replay forwards inline variants to the host switch', async () => {
+    const { manager, mocks } = makeManager({
+      chain: ['test/a', 'test/b#high'],
+      hostFlavor: 'v2',
+    });
+    await manager.handleEvent(redoEvents.assistant('merged-variant-replay'));
+
+    await manager.handleEvent(redoEvents.error('merged-variant-replay'));
+
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: {
+        model: { providerID: 'test', modelID: 'b', variant: 'high' },
+        variant: 'high',
+      },
+      modelVariant: 'high',
+    });
+  });
+
   test('T10: entries without a variant add no replay or switch keys', async () => {
     for (const hostFlavor of [undefined, 'v2'] as const) {
       const sid = `no-variant-${hostFlavor ?? 'v1'}`;
@@ -2041,6 +2082,19 @@ describe('foreground fallback redo: host retry budget', () => {
 });
 
 describe('ForegroundFallbackManager v2 retry hook', () => {
+  test('does not switch to a fallback without a provider', async () => {
+    const mgr = retryMgr([], undefined, {
+      orchestrator: ['test/A', 'fallback-model#high'],
+    });
+    const switchModel = mock(async () => {});
+    const event = retryEvent('providerless', 'A', { retry: false });
+
+    await mgr.handleV2Retry(event, switchModel);
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(event.decision).toEqual({ retry: false });
+  });
+
   test.each([{ retry: true, delay: 2000 }, { retry: false }])(
     'switches in place without abort or re-prompt (initial decision %p)',
     async (decision) => {
@@ -3313,10 +3367,12 @@ describe('ForegroundFallbackManager (disabled)', () => {
 describe('ForegroundFallbackManager session.error', () => {
   let mocks: ReturnType<typeof createMockClient>['mocks'];
   let mgr: ForegroundFallbackManager;
+  let chains: Record<string, string[]>;
 
   beforeEach(() => {
     ({ mocks } = createMockClient());
-    mgr = new ForegroundFallbackManager(makeChains(), true, {
+    chains = makeChains();
+    mgr = new ForegroundFallbackManager(chains, true, {
       directory: '/test',
     } as any);
   });
@@ -3404,16 +3460,15 @@ describe('ForegroundFallbackManager session.error', () => {
 
     expect(mocks.abort).toHaveBeenCalledTimes(0);
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
-
-    const call = mocks.promptAsync.mock.calls[0] as [
+    const contentPolicyCall = mocks.promptAsync.mock.calls[0] as [
       {
-        sessionID: string;
-        model: { providerID: string; modelID: string };
+        path: { id: string };
+        body: { model: { providerID: string; modelID: string } };
       },
     ];
-    expect(call[0].path.id).toBe('sess-1');
-    expect(call[0].body.model.providerID).toBe('openai');
-    expect(call[0].body.model.modelID).toBe('gpt-4o');
+    expect(contentPolicyCall[0].path.id).toBe('sess-1');
+    expect(contentPolicyCall[0].body.model.providerID).toBe('openai');
+    expect(contentPolicyCall[0].body.model.modelID).toBe('gpt-4o');
     expect(mgr.getActiveFallback('sess-1')?.downProviders).toEqual(
       new Set(downProviders),
     );
@@ -3502,6 +3557,77 @@ describe('ForegroundFallbackManager session.error', () => {
       '{"code":"InternalError.DataInspection","message":"Content moderation service unavailable."}',
       ['anthropic'],
     ));
+  test('preserves an inline variant in the fallback prompt', async () => {
+    const sessionID = 'sess-inline-variant';
+    chains['variant-agent'] = [
+      'anthropic/primary-model',
+      'openai/fallback-model#high',
+    ];
+    mgr.registerSessionAgent(sessionID, 'variant-agent');
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID,
+          providerID: 'anthropic',
+          modelID: 'primary-model',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID,
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          model: {
+            providerID: 'openai',
+            modelID: 'fallback-model',
+            variant: 'high',
+          },
+        }),
+      }),
+    );
+  });
+
+  test('rejects a providerless fallback before host lifecycle calls', async () => {
+    const sessionID = 'sess-providerless-fallback';
+    chains['providerless-agent'] = [
+      'anthropic/primary-model',
+      'fallback-model#high',
+    ];
+    mgr.registerSessionAgent(sessionID, 'providerless-agent');
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID,
+          providerID: 'anthropic',
+          modelID: 'primary-model',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID,
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(mocks.messages).not.toHaveBeenCalled();
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+  });
 
   test('triggers fallback on unavailable provider channel session.error', async () => {
     await mgr.handleEvent({

@@ -436,26 +436,196 @@ describe('ZellijMultiplexer', () => {
     }
   });
 
-  test('viewer "mini" runs opencode mini and pins the pane directory', async () => {
+  test('viewerSurface mini sets the new-pane cwd for v2-shared', async () => {
     const { ZellijMultiplexer } = await importFreshZellij();
     const zellij = new ZellijMultiplexer('main-vertical', 60);
 
-    await zellij.spawnPane(
-      'session-mini',
+    const result = await zellij.spawnPane(
+      'session-1',
       'Mini worker',
       'http://localhost:4096',
       '/repo',
       { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
     );
 
-    const args = newPaneCommands()[0] ?? [];
-    // Mini commands omit the directory, so the pane pins it with `--cwd`.
-    const cwdIndex = args.indexOf('--cwd');
-    expect(cwdIndex).toBeGreaterThan(-1);
-    expect(args[cwdIndex + 1]).toBe('/repo');
-    const cmd = args.at(-1) ?? '';
-    expect(cmd).toContain("opencode mini --session 'session-mini'");
-    expect(cmd).not.toContain('/repo');
+    expect(result).toEqual({ success: true, paneId: 'terminal_2' });
+
+    // `opencode mini` carries no directory, so the pane cwd is the only way
+    // the project is selected. `--cwd` sits with the other new-pane flags,
+    // before the `--` separator that precedes `sh -lc <cmd>`.
+    expect(newPaneCommands()[0]).toEqual([
+      '/usr/bin/zellij',
+      '--session',
+      SESSION_NAME,
+      'action',
+      'new-pane',
+      '--tab-id',
+      '0',
+      '--direction',
+      'right',
+      '--name',
+      'Mini worker',
+      '--close-on-exit',
+      '--cwd',
+      '/repo',
+      '--',
+      'sh',
+      '-lc',
+      "opencode mini --session 'session-1'",
+    ]);
+  });
+
+  test('viewerSurface mini keeps the v2-remote server flag and never the secret', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'linux',
+      configurable: true,
+    });
+    try {
+      const { ZellijMultiplexer } = await importFreshZellij();
+      const zellij = new ZellijMultiplexer('main-vertical', 60);
+
+      await zellij.spawnPane(
+        'session-1',
+        'Mini remote worker',
+        'http://localhost:4096',
+        '/repo',
+        {
+          viewerFlavor: 'v2-remote',
+          viewerSurface: 'mini',
+          viewerPassword: 'pw-9',
+        },
+      );
+
+      const newPane = newPaneCommands()[0];
+      const cwdIndex = newPane.indexOf('--cwd');
+      expect(cwdIndex).toBeGreaterThan(-1);
+      expect(newPane[cwdIndex + 1]).toBe('/repo');
+      // Placed with the other new-pane flags, not in the command part.
+      expect(cwdIndex).toBeLessThan(newPane.indexOf('--'));
+
+      const remote = newPane.at(-1) ?? '';
+      expect(remote).toContain(
+        "opencode mini --server 'http://localhost:4096' --session 'session-1'",
+      );
+      expect(remote).not.toContain('attach');
+      // The secret still travels only through the parent-environ bridge.
+      expect(newPane.filter((arg) => arg.includes('pw-9'))).toEqual([]);
+      expect(remote).toContain(`/proc/${process.pid}/environ`);
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: originalPlatform,
+        configurable: true,
+      });
+    }
+  });
+
+  test('viewerSurface mini keeps the v1 attach form and gains no pane cwd', async () => {
+    const { ZellijMultiplexer } = await importFreshZellij();
+    const zellij = new ZellijMultiplexer('main-vertical', 60);
+
+    await zellij.spawnPane(
+      'session-1',
+      'Mini attach worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v1', viewerSurface: 'mini' },
+    );
+
+    // v1 keeps `--dir` on the command line, so the pane cwd is not needed and
+    // must stay unset.
+    const newPane = newPaneCommands()[0];
+    expect(newPane).not.toContain('--cwd');
+    expect(newPane.at(-1)).toBe(
+      "opencode attach 'http://localhost:4096' --session 'session-1' " +
+        "--dir '/repo' --mini",
+    );
+  });
+
+  test('viewerSurface tui is byte-identical to omitting it for every flavor', async () => {
+    const { ZellijMultiplexer } = await importFreshZellij();
+    const flavors = ['v1', 'v2-shared', 'v2-remote'] as const;
+
+    for (const flavor of flavors) {
+      crossSpawnMock.mockReset();
+      mockStandardImpl('0.44.3');
+      const zellij = new ZellijMultiplexer('main-vertical', 60);
+
+      await zellij.spawnPane(
+        'session-1',
+        'A',
+        'http://localhost:4096',
+        '/repo',
+        { viewerFlavor: flavor },
+      );
+      const omitted = newPaneCommands()[0];
+
+      crossSpawnMock.mockClear();
+      await zellij.spawnPane(
+        'session-1',
+        'A',
+        'http://localhost:4096',
+        '/repo',
+        { viewerFlavor: flavor, viewerSurface: 'tui' },
+      );
+      const explicit = newPaneCommands()[0];
+
+      // Same inputs, so any difference is attributable to `viewerSurface` alone.
+      expect(explicit).toEqual(omitted);
+      expect(explicit).not.toContain('--cwd');
+    }
+  });
+
+  test('the direction fallback repeats the pane cwd on both attempts', async () => {
+    const { ZellijMultiplexer } = await importFreshZellij();
+    const zellij = new ZellijMultiplexer('main-vertical', 60);
+    let newPaneCalls = 0;
+
+    crossSpawnMock.mockImplementation((command: string[]) => {
+      if (command[0] === 'which' || command[0] === 'where') {
+        return createSpawnResult(0, '/usr/bin/zellij\n');
+      }
+      if (command.includes('--version')) {
+        return createSpawnResult(0, 'zellij 0.44.3\n');
+      }
+      if (command.includes('list-panes')) {
+        return createSpawnResult(0, createPaneListJson());
+      }
+      if (command.includes('new-pane')) {
+        newPaneCalls++;
+        if (newPaneCalls === 1) {
+          // Zellij drops the split silently: exit 0, no terminal_ id.
+          return createSpawnResult(0, '');
+        }
+        return createSpawnResult(0, 'terminal_2\n');
+      }
+      return createSpawnResult();
+    });
+
+    const result = await zellij.spawnPane(
+      'session-1',
+      'Mini worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+    );
+
+    expect(result).toEqual({ success: true, paneId: 'terminal_2' });
+
+    const newPaneCmds = newPaneCommands();
+    expect(newPaneCmds).toHaveLength(2);
+    expect(newPaneCmds[0]).toContain('--direction');
+    expect(newPaneCmds[1]).not.toContain('--direction');
+    for (const command of newPaneCmds) {
+      const cwdIndex = command.indexOf('--cwd');
+      expect(cwdIndex).toBeGreaterThan(-1);
+      expect(command[cwdIndex + 1]).toBe('/repo');
+    }
+    // Identical apart from the dropped direction hint: the retry still needs
+    // the pane cwd or the viewer would lose its project.
+    expect(
+      newPaneCmds[0].filter((arg) => arg !== '--direction' && arg !== 'right'),
+    ).toEqual(newPaneCmds[1]);
   });
 
   test('fails closed with one diagnostic when the password bridge cannot run (non-Linux)', async () => {

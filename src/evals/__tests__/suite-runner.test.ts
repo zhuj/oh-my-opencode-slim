@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { withTmpDir } from '../../test-utils';
 import type { collectSuite } from '../../cli/auto-collect';
 import type { EvalSessionClient } from '../eval-client';
 import { type EvalSuiteResult, EvalSuiteSchema } from '../schema';
@@ -165,8 +166,7 @@ describe('suite-runner', () => {
   });
 
   test('saved outputs are loaded and scored without git mutations or a client', async () => {
-    const dir = mkdtempSync('/tmp/opencode/eval-offline-');
-    try {
+    await withTmpDir(async (dir) => {
       const path = join(dir, 'outputs.json');
       writeFileSync(path, JSON.stringify({ 'test-1': 'hello from file' }));
       const deps = dependencies();
@@ -182,8 +182,6 @@ describe('suite-runner', () => {
       expect(deps.stashChanges).not.toHaveBeenCalled();
       expect(deps.restoreAfterEvals).not.toHaveBeenCalled();
       expect(deps.collectSuite).not.toHaveBeenCalled();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 });

@@ -2,6 +2,10 @@
 
 Built-in tools available to agents beyond the standard file and shell operations.
 
+`current_datetime` returns the current date and time. Its optional `format`
+argument defaults to `YYYYMMDD-HHmm`; supported tokens are `YYYY`, `MM`, `DD`,
+`HH`, `mm`, and `ss`. Set `utc` to `true` for UTC instead of local time.
+
 ## apply_patch rescue
 
 Slim only intercepts `apply_patch` before the native tool runs. It rewrites recoverable stale patches, canonizes safe tolerant matches against the real file when unicode/trim drift is the only mismatch, keeps the authored `new_lines` bytes intact, preserves the existing file EOL/final-newline state for updates, validates malformed patches strictly before helper execution, uses a conservative bounded LCS fallback, accumulates helper state when the same path appears in multiple `Update File` hunks, blocks `apply_patch` before native execution if any patch path falls outside the allowed root/worktree, and fails on ambiguity instead of guessing. It does not rewrite `edit` or `write` inputs. Disable with `disabled_hooks: ["apply-patch"]` (see [Hooks](configuration.md#hooks)).
@@ -82,20 +86,29 @@ conservatively passes the path through. Disable with
 | `task` | Start a specialist task and return its task ID |
 | `task_status` | Check task status; `result: true` retrieves a completed result; `diagnostic: true` reads an unsuccessful child's partial excerpt |
 | `task_message` | Send a non-interrupting message and return `queued` (queue-only: no wake, no steer channel) |
+| `task_list` | List parent-owned retained tasks, optionally filtered by stored status |
+| `task_queue_list` | Inspect parent-owned admission records and queue positions |
+| `task_queue_manage` | Manage parent-owned queued admissions and scheduler controls |
+| `task_wait` | Orchestrator-only notification-based wait for successful task completion |
+| `task_dependency_tree` | Inspect bounded prerequisite trees, statuses, blockers, and cycle diagnostics |
 | `task_cancel` | Stop a generation while retaining its session |
 | `task_revive` | Resume a retained session with a new instruction (v1 only; on v2 continue with `subagent(sessionID, prompt)`) |
 | `wait_for_user` | Pause automatic orchestrator wake prompts until the next distinct external user message (v1 only; not registered on v2 — use the native `question` tool there) |
 
-The task controls use the task ID or its parent-scoped alias for the task being
-managed. `task_status` with an unknown or placeholder ID enumerates the
-session's recent task handles, including recently finished sessions, so a
-handle lost to compaction is recoverable from the error itself. `task_message` does not interrupt the current generation. `task_cancel`
+The controls accept a native task/session ID or its parent-scoped Board alias.
+`task_status` with an unknown or placeholder ID enumerates recent task handles,
+including recently finished sessions, so a handle lost to compaction is
+recoverable from the error itself. Queue, dependency, wait, and retained-list
+tools use their separate schemas described below. `task_message` does not
+interrupt the current generation; on v2 it queues without waking or steering the
+child. `task_cancel`
 stops the generation but retains its session; it does not roll back partial edits.
 After cancelling a write-capable task, inspect and reconcile file changes before
 launching replacement work.
 
-`task_cancel` and `task_revive` admit managed parent sessions, including Build
-and custom primary agents that have delegated work. Host tool permissions still
+`task_cancel` and v1 `task_revive` admit managed parent sessions, including Build
+and custom primary agents that have delegated work. V2 retained sessions resume
+through native `subagent(sessionID, prompt)` instead. Host tool permissions still
 apply, and a parent can only control its own children. Switching primary agents
 does not transfer child ownership. Completed results are surfaced and
 acknowledged for reuse regardless of the parent's agent name.
@@ -153,14 +166,14 @@ tool calls are not individually interleavable. Host errors are not retried
 with weaker semantics. A pending write still retains
 its message lease after timeout; this change does not alter that quarantine.
 
-`task_revive` resumes a retained session with a new instruction. A cancelled,
+On v1, `task_revive` resumes a retained session with a new instruction. A cancelled,
 errored, or stopped retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
 job-board consumption and reusable-pool display, not same-session revival.
 On v1 a confirmed parent fallback routes that child's next prompt, like a
 `task_id` resume; with explicit model inheritance it follows the parent's live
 model, whether selected by fallback or a manual change. V2 retains the session
-model. A failed send may leave the v1
+model for native `subagent(sessionID, prompt)` resumes. A failed send may leave the v1
 intention pending until claimed or evicted by the
 bounded FIFO.
 For existing tracked sessions, baseline capture has a 5-second deadline: expiry fails without sending a prompt
@@ -317,15 +330,19 @@ persisted terminal result is returned on the first revive attempt without
 sending a prompt; its suppression tombstone is cleared, not its deletion
 epoch. A later attempt can continue that same child.
 
-Revive checks for an idle-verification mechanism before aborting an active child:
-the live status map on v1, or the host's idle wait on v2. Missing capability fails
-before abort, baseline capture, or prompt; retrying cannot supply that capability.
-The v2 wait has a 5-second local budget. Timeout, rejection, invalid completion,
-or completion processed after the deadline sends no prompt and releases the
-preparation lease. A late settlement does not resume the finished revive flow.
-Waiting is not an instantaneous snapshot: it may wait for a busy child to idle,
-and cannot prevent an independent resume after verification. The final board
-ownership/activity guard and queued delivery remain in force.
+For already-tracked sessions, `task_revive` requires an idle-verification
+mechanism before beginning revival. The untracked v2 adoption path above has a
+separate queued-input contract.
+If the host exposes `session.status`, it verifies against the live status map;
+otherwise, it uses `waitForSessionIdle` when available. Hosts exposing neither
+fail closed before abort, baseline capture, or prompt; retrying cannot supply
+that capability. The `waitForSessionIdle` path has a 5-second local budget.
+Timeout, rejection, invalid completion, or completion processed after the
+deadline sends no prompt and releases the preparation lease. A late settlement
+does not resume the finished revive flow. Waiting is not an instantaneous
+snapshot: it may wait for a busy child to idle, and cannot prevent an independent
+resume after verification. The final board ownership/activity guard and queued
+delivery remain in force.
 
 An accepted revive can return `status: started` with `status_uncertain: true` and
 an observation diagnostic. A historical or unattributable `session.get` outcome
@@ -334,6 +351,49 @@ admission boundary (not its delayed ACK), the current observation attempt and
 the latest live activity. Uncertainty alone never becomes terminal on retry
 exhaustion; existing events/probes and independent valid evidence can resolve it,
 but there is no guaranteed recovery deadline.
+
+`task_list` reads retained job-board records for the calling session only; it
+does not query live host status or change tasks. Optional `statuses` accepts
+`running`, `completed`, `error`, `cancelled`, `stopped`, and `reconciled`.
+Omit it to include all states; an empty array matches none. Results follow
+launch-time order, with `offset`/`limit` pagination (default 50, maximum 100),
+ISO timestamps, and descriptions capped at 500 characters. Result payloads
+are omitted; use `task_status` with `result: true` to retrieve completed text.
+
+`task_queue_list` returns bounded JSON for the calling orchestrator's admission
+records, including lifecycle state, model/provider, parent/current/previous
+session associations, runnable queue position, timestamps, and one bounded live
+host-status observation where available. Filters and offset/limit pagination
+keep inspection deterministic and bounded.
+
+`task_queue_manage` postpones, resumes, cancels, or clears only queued or
+postponed admissions owned by the calling parent session. Parent-scoped
+admission pause skips that parent's queued work without blocking other
+orchestrators. Starting and running admissions are rejected without host-session
+interruption. Concurrency limit changes are directory-global, require
+`confirm_global: true`, and never preempt already active work.
+
+Dependency actions `set_dependencies`, `add_dependency`, `remove_dependency`,
+and `clear_dependencies` validate parent ownership and cycles atomically before
+updating queued/postponed admissions. `task_queue_list` exposes logical `id`,
+`admission_id`, canonical `depends_on` edges, and dependency failure details.
+`task_wait({ ids: [...] })` blocks the current orchestrator until all requested
+logical/admission IDs complete; unknown IDs, errors, and cancellations fail
+immediately. See [dependency examples](background-orchestration.md#scheduler-enforced-dependencies).
+
+`task_dependency_tree({ ids: [...], max_depth: n })` expands the requested
+parent-owned tasks toward their prerequisites up to the inclusive depth. Each
+returned task includes its logical ID, admission ID, native session ID when
+known, lifecycle status, direct dependencies, and current blockers. The result
+also reports truncated IDs and cycle diagnostics without recursing indefinitely.
+Dependency inputs are capped at 256 entries; waits at 128 IDs. Tree inspection
+accepts 1–32 roots and integer depth 0–64, with 128 expanded nodes, 512 examined
+edges, and 65,536 UTF-8 response bytes. Output remains valid JSON and reports
+`truncation_reasons` (`depth`, `nodes`, `edges`, `bytes`, `missing`), separate
+`missing_dependency_ids`, traversal counts, and byte-omitted task counts.
+Root ordering cannot affect minimum discovered depths or truncation. Display
+samples never weaken scheduler readiness. See the
+[full bounded inspection contract](background-orchestration.md#scheduler-enforced-dependencies).
 
 `wait_for_user` is also orchestrator-only (and v1-only; it is not registered on
 v2). The orchestrator uses it as the final
@@ -371,8 +431,11 @@ calls cannot inflate it before their results are known.
 
 Exempt from the entire guard: the task-control and wait tools (`task`,
 `task_status`, `task_cancel`, `task_message`, `task_revive`,
-`wait_for_user`, `wait_for_background_tasks`) — those legitimately re-issue
-identical calls while polling a long-running background task.
+`task_wait`, `task_queue_manage`, `wait_for_user`, `wait_for_background_tasks`).
+Read-only `task_queue_list` and `task_dependency_tree` observations remain
+warn-only guarded when both arguments and results repeat; changed results or an
+intervening lifecycle action reset that observation run. Prefer completion
+notifications to polling.
 
 Disable with `disabled_hooks: ["tool-loop-guard"]` (see
 [Hooks](configuration.md#hooks)).

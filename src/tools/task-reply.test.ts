@@ -7,6 +7,7 @@ import {
   noteChildInputWait,
   resetChildInputWaitForTests,
 } from '../hooks/task-session-manager/child-input-wait';
+import { testSnapshotStore } from '../hooks/task-session-manager/test-snapshot-store';
 import { resetUserWaitGateForTests } from '../hooks/task-session-manager/user-wait-gate';
 import { BackgroundJobBoard } from '../utils/background-job-board';
 import { createBackgroundJobTerminalGate } from '../utils/background-job-terminal-gate';
@@ -95,6 +96,7 @@ function createInputWaitHook(board: BackgroundJobBoard) {
       maxSessionsPerAgent: 2,
       maxRetainedSnapshots: 20,
       backgroundJobBoard: board,
+      backgroundJobSnapshotStore: testSnapshotStore,
       shouldManageSession: (sessionID: string) => sessionID === 'parent-1',
       idleReconcileDelayMs: 0,
       runtimeStatusReconcileDelayMs: 0,
@@ -1307,9 +1309,7 @@ describe('task_reply v2 event transport integration', () => {
       });
       expect(getChildInputWait('ses_child1', 'per_1')).toBeUndefined();
     } finally {
-      await hook.event({
-        event: { type: 'server.instance.disposed' },
-      } as never);
+      await hook.event({ event: { type: 'server.instance.disposed' } });
     }
   });
 
@@ -1559,9 +1559,8 @@ describe('task_reply v2 event transport integration', () => {
       );
       expect(getChildInputWait('ses_child1', 'form_1')).not.toBeUndefined();
     } finally {
-      await hook.event({
-        event: { type: 'server.instance.disposed' },
-      } as never);
+      await hook.event({ event: { type: 'server.instance.disposed' } });
+      clearChildInputWait('ses_child1', 'form_1');
     }
   });
 });

@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const tempDirs: string[] = [];
+import { createTmpDir, removeTmpDir } from '../../test-utils';
+
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 
 afterEach(() => {
@@ -13,17 +14,7 @@ afterEach(() => {
   } else {
     process.env.XDG_CACHE_HOME = originalXdgCacheHome;
   }
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop();
-    if (dir) fs.rmSync(dir, { recursive: true, force: true });
-  }
 });
-
-function createTempRoot(): string {
-  const root = fs.mkdtempSync(join(tmpdir(), 'omo-cache-'));
-  tempDirs.push(root);
-  return root;
-}
 
 // Compare paths without caring about the platform separator.
 const normalizeSlashes = (value: string): string => value.replace(/\\/g, '/');
@@ -45,6 +36,13 @@ mock.module('../../cli/config-manager', () => ({
 let importCounter = 0;
 
 describe('auto-update-checker/cache', () => {
+  const tmpDirs = new Set<string>();
+
+  afterEach(() => {
+    for (const root of tmpDirs) removeTmpDir(root);
+    tmpDirs.clear();
+  });
+
   describe('resolveInstallContext', () => {
     test('detects OpenCode packages install root from runtime package path', async () => {
       const wrapperDir =
@@ -243,7 +241,8 @@ describe('auto-update-checker/cache', () => {
     function createPrepared(root: string, version: string) {
       const parent = join(root, 'packages');
       fs.mkdirSync(parent, { recursive: true });
-      const stagingDir = fs.mkdtempSync(join(parent, '.staging-'));
+      const stagingDir = join(parent, '.staging-test');
+      fs.mkdirSync(stagingDir);
       return {
         stagingDir,
         targetDir: join(parent, `oh-my-opencode-slim@${version}`),
@@ -251,7 +250,7 @@ describe('auto-update-checker/cache', () => {
     }
 
     test('publishes a verified staged package atomically', async () => {
-      const root = createTempRoot();
+      const root = createTrackedTmpDir(tmpDirs);
       const prepared = createPrepared(root, '1.2.4');
       createPackage(prepared.stagingDir, '1.2.4');
       const { publishPackageUpdate } = await import(
@@ -263,11 +262,10 @@ describe('auto-update-checker/cache', () => {
       expect(fs.existsSync(join(prepared.targetDir, 'node_modules'))).toBe(
         true,
       );
-      fs.rmSync(root, { recursive: true, force: true });
     });
 
     test('cleans staging when a valid concurrent target already exists', async () => {
-      const root = createTempRoot();
+      const root = createTrackedTmpDir(tmpDirs);
       const prepared = createPrepared(root, '1.2.4');
       createPackage(prepared.stagingDir, '1.2.4');
       createPackage(prepared.targetDir, '1.2.4');
@@ -282,11 +280,10 @@ describe('auto-update-checker/cache', () => {
           .readdirSync(join(root, 'packages'))
           .some((name) => name.includes('invalid-')),
       ).toBe(false);
-      fs.rmSync(root, { recursive: true, force: true });
     });
 
     test('replaces an invalid target and removes its quarantine', async () => {
-      const root = createTempRoot();
+      const root = createTrackedTmpDir(tmpDirs);
       const prepared = createPrepared(root, '1.2.4');
       createPackage(prepared.stagingDir, '1.2.4');
       fs.mkdirSync(prepared.targetDir, { recursive: true });
@@ -302,11 +299,10 @@ describe('auto-update-checker/cache', () => {
           .some((name) => name.includes('invalid-')),
       ).toBe(false);
       expect(fs.existsSync(prepared.stagingDir)).toBe(false);
-      fs.rmSync(root, { recursive: true, force: true });
     });
 
     test('removes an unverifiable freshly published target and staging', async () => {
-      const root = createTempRoot();
+      const root = createTrackedTmpDir(tmpDirs);
       const prepared = createPrepared(root, '1.2.4');
       createPackage(prepared.stagingDir, '1.2.3');
       const { publishPackageUpdate } = await import(
@@ -316,11 +312,10 @@ describe('auto-update-checker/cache', () => {
       expect(publishPackageUpdate(prepared, '1.2.4')).toBeNull();
       expect(fs.existsSync(prepared.targetDir)).toBe(false);
       expect(fs.existsSync(prepared.stagingDir)).toBe(false);
-      fs.rmSync(root, { recursive: true, force: true });
     });
 
     test('restores the prior usable target when replacement verification fails', async () => {
-      const root = createTempRoot();
+      const root = createTrackedTmpDir(tmpDirs);
       const prepared = createPrepared(root, '1.2.4');
       createPackage(prepared.targetDir, '1.2.3');
       createPackage(prepared.stagingDir, '1.2.3');
@@ -348,13 +343,12 @@ describe('auto-update-checker/cache', () => {
           .readdirSync(join(root, 'packages'))
           .some((name) => name.includes('invalid-')),
       ).toBe(false);
-      fs.rmSync(root, { recursive: true, force: true });
     });
   });
 
   describe('acquirePackageUpdateLock', () => {
     test('creates and releases a hidden lock dir next to the target install dir', async () => {
-      const root = createTempRoot();
+      const root = createTrackedTmpDir(tmpDirs);
       const targetDir = join(root, 'packages', 'oh-my-opencode-slim@1.2.4');
       const lockDir = `${join(
         root,
@@ -370,11 +364,10 @@ describe('auto-update-checker/cache', () => {
       expect(fs.existsSync(lockDir)).toBe(true);
       release?.();
       expect(fs.existsSync(lockDir)).toBe(false);
-      fs.rmSync(root, { recursive: true, force: true });
     });
 
     test('returns null when a live process holds the lock', async () => {
-      const root = createTempRoot();
+      const root = createTrackedTmpDir(tmpDirs);
       const targetDir = join(root, 'packages', 'oh-my-opencode-slim@1.2.4');
       const lockDir = `${join(
         root,
@@ -389,7 +382,12 @@ describe('auto-update-checker/cache', () => {
 
       // Small timeout override keeps the retry loop bounded.
       expect(await acquirePackageUpdateLock(targetDir, 50)).toBeNull();
-      fs.rmSync(root, { recursive: true, force: true });
     });
   });
 });
+
+function createTrackedTmpDir(tmpDirs: Set<string>): string {
+  const root = createTmpDir();
+  tmpDirs.add(root);
+  return root;
+}

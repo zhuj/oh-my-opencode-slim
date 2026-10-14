@@ -31,6 +31,7 @@ import {
   killAllRunningSubagents,
   killAllSummaryMessage,
 } from '../tui-kill';
+import { createV2QueueController } from '../tui-queue-v2';
 import { readTuiSnapshot } from '../tui-state';
 import { isPluginDisabledByEnv } from '../utils/env';
 import { log } from '../utils/logger';
@@ -58,7 +59,7 @@ export interface V2KeymapCommand {
 /** A `ui.slot` render runs under the host's Keymap.Provider. */
 type V2SlotApi = (claim: {
   append: string;
-  render: () => null;
+  render: () => unknown;
 }) => (() => void) | undefined;
 
 /**
@@ -90,7 +91,7 @@ export interface V2PresetTuiContext extends V2PresetManagerContext {
         mode?: string;
         commands: V2KeymapCommand[];
       },
-    ) => void;
+    ) => { dispose?: () => void } | undefined;
   };
 }
 
@@ -355,12 +356,63 @@ const plugin = {
       log('[v2][tui] ui.slot unavailable; /preset disabled on this build');
     } else {
       try {
+        const queueController =
+          typeof ctx.keymap?.layer === 'function'
+            ? createV2QueueController({
+                getDirectory: () => ctx.location?.directory ?? process.cwd(),
+                getSessionID: () => {
+                  const route = ctx.ui.router.current();
+                  return route.type === 'session' ? route.sessionID : undefined;
+                },
+                requestRender: () => ctx.renderer.requestRender(),
+                theme: () => ({
+                  accent: ctx.theme.text.default,
+                  text: ctx.theme.text.default,
+                  textMuted: ctx.theme.text.subdued,
+                }),
+              })
+            : undefined;
+        if (queueController) {
+          const disposeQueueSlot = slotApi({
+            append: 'sidebar.content',
+            render: () => queueController.render(),
+          });
+          const queueRefreshTimer = setInterval(() => {
+            void queueController
+              .refresh()
+              .catch((error: unknown) =>
+                log('[v2][tui] queue refresh failed', String(error)),
+              );
+          }, 1_000);
+          queueRefreshTimer.unref?.();
+          disposers.push(() => {
+            clearInterval(queueRefreshTimer);
+            queueController.dispose();
+            disposeQueueSlot?.();
+          });
+        }
         const disposeSlot = slotApi({
           append: PRESET_APP_SLOT,
           render: () => {
             if (typeof ctx.keymap?.layer === 'function') {
               try {
-                ctx.keymap.layer(buildPresetLayer(ctx));
+                const layer = ctx.keymap.layer(() => ({
+                  mode: 'global',
+                  commands: [
+                    ...buildPresetLayer(ctx)().commands,
+                    ...(queueController
+                      ? [
+                          {
+                            id: 'omo.queue',
+                            ...queueController.command,
+                            run: () => void queueController.command.run(),
+                          },
+                        ]
+                      : []),
+                  ],
+                }));
+                if (layer && typeof layer.dispose === 'function')
+                  disposers.push(() => layer.dispose?.());
               } catch (err) {
                 log('[v2][tui] keymap.layer failed', String(err));
               }

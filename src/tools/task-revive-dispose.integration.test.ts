@@ -1,8 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { OhMyOpenCodeLite as plugin } from '../index';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 
 const PARENT = 'ses_parent';
 const CHILD = 'ses_child';
@@ -21,7 +19,7 @@ function deferred<T>() {
 }
 
 async function loadPlugin(session: Record<string, unknown>) {
-  const projectDir = await mkdtemp(join(tmpdir(), 'omo-revive-dispose-'));
+  const projectDir = createTmpDir('omo-revive-dispose-');
   const previous = { ...process.env };
   process.env.OPENCODE_CONFIG_DIR = projectDir;
   process.env.XDG_DATA_HOME = `${projectDir}/data`;
@@ -50,7 +48,7 @@ async function loadPlugin(session: Record<string, unknown>) {
         if (!(key in previous)) delete process.env[key];
       }
       Object.assign(process.env, previous);
-      await rm(projectDir, { recursive: true, force: true });
+      removeTmpDir(projectDir);
     },
   };
 }

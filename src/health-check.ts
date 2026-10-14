@@ -12,6 +12,30 @@
  * see https://github.com/alvinunreal/oh-my-opencode-slim/issues/894.
  */
 
+// Baseline registrations in src/index.ts, excluding conditional interview/ACP
+// tools. Marketplace tools are counted by the registry registration path.
+const BASELINE_TOOL_NAMES = new Set([
+  'task_cancel',
+  'get_session_id',
+  'current_datetime',
+  'task_message',
+  'task_revive',
+  'task_status',
+  'task_reply',
+  'task_list',
+  'task_wait',
+  'task_dependency_tree',
+  'task_queue_list',
+  'task_queue_manage',
+  'wait_for_user',
+  'webfetch',
+  'resolve_model',
+  'ast_grep_search',
+  'ast_grep_replace',
+  'marketplace_inspect',
+  'marketplace_manage',
+]);
+
 /**
  * Minimum expected registrations for a healthy plugin load.
  *
@@ -22,24 +46,9 @@
  */
 export const HEALTH_CHECK = {
   minAgents: 5,
-  // Default v1 tool set when council and ACP agents are not configured:
-  // task_cancel, task_message, task_revive, task_status,
-  // task_reply, wait_for_user, webfetch, ast_grep_search, ast_grep_replace.
-  minTools: 9,
+  minTools: BASELINE_TOOL_NAMES.size,
   minMcps: 1,
 } as const;
-
-const BASELINE_TOOL_NAMES = new Set([
-  'task_cancel',
-  'task_message',
-  'task_revive',
-  'task_status',
-  'task_reply',
-  'wait_for_user',
-  'webfetch',
-  'ast_grep_search',
-  'ast_grep_replace',
-]);
 
 /**
  * Compute the minimum tool count the health check should expect, accounting

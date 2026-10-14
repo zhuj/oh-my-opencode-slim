@@ -47,7 +47,9 @@ function harness(
   } = {},
 ) {
   const host = {
-    get: mock(async () => ({
+    get: mock(async ({ sessionID }: { sessionID: string }) => ({
+      id: sessionID,
+      parentID: 'parent',
       outcome: 'interrupted',
       agent: 'explorer',
       model: { id: 'persisted-model', providerID: 'provider', variant: 'high' },
@@ -708,7 +710,18 @@ describe('task controls through the real v2 client shim', () => {
       const h = harness({
         retainedState: 'cancelled',
         session: {
-          get: async () => ({ outcome, time: { idle } }),
+          get: async ({ sessionID }: { sessionID: string }) => ({
+            id: sessionID,
+            parentID: 'parent',
+            agent: 'explorer',
+            outcome,
+            time: { idle },
+            model: {
+              id: 'persisted-model',
+              providerID: 'provider',
+              variant: 'high',
+            },
+          }),
           context: async () => transcript,
           prompt: async () => {
             transcript = [
@@ -801,7 +814,18 @@ describe('task controls through the real v2 client shim', () => {
     let transcript: Array<Record<string, unknown>> = [baseline];
     const h = harness({
       session: {
-        get: async () => ({ outcome: 'succeeded', time: { idle: 220 } }),
+        get: async ({ sessionID }: { sessionID: string }) => ({
+          id: sessionID,
+          parentID: 'parent',
+          agent: 'explorer',
+          outcome: 'succeeded',
+          time: { idle: 220 },
+          model: {
+            id: 'persisted-model',
+            providerID: 'provider',
+            variant: 'high',
+          },
+        }),
         context: async () => transcript,
         prompt: async () => {
           transcript = [
@@ -1092,7 +1116,7 @@ describe('task controls through the real v2 client shim', () => {
       await Bun.sleep(0);
       expect(h.host.prompt).not.toHaveBeenCalled();
       expect(h.host.interrupt).not.toHaveBeenCalled();
-      expect(h.host.get).not.toHaveBeenCalled(); // Historical outcome is not authorization.
+      expect(h.host.get).toHaveBeenCalledWith({ sessionID: 'ses_child' });
       expect(h.register).not.toHaveBeenCalled();
       expect(h.board.get('ses_child')).toMatchObject({
         generation: 1,

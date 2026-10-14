@@ -7,27 +7,26 @@ import { ProviderModelIdSchema } from './model-id-schema';
 
 export type { CouncillorModelEntry };
 
+const ModelIdSchema = ProviderModelIdSchema;
 const CouncillorModelEntrySchema = z.object({
-  id: ProviderModelIdSchema,
+  id: ModelIdSchema,
   variant: z.string().optional(),
 });
 
 /**
- * A councillor's model: either a single "provider/model" string, or an
- * ordered fallback chain (array of strings and/or { id, variant } entries)
- * tried in order until one responds.
+ * A councillor's model: either one provider-qualified reference,
+ * or an ordered fallback chain of strings and/or
+ * { id, variant } entries tried until one responds.
  */
 const CouncillorModelSchema = z
   .union([
-    ProviderModelIdSchema,
-    z
-      .array(z.union([ProviderModelIdSchema, CouncillorModelEntrySchema]))
-      .min(1),
+    ModelIdSchema,
+    z.array(z.union([ModelIdSchema, CouncillorModelEntrySchema])).min(1),
   ])
   .describe(
-    'Model ID in provider/model format (e.g. "openai/gpt-6-luna"), or an ' +
-      'ordered fallback chain (array of model IDs or { id, variant } entries) ' +
-      'tried in order until one responds.',
+    `${ProviderModelIdSchema.description} May be an ordered fallback chain ` +
+      '(an array of model references or { id, variant } entries) tried in ' +
+      'order until one responds.',
   );
 
 /**

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { TuiPluginApi } from '@opencode-ai/plugin/tui';
+import { createTmpDir, removeTmpDir } from './test-utils';
 import { openPresetManager } from './tui-preset';
 import type { TuiSnapshot } from './tui-state';
 
@@ -11,7 +11,7 @@ let originalConfigDir: string | undefined;
 
 beforeEach(() => {
   originalConfigDir = process.env.OPENCODE_CONFIG_DIR;
-  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-preset-test-'));
+  tempDir = createTmpDir();
   process.env.OPENCODE_CONFIG_DIR = tempDir;
 });
 
@@ -21,7 +21,7 @@ afterEach(() => {
   } else {
     process.env.OPENCODE_CONFIG_DIR = originalConfigDir;
   }
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeTmpDir(tempDir);
 });
 
 interface MockDialogElement {

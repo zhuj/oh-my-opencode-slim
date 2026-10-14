@@ -1,7 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import {
   createMarketplaceRegistryEntry,
   createMarketplaceRegistryEntryV3,
@@ -9,6 +6,7 @@ import {
   createMarketplaceRegistryIndexV3,
   type MarketplacePackageBundle,
 } from '../marketplace-contract/index.js';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   MarketplaceCompatibilityError,
   MarketplaceRegistryIntegrityError,
@@ -138,7 +136,7 @@ describe('MarketplaceRegistryClient', () => {
           ? response(index)
           : response(v3Bundle),
     });
-    const rootDir = mkdtempSync(join(tmpdir(), 'marketplace-live-routing-'));
+    const rootDir = createTmpDir();
 
     try {
       const downloaded = await client.downloadV3('alvin/paladin');
@@ -161,7 +159,7 @@ describe('MarketplaceRegistryClient', () => {
         installed.manifest.routing.delegateWhen.map((line) => line.length),
       ).toEqual([164, 170]);
     } finally {
-      rmSync(rootDir, { recursive: true, force: true });
+      removeTmpDir(rootDir);
     }
   });
 

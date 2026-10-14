@@ -187,9 +187,9 @@ export class ZellijMultiplexer implements Multiplexer {
     // script reads the secret from this process's own /proc environ
     // (`withParentEnvPassword`). That bridge is Linux-only: anywhere else no
     // pane is created rather than exposing the secret.
+    const flavor = options?.viewerFlavor ?? 'v1';
     const needsSecretBridge =
-      options?.viewerFlavor === 'v2-remote' &&
-      options.viewerPassword !== undefined;
+      flavor === 'v2-remote' && options?.viewerPassword !== undefined;
     if (needsSecretBridge && process.platform !== 'linux') {
       logViewerSecretGateFailure('password-bridge-requires-linux');
       return { success: false, error: 'unavailable' };
@@ -204,13 +204,15 @@ export class ZellijMultiplexer implements Multiplexer {
     const opencodeCmd = needsSecretBridge
       ? withParentEnvPassword(viewerCommand)
       : viewerCommand;
+    // `opencode mini` takes no directory argument, so for the v2 flavors the
+    // pane cwd is the only way the viewer selects the project (`--cwd`). Set
+    // it for exactly that combination: a missing directory makes Zellij reject
+    // the create, and an unconditional `--cwd` would change pane placement for
+    // every existing `tui` viewer.
+    const paneCwdArgs = viewerNeedsPaneCwd(options) ? ['--cwd', directory] : [];
     // The name doubles as the pane title; the description is the FR-8
     // metadata (owner pid + child session id) and must survive intact.
     const paneName = description.replace(/"/g, '\\"');
-    // v2 mini omits the directory, so the pane pins the child session's
-    // project directory itself (`new-pane --cwd`; the adapter already gates
-    // on MIN_ZELLIJ_VERSION, which supports the flag).
-    const miniCwdArgs = viewerNeedsPaneCwd(options) ? ['--cwd', directory] : [];
     const targetTabId = await this.getParentTabId(zellij);
 
     // The parent tab is the anchor: without it there is no same-tab target,
@@ -222,7 +224,7 @@ export class ZellijMultiplexer implements Multiplexer {
       paneName,
       opencodeCmd,
       targetTabId,
-      miniCwdArgs,
+      paneCwdArgs,
     );
   }
 
@@ -234,16 +236,16 @@ export class ZellijMultiplexer implements Multiplexer {
    * code 0 but no `terminal_*` id on stdout), so a failed directed create is
    * retried without `--direction`, which lets Zellij place the pane in the
    * largest free space of the target tab. The retry keeps `--session`,
-   * `--tab-id`, `--name`, `--close-on-exit`, and the command part — only the
-   * direction hint is dropped. Two failures (or one failure with no direction
-   * configured) report `{ success: false, error: 'hard' }`.
+   * `--tab-id`, `--name`, `--close-on-exit`, `--cwd` and the command part —
+   * only the direction hint is dropped. Two failures (or one failure with no
+   * direction configured) report `{ success: false, error: 'hard' }`.
    */
   private async runNewPaneWithFallback(
     zellij: string,
     paneName: string,
     opencodeCmd: string,
     targetTabId: string,
-    miniCwdArgs: string[] = [],
+    paneCwdArgs: string[] = [],
   ): Promise<PaneResult> {
     const direction = this.directionArgs();
     const runOnce = async (directionArgs: string[]): Promise<PaneResult> => {
@@ -257,7 +259,7 @@ export class ZellijMultiplexer implements Multiplexer {
         '--name',
         paneName,
         '--close-on-exit',
-        ...miniCwdArgs,
+        ...paneCwdArgs,
         '--',
         'sh',
         '-lc',

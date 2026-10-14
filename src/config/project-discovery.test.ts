@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { preflightMarketplaceAgentActivation } from '../marketplace/activation-config';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   clearProjectPresetOnDisk,
   getAllConfiguredPresets,
@@ -42,10 +42,10 @@ describe('host-aware project discovery', () => {
 
   beforeEach(() => {
     originalEnv = { ...process.env };
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'omo-host-discovery-'));
+    root = createTmpDir();
     home = path.join(root, 'home');
     repository = path.join(home, 'repository');
-    worktree = path.join(repository, '.slim', 'worktrees', 'feature');
+    worktree = path.join(repository, '.local', '.slim', 'worktrees', 'feature');
     globalDirectory = path.join(root, 'user-config', 'opencode');
     delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
     delete process.env.OPENCODE_CONFIG_DIR;
@@ -92,7 +92,7 @@ describe('host-aware project discovery', () => {
       if (!(key in originalEnv)) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTmpDir(root);
   });
 
   test('v1 includes its Git worktree boundary but ignores layers above it', () => {

@@ -3,12 +3,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  rmSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   COMPANION_MANIFEST,
   ensureCompanionVersion,
@@ -17,22 +16,20 @@ import {
   loadCompanionManifestFromPackageRoot,
 } from './updater';
 
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `companion-updater-test-${process.pid}`,
-);
 const originalXdg = process.env.XDG_DATA_HOME;
 const originalFetch = globalThis.fetch;
 
 describe('companion updater', () => {
+  let testDir = '';
+
   beforeEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
-    process.env.XDG_DATA_HOME = TEST_DIR;
+    testDir = createTmpDir();
+    process.env.XDG_DATA_HOME = testDir;
     globalThis.fetch = originalFetch;
   });
 
   afterEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
+    removeTmpDir(testDir);
     if (originalXdg === undefined) {
       delete process.env.XDG_DATA_HOME;
     } else {
@@ -269,7 +266,7 @@ describe('companion updater', () => {
   });
 
   test('loads a companion manifest from an installed package root', () => {
-    const packageRoot = path.join(TEST_DIR, 'package');
+    const packageRoot = path.join(testDir, 'package');
     const manifestDir = path.join(packageRoot, 'src', 'companion');
     mkdirSync(manifestDir, { recursive: true });
     writeFileSync(
@@ -325,7 +322,7 @@ describe('companion updater', () => {
   });
 
   test('returns null on corrupt manifest without throwing', () => {
-    const brokenDir = path.join(TEST_DIR, 'broken-manifest');
+    const brokenDir = path.join(testDir, 'broken-manifest');
     mkdirSync(path.join(brokenDir, 'src', 'companion'), { recursive: true });
     writeFileSync(
       path.join(brokenDir, 'src', 'companion', 'companion-manifest.json'),

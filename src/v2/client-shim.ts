@@ -32,13 +32,18 @@ import {
   createInternalSyntheticMessageID,
   recordInternalAdmission,
 } from './internal-admissions';
+import {
+  createLiveModelListShim,
+  createModelListShim,
+  type V2ModelListSnapshot,
+} from './model-list-shim';
 import type { V2Context } from './types';
 
 const HISTORY_PAGE_SIZE = 100;
 const MAX_HISTORY_PAGES = 10;
 const HISTORY_READ_TIMEOUT_MS = 4_000;
 
-/** v2 model reference accepted by `ctx.generate.text`. */
+/** v2 Model.Ref shape used by the session prompt adapter. */
 export interface V2GenerateModelRef {
   id: string;
   providerID: string;
@@ -171,6 +176,15 @@ function toV1Message(m: Record<string, unknown>) {
       ...(time ? { time } : {}),
       ...(m.finish !== undefined ? { finish: m.finish } : {}),
       ...(m.error !== undefined ? { error: m.error } : {}),
+      ...(isRecord(m.tokens) ? { tokens: m.tokens } : {}),
+      ...(isRecord(m.model)
+        ? {
+            model: {
+              providerID: m.model.providerID,
+              modelID: m.model.modelID ?? m.model.id,
+            },
+          }
+        : {}),
     },
     parts: text === undefined ? contentParts : [{ type: 'text', text }],
   };
@@ -203,8 +217,8 @@ export function resetClientShimGenerationWarnings(): void {
   warnedRemoveUnavailable = false;
 }
 
-/** v1 body model (`{providerID, modelID}`) → v2 model ref
- * (`{id, providerID}`). */
+/** v1 body model (`{providerID, modelID, variant?}`) → v2 model ref
+ * (`{id, providerID, variant?}`). */
 function modelRefFromBody(body: {
   model?: {
     id?: string;
@@ -289,7 +303,21 @@ function toV1SessionInfo(
   // (succeeded|failed|interrupted); orchestrator-wake's children-driven
   // mode reads it as the terminal signal.
   if (typeof info.outcome === 'string') out.outcome = info.outcome;
-  if (isRecord(info.model)) out.model = info.model;
+  if (isRecord(info.model)) {
+    out.model = {
+      ...(typeof info.model.providerID === 'string'
+        ? { providerID: info.model.providerID }
+        : {}),
+      ...(typeof (info.model.modelID ?? info.model.id) === 'string'
+        ? { modelID: info.model.modelID ?? info.model.id }
+        : {}),
+      ...(typeof info.model.variant === 'string'
+        ? { variant: info.model.variant }
+        : {}),
+    };
+  }
+  if (isRecord(info.tokens)) out.tokens = info.tokens;
+  if (isRecord(info.summary)) out.summary = info.summary;
   if (isRecord(info.metadata)) out.metadata = info.metadata;
   // v2 carries the directory on `location` (Location.Ref); v1 had it flat.
   if (isRecord(info.location)) {
@@ -393,11 +421,22 @@ export function createSessionListShim(
   };
 }
 
-/** Build a v1-compatible input. Optional host idle-wait and one-shot generation
- * share experimental_v2; absent capabilities are never replaced with stubs. */
+/** Build a v1-compatible PluginInput from the v2 context. The optional
+ * `extras` threads probed v2 capabilities (e.g. one-shot generation)
+ * through as `experimental_v2`; when absent no `experimental_v2` key is
+ * added so the v1 pipeline stays byte-identical. The optional
+ * `modelListSnapshot` (native v2 model rows captured by
+ * `ctx.model.transform`/`ctx.provider.transform` — see model-list-shim.ts)
+ * is served as `client.model.list`; when absent no `model.list` key is
+ * added (v1 parity). When `liveList` (the host's `ctx.model.list()`) is
+ * ALSO provided, `client.model.list` prefers the fresh live snapshot at
+ * every call (resolve_model sees only configured providers/models) and
+ * falls back to the draft snapshot on live failure. */
 export function buildPluginInput(
   ctx: V2Context,
   extras?: ExperimentalV2,
+  modelListSnapshot?: V2ModelListSnapshot,
+  liveList?: () => Promise<unknown>,
 ): Record<string, unknown> {
   // Null-safe: reduced hosts may load the factory without a session domain;
   // every method then degrades honestly instead of crashing construction.
@@ -410,6 +449,12 @@ export function buildPluginInput(
     s as { form?: { reply?: (a: Record<string, unknown>) => Promise<unknown> } }
   ).form;
   const sessionFormReply = sessionForm?.reply;
+  const directory = resolveV2Directory(ctx);
+  const modelList = modelListSnapshot
+    ? liveList
+      ? createLiveModelListShim(liveList, modelListSnapshot)
+      : createModelListShim(modelListSnapshot)
+    : undefined;
   const client = {
     session: {
       // `get` is exposed only when the host provides session.get — callers
@@ -418,7 +463,12 @@ export function buildPluginInput(
       ...(s.get
         ? {
             get: async (args: Record<string, unknown>) => ({
-              data: await s.get?.({ sessionID: sessionIDOf(args) }),
+              data: toV1SessionInfo(
+                (await s.get?.({ sessionID: sessionIDOf(args) })) as Record<
+                  string,
+                  unknown
+                >,
+              ),
             }),
           }
         : {}),
@@ -913,19 +963,42 @@ export function buildPluginInput(
         });
       },
     },
+    ...(modelList ? { model: { list: modelList } } : {}),
+    ...(modelList
+      ? {
+          provider: {
+            list: async () => {
+              const result = await modelList();
+              if (!result) return undefined;
+              const providers = new Map<string, Record<string, unknown>>();
+              for (const row of result.data) {
+                let provider = providers.get(row.provider);
+                if (!provider) {
+                  provider = { id: row.provider, models: {} };
+                  providers.set(row.provider, provider);
+                }
+                (provider.models as Record<string, unknown>)[row.id] = {
+                  id: row.id,
+                  limit: row.limit,
+                };
+              }
+              return { data: { all: [...providers.values()] } };
+            },
+          },
+        }
+      : {}),
   };
 
-  const directory = resolveV2Directory(ctx);
   const wait = typeof s.wait === 'function' ? s.wait.bind(s) : undefined;
   return {
     client,
     hostFlavor: 'v2',
     project: {
       id: ctx.location?.project?.id ?? 'global',
-      directory,
+      directory: ctx.location?.project?.directory ?? directory,
     },
     directory,
-    worktree: directory,
+    worktree: ctx.location?.project?.directory,
     experimental_workspace: { register() {} },
     $: typeof Bun !== 'undefined' ? Bun.$ : undefined,
     ...(extras?.modelDomain || wait || (s.prompt && s.context)

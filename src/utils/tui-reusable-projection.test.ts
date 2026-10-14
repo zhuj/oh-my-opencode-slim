@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   getTuiStatePath,
   readTuiSnapshot,
@@ -17,7 +17,7 @@ describe('tui-reusable-projection', () => {
   let originalDataHome: string | undefined;
 
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-reusable-proj-'));
+    root = createTmpDir();
     projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     originalDataHome = process.env.XDG_DATA_HOME;
@@ -25,7 +25,7 @@ describe('tui-reusable-projection', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTmpDir(root);
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalDataHome;
   });

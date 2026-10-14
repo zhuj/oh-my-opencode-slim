@@ -10,9 +10,9 @@ import {
 } from 'bun:test';
 import * as childProcess from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import * as os from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 
 type SpawnCall = {
   file: string;
@@ -45,10 +45,7 @@ const spawnMock = mock(
   },
 );
 
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `compat-spawn-options-test-${process.pid}`,
-);
+const TEST_DIR = createTmpDir();
 const originalPlatform = process.platform;
 const originalPath = process.env.PATH;
 const originalComSpec = process.env.ComSpec;
@@ -94,7 +91,7 @@ afterEach(() => {
 });
 
 afterAll(() => {
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTmpDir(TEST_DIR);
 });
 
 describe('crossSpawn spawn options', () => {

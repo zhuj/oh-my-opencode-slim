@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import type { InterviewConfig, PluginConfig } from '../config';
 import { createDashboardManager } from '../interview/dashboard-manager';
+import { createInterviewDirectoryPath } from '../interview/document';
 import { computeInterviewMode } from '../interview/manager';
 import type { InterviewSessionRuntime } from '../interview/runtime';
 import { createInterviewServer } from '../interview/server';
@@ -204,7 +205,7 @@ export function createV2InterviewBridge(
           service.submitChat(interviewID, message),
         handleNudgeAction: (interviewID, action) =>
           service.handleNudgeAction(interviewID, action),
-        outputFolder,
+        outputFolder: createInterviewDirectoryPath(process.cwd(), outputFolder),
         port: 0,
       });
   if (server) service.setBaseUrlResolver(() => server.ensureStarted());

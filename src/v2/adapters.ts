@@ -1,7 +1,7 @@
 /**
  * Shape adapters: convert v1 plugin objects into v2 registration shapes.
  *
- * - `parseModelRef`: "provider/model" string → v2 Model.Ref.
+ * - `parseModelRef`: qualified model-reference string → v2 Model.Ref.
  * - `adaptPermissions`: v1 permission map → v2 Rule[] (with v2 permissive base +
  *   `task`→`subagent`, `bash`→`shell` mapping).
  * - `delegationVocabulary`: native per-flavor delegation tool/param names for
@@ -13,6 +13,11 @@
  */
 
 import { log } from '../utils/logger';
+import { parseModelReference } from '../utils/session';
+import {
+  assertSkillPermissionMap,
+  assertSkillRules,
+} from '../utils/skill-policy-validation';
 import type {
   ModelRef,
   V2AgentDraft,
@@ -20,19 +25,18 @@ import type {
   V2ToolDefinition,
 } from './types';
 
-/** Parse a v1 "provider/model" string into a v2 Model.Ref. */
+/** Parse `provider/model[#variant]` into a provider-qualified v2 Model.Ref. */
 export function parseModelRef(model: unknown): ModelRef | undefined {
   if (typeof model !== 'string') return undefined;
-  const slash = model.indexOf('/');
-  if (slash <= 0 || slash >= model.length - 1) {
-    // No provider separator; better to leave model undefined than guess a
-    // provider. Many configs use bare ids; these resolve via the host default.
-    return undefined;
+  const parsed = parseModelReference(model);
+  if (parsed?.providerID) {
+    return {
+      providerID: parsed.providerID,
+      id: parsed.modelID,
+      ...(parsed.variant ? { variant: parsed.variant } : {}),
+    };
   }
-  return {
-    providerID: model.slice(0, slash),
-    id: model.slice(slash + 1),
-  };
+  return undefined;
 }
 
 /** v1 lists only EXPLICIT permission entries; unlisted tools fall through to
@@ -73,6 +77,7 @@ export const TASK_V2_ACTIONS: ReadonlySet<string> = Object.freeze(
 export function adaptPermissions(
   perm: unknown,
 ): Array<{ action: string; resource: string; effect: string }> {
+  assertSkillPermissionMap(perm);
   const rules: Array<{ action: string; resource: string; effect: string }> = [
     ...V2_DEFAULT_PERMISSIONS,
   ];
@@ -179,13 +184,17 @@ export function adaptTool(
     // tool catalogs then yield `Unknown tool: <name>`. Additive field;
     // hosts that don't recognize the field ignore it.
     options: { codemode: false },
-    execute: async (input: unknown, context: unknown) => {
+    // The third argument remains an explicit per-call override seam; native
+    // promise ToolContext.signal precedes the legacy v1 ctx.abort fallback.
+    execute: async (input: unknown, context: unknown, signal?: AbortSignal) => {
       if (!execute) return { output: {} };
       const ctx = context as {
         sessionID?: string;
         messageID?: string;
         agent?: string;
         progress?: (m: unknown) => unknown;
+        signal?: AbortSignal;
+        abort?: AbortSignal;
       };
       const v1Ctx = {
         sessionID: ctx?.sessionID ?? '',
@@ -197,7 +206,9 @@ export function adaptTool(
             : 'orchestrator'),
         directory,
         worktree: directory,
-        abort: new AbortController().signal,
+        // Only the no-signal compatibility path needs an inert v1 signal.
+        abort:
+          signal ?? ctx?.signal ?? ctx?.abort ?? new AbortController().signal,
         metadata(m: unknown) {
           log('[v2][tool] metadata (no-op)', { tool: name, m });
         },
@@ -236,6 +247,8 @@ export function applyAgentToDraft(
   v1: Record<string, unknown>,
   compiledPermissions?: readonly V2PermissionRule[],
 ): void {
+  assertSkillPermissionMap(v1.permission);
+  assertSkillRules(compiledPermissions);
   const model = parseModelRef(v1.model);
   draft.update(name, (agent) => {
     agent.id = name;
@@ -246,10 +259,15 @@ export function applyAgentToDraft(
     if (typeof v1.description === 'string') agent.description = v1.description;
     if (typeof v1.prompt === 'string') agent.system = v1.prompt;
     if (model) {
+      const configuredVariant =
+        typeof v1.variant === 'string' && v1.variant.length > 0
+          ? v1.variant
+          : undefined;
+      const variant = configuredVariant ?? model.variant;
       agent.model = {
         id: model.id,
         providerID: model.providerID,
-        ...(v1.variant ? { variant: v1.variant } : {}),
+        ...(variant ? { variant } : {}),
       };
     } else {
       // Absence is meaningful: finalized registrations with no model inherit
@@ -311,6 +329,7 @@ export function snapshotNativeAgentForRegistry(
   config: Record<string, unknown>;
   permissions: V2PermissionRule[];
 } {
+  assertSkillRules(agent.permissions, 'native agent snapshot');
   const model = asRecord(agent.model);
   const request = asRecord(agent.request);
   const settings = asRecord(request?.settings);

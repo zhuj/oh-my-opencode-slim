@@ -5,6 +5,7 @@ import {
   type BackgroundTaskConcurrency,
   getBackgroundJobLifecycleLedger,
 } from '../../utils';
+import { testSnapshotStore } from './test-snapshot-store';
 
 // Route getClient back to _ctx.client so the mock ctx client is what the
 // rehydrate probe sees (same pattern as index.test.ts).
@@ -79,6 +80,7 @@ function createHook(options: {
   board: BackgroundJobBoard;
   getSession?: (input: Record<string, unknown>) => Promise<unknown>;
   getMessages?: (input: Record<string, unknown>) => Promise<unknown>;
+  hostFlavor?: 'v1' | 'v2';
   supervisor?: BackgroundJobSupervisor;
   concurrency?: BackgroundTaskConcurrency;
 }) {
@@ -91,10 +93,12 @@ function createHook(options: {
           ...(options.getMessages ? { messages: options.getMessages } : {}),
         },
       },
-      directory: '/tmp',
-      worktree: '/tmp',
+      directory: process.cwd(),
+      worktree: process.cwd(),
+      hostFlavor: options.hostFlavor ?? 'v2',
     } as never,
     {
+      backgroundJobSnapshotStore: testSnapshotStore,
       maxSessionsPerAgent: 2,
       backgroundJobBoard: options.board,
       hostOutcomeClock: 'shared-unix-ms', // The fixture shares Date.now with the gate.
@@ -154,6 +158,39 @@ describe('rehydrate session.get existence probe', () => {
     await flushProbe();
     expect(board.get('child-gone')).toBeUndefined();
     expect(board.list()).toHaveLength(0);
+  });
+
+  test('V1 tagged rejection preserves the historical task mapping', async () => {
+    const board = new BackgroundJobBoard();
+    const releaseTask = mock(() => {});
+    const hook = createHook({
+      board,
+      hostFlavor: 'v1',
+      concurrency: {
+        releaseTask,
+        restoreTask: mock(() => {}),
+      } as unknown as BackgroundTaskConcurrency,
+      getSession: mock(() =>
+        Promise.reject(
+          Object.assign(new Error('session not found'), {
+            _tag: 'Session.NotFoundError',
+          }),
+        ),
+      ),
+    });
+
+    await runTransform(hook, 'child-v1-tagged-not-found');
+    await flushProbe();
+
+    expect(board.get('child-v1-tagged-not-found')).toMatchObject({
+      state: 'running',
+    });
+    expect(
+      getBackgroundJobLifecycleLedger(board).tombstones.has(
+        'child-v1-tagged-not-found',
+      ),
+    ).toBe(false);
+    expect(releaseTask).not.toHaveBeenCalled();
   });
 
   test('a NotFound resolving after a same-ID relaunch leaves the live record alone', async () => {

@@ -683,7 +683,7 @@ bunx oh-my-opencode-slim@latest companion install
   </tr>
   <tr>
     <td><strong><a href="docs/worktrees.md">Worktrees</a></strong></td>
-    <td dir="rtl" align="right">از laneهای <code>.slim/worktrees/</code> برای coding ایزوله، موازی یا پرریسک استفاده کنید</td>
+    <td dir="rtl" align="right">از laneهای <code>.local/.slim/worktrees/</code> برای coding ایزوله، موازی یا پرریسک استفاده کنید</td>
   </tr>
   <tr>
     <td dir="rtl" align="right"><strong><a href="docs/preset-switching.md">تغییر Preset</a></strong></td>

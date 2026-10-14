@@ -34,14 +34,14 @@ import { createTaskReviveTool } from './task-revive';
 const gates: BackgroundJobTerminalGate[] = [];
 const trackers: RevivedRunTracker[] = [];
 
-function createTool(overrides?: {
+export function createTool(overrides?: {
   abort?: () => Promise<unknown>;
   status?: () => Promise<unknown>;
   /** v2 hosts expose no session.status map at all (see client-shim.ts). */
   omitStatus?: boolean;
   /** v2 wait capability injected as experimental_v2.waitForSessionIdle. */
   waitIdle?: () => Promise<void>;
-  promptAsync?: () => Promise<unknown>;
+  promptAsync?: (args: unknown) => Promise<unknown>;
   messages?: () => Promise<unknown>;
   get?: () => Promise<unknown>;
   baselineTimeoutMs?: number;
@@ -62,13 +62,23 @@ function createTool(overrides?: {
     directory: '/test/project',
     ...(overrides?.hostFlavor ? { hostFlavor: overrides.hostFlavor } : {}),
     ...(waitIdle ? { experimental_v2: { waitForSessionIdle: waitIdle } } : {}),
+    ...(overrides?.hostFlavor ? { hostFlavor: overrides.hostFlavor } : {}),
     client: {
       session: {
         abort,
         status: overrides?.omitStatus ? undefined : status,
         promptAsync,
         messages: overrides?.messages,
-        get: overrides?.get,
+        get:
+          overrides?.get ??
+          mock(async ({ path }: { path: { id: string } }) => ({
+            data: {
+              id: path.id,
+              parentID: 'parent-1',
+              agent: 'explorer',
+              time: { created: Date.now() },
+            },
+          })),
       },
     },
   } as never;
@@ -127,7 +137,7 @@ function createTool(overrides?: {
   };
 }
 
-const context = { sessionID: 'parent-1', agent: 'orchestrator' } as any;
+const context = { sessionID: 'parent-1', agent: 'orchestrator' } as never;
 
 beforeEach(() => {
   // Other suites can leave module mocks installed. Override only for this
@@ -254,6 +264,14 @@ describe('task_revive tool', () => {
     jest.useFakeTimers();
     const h = createTool({
       status: async () => ({ data: { ses_1: { type: 'busy' } } }),
+      get: async () => ({
+        data: {
+          id: 'ses_1',
+          parentID: 'parent-1',
+          agent: 'fixer',
+          time: { created: Date.now() },
+        },
+      }),
     });
     const run = h.board.registerLaunch({
       taskID: 'ses_1',
@@ -591,6 +609,234 @@ describe('task_revive tool', () => {
     ).rejects.toThrow('requires sessionID');
   });
 
+  test('passes a nested model as structured provider and model IDs', async () => {
+    const { board, promptAsync, taskRevive } = createTool();
+    acknowledgedCompleted(board);
+
+    await taskRevive.execute(
+      {
+        task_id: 'ses_1',
+        prompt: 'Continue with another model',
+        model: 'openrouter/openai/gpt-5.6-sol#high',
+      },
+      context,
+    );
+
+    expect(promptAsync).toHaveBeenCalledWith({
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
+      body: {
+        agent: 'explorer',
+        model: {
+          providerID: 'openrouter',
+          modelID: 'openai/gpt-5.6-sol',
+        },
+        parts: [{ type: 'text', text: 'Continue with another model' }],
+      },
+      delivery: 'queue',
+    });
+  });
+
+  test('passes the variant through the v2 promptAsync shim contract', async () => {
+    const { board, promptAsync, taskRevive } = createTool({ hostFlavor: 'v2' });
+    acknowledgedCompleted(board);
+
+    await taskRevive.execute(
+      {
+        task_id: 'ses_1',
+        prompt: 'Continue with another model',
+        model: 'openrouter/openai/gpt-5.6-sol#high',
+      },
+      context,
+    );
+
+    expect(promptAsync).toHaveBeenCalledWith({
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
+      body: {
+        agent: 'explorer',
+        model: {
+          providerID: 'openrouter',
+          modelID: 'openai/gpt-5.6-sol',
+          variant: 'high',
+        },
+        parts: [{ type: 'text', text: 'Continue with another model' }],
+      },
+      delivery: 'queue',
+    });
+  });
+
+  test('passes a colon-bearing model and hash variant through the v2 shim', async () => {
+    const { board, promptAsync, taskRevive } = createTool({ hostFlavor: 'v2' });
+    acknowledgedCompleted(board);
+
+    await taskRevive.execute(
+      {
+        task_id: 'ses_1',
+        prompt: 'Continue with another model',
+        model: 'openrouter/openai/gpt-5.6-sol:free#max',
+      },
+      context,
+    );
+
+    expect(promptAsync).toHaveBeenCalledWith({
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
+      body: {
+        agent: 'explorer',
+        model: {
+          providerID: 'openrouter',
+          modelID: 'openai/gpt-5.6-sol:free',
+          variant: 'max',
+        },
+        parts: [{ type: 'text', text: 'Continue with another model' }],
+      },
+      delivery: 'queue',
+    });
+  });
+
+  test('omits the hash variant from the v1 promptAsync body', async () => {
+    const { board, promptAsync, taskRevive } = createTool();
+    acknowledgedCompleted(board);
+
+    await taskRevive.execute(
+      {
+        task_id: 'ses_1',
+        prompt: 'Continue with another model',
+        model: 'openrouter/openai/gpt-5.6-sol:free#max',
+      },
+      context,
+    );
+
+    expect(promptAsync).toHaveBeenCalledWith({
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
+      body: {
+        agent: 'explorer',
+        model: {
+          providerID: 'openrouter',
+          modelID: 'openai/gpt-5.6-sol:free',
+        },
+        parts: [{ type: 'text', text: 'Continue with another model' }],
+      },
+      delivery: 'queue',
+    });
+  });
+
+  test('rejects a malformed model before cancelling or acquiring a relaunch lease', async () => {
+    const { board, abort, promptAsync, taskRevive } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+
+    await expect(
+      taskRevive.execute(
+        {
+          task_id: 'ses_1',
+          prompt: 'Continue the investigation',
+          model: 'openai/gpt-5.6-sol#',
+        },
+        context,
+      ),
+    ).rejects.toThrow('Invalid model reference');
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(promptAsync).not.toHaveBeenCalled();
+    expect(board.get('ses_1')).toMatchObject({
+      generation: 1,
+      state: 'running',
+    });
+    const lease = board.acquireRelaunchLease('ses_1', 1);
+    expect(lease).toBeDefined();
+    if (lease) board.releaseLease(lease);
+  });
+
+  test('rejects a providerless model before cancelling or acquiring a relaunch lease', async () => {
+    const { board, abort, promptAsync, taskRevive } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+
+    await expect(
+      taskRevive.execute(
+        {
+          task_id: 'ses_1',
+          prompt: 'Continue the investigation',
+          model: 'gpt-5.6-sol#high',
+        },
+        context,
+      ),
+    ).rejects.toThrow('provider is required');
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(promptAsync).not.toHaveBeenCalled();
+    expect(board.get('ses_1')).toMatchObject({
+      generation: 1,
+      state: 'running',
+    });
+    const lease = board.acquireRelaunchLease('ses_1', 1);
+    expect(lease).toBeDefined();
+    if (lease) board.releaseLease(lease);
+  });
+
+  test('rejects a providerless colon-bearing model before lifecycle side effects', async () => {
+    const { board, abort, promptAsync, taskRevive } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+
+    await expect(
+      taskRevive.execute(
+        {
+          task_id: 'ses_1',
+          prompt: 'Continue the investigation',
+          model: 'gpt-5.6-sol:high',
+        },
+        context,
+      ),
+    ).rejects.toThrow('provider is required');
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(promptAsync).not.toHaveBeenCalled();
+    expect(board.get('ses_1')).toMatchObject({
+      generation: 1,
+      state: 'running',
+    });
+  });
+
+  test('rejects a removed dollar reference before lifecycle side effects', async () => {
+    const { board, abort, promptAsync, taskRevive } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+
+    await expect(
+      taskRevive.execute(
+        {
+          task_id: 'ses_1',
+          prompt: 'Continue the investigation',
+          model: 'openrouter$openai/gpt-5.6-sol#high',
+        },
+        context,
+      ),
+    ).rejects.toThrow('Invalid model reference');
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(promptAsync).not.toHaveBeenCalled();
+    expect(board.get('ses_1')).toMatchObject({
+      generation: 1,
+      state: 'running',
+    });
+  });
+
   test('reports a fast terminal completion observed by the immediate probe', async () => {
     let board: BackgroundJobBoard;
     const tracker = {
@@ -894,7 +1140,7 @@ describe('task_revive tool', () => {
       taskRevive.execute({ task_id: 'ses_foreign', prompt: 'x' }, {
         sessionID: 'parent-2',
         agent: 'orchestrator',
-      } as any),
+      } as never),
     ).rejects.toThrow('Unknown or unowned');
     await expect(
       taskRevive.execute({ task_id: 'parent-1', prompt: 'x' }, context),

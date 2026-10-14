@@ -1,4 +1,4 @@
-import { expect, mock, test } from 'bun:test';
+import { expect, jest, mock, test } from 'bun:test';
 import { createIdleReconciler } from './idle-reconciliation';
 
 function fakeGate() {
@@ -104,7 +104,7 @@ test('deferred-error backstop renews while the fallback is in flight, then consu
   reconciler.clearAllTimers();
 });
 
-test('deferred-error backstop renewal is bounded when the fallback never leaves the window', async () => {
+test('deferred-error backstop renewal is bounded when the fallback never leaves the window', () => {
   const { gate, reconciles } = fakeGate();
   const deferred = 'rate limit exceeded';
   const reconciler = createIdleReconciler({
@@ -118,16 +118,24 @@ test('deferred-error backstop renewal is bounded when the fallback never leaves 
     consumeDeferredError: () => deferred,
   });
 
-  reconciler.scheduleDeferredErrorBackstop('child', 1, 1);
-  // Past the renewal cap (5 renewals × 2ms) the deferred error must
-  // terminalize even though the fallback still claims to be in flight.
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  expect(reconciles).toHaveLength(1);
-  expect(reconciles[0]?.signal).toEqual({
-    kind: 'session-error',
-    message: 'rate limit exceeded',
-  });
-  reconciler.clearAllTimers();
+  jest.useFakeTimers();
+  try {
+    reconciler.scheduleDeferredErrorBackstop('child', 1, 1);
+    // Five renewals defer publication; the sixth firing exhausts the cap.
+    jest.advanceTimersByTime(10);
+    expect(reconciles).toHaveLength(0);
+    jest.advanceTimersByTime(2);
+    expect(reconciles).toHaveLength(1);
+    expect(reconciles[0]?.signal).toEqual({
+      kind: 'session-error',
+      message: 'rate limit exceeded',
+    });
+    jest.advanceTimersByTime(60);
+    expect(reconciles).toHaveLength(1);
+  } finally {
+    reconciler.clearAllTimers();
+    jest.useRealTimers();
+  }
 });
 
 test('deferred-error backstop skips the publish when nothing is deferred at fire time', async () => {

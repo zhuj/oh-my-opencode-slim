@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   doctor,
   formatJsonDoctorResult,
@@ -50,7 +50,7 @@ describe('runDoctorCheck', () => {
   let originalEnv: typeof process.env;
 
   function setupTempDir(): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-test-'));
+    const dir = createTmpDir();
     return dir;
   }
 
@@ -65,7 +65,7 @@ describe('runDoctorCheck', () => {
 
   afterEach(() => {
     process.chdir(originalCwd);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
     }
@@ -603,7 +603,7 @@ describe('doctor CLI wrapper', () => {
   }
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-cli-test-'));
+    tempDir = createTmpDir();
     originalCwd = process.cwd();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
@@ -613,7 +613,7 @@ describe('doctor CLI wrapper', () => {
 
   afterEach(() => {
     process.chdir(originalCwd);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
     }

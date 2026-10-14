@@ -169,12 +169,39 @@ async function recoverRetainedSession(
   const appeared = (): RetainedRecoveryResult | undefined => {
     const row = board.get(sessionID);
     if (!row) return;
-    if (row.parentSessionID === parentSessionID) {
-      return { kind: 'existing', taskID: row.taskID };
+    if (row.parentSessionID !== parentSessionID) {
+      return refuse(
+        `Task ${sessionID} belongs to a different parent session; no prompt was sent`,
+      );
     }
-    return refuse(
-      `Task ${sessionID} belongs to a different parent session; no prompt was sent`,
-    );
+    // Fail closed: board parent is not enough; host identity and agent
+    // must agree, and unknown/conflicting evidence must block recovery.
+    if (hosted.kind === 'ok' && hosted.parentID !== parentSessionID) {
+      return refuse(
+        `Task ${sessionID} host parent mismatch; no prompt was sent`,
+      );
+    }
+    if (
+      hosted.kind === 'ok' &&
+      hosted.agent !== undefined &&
+      row.agent !== undefined &&
+      hosted.agent !== row.agent
+    ) {
+      return refuse(
+        `Task ${sessionID} agent evidence conflicts; no prompt was sent`,
+      );
+    }
+    if (
+      hosted.kind === 'ok' &&
+      hosted.agent === undefined &&
+      row.agent === undefined
+    ) {
+      // Unknown agent on both host and board: cannot authorize recovery.
+      return refuse(
+        `Task ${sessionID} agent could not be verified; no prompt was sent`,
+      );
+    }
+    return { kind: 'existing', taskID: row.taskID };
   };
   let hosted = await readHostSession(client, directory, sessionID);
   if (hosted.kind === 'ok') {
@@ -933,6 +960,7 @@ export async function recoverSubagentSessionsAtStartup(
       options.backgroundTaskConcurrency?.restoreTask(
         taskID,
         options.getModelForAgent?.(agent, parentSessionID),
+        parentSessionID,
       );
       recovered.push(taskID);
       continue;
@@ -1055,7 +1083,7 @@ function correctStartupTerminal(
     ...(state.completedAt !== undefined ? { now: state.completedAt } : {}),
   });
   if (corrected?.state !== state.state) return false;
-  options.backgroundTaskConcurrency?.releaseTask(row.taskID);
+  options.backgroundTaskConcurrency?.releaseTask(row.taskID, state.state);
   return true;
 }
 
@@ -1228,7 +1256,9 @@ async function listStartupSessions(
   }
 }
 
-function refuse(reason: string): RetainedRecoveryResult {
+function refuse(
+  reason: string,
+): Extract<RetainedRecoveryResult, { kind: 'refused' }> {
   return { kind: 'refused', reason };
 }
 
@@ -1288,53 +1318,20 @@ async function readLiveStatus(
   return { kind: 'quiescent' };
 }
 
-interface HostSession {
-  kind: 'ok';
-  parentID: string;
-  agent?: string;
-  outcome?: string;
-  createdAt?: number;
-  title?: string;
-  /** Raw session info projection; round evidence is parsed from it. */
-  hostInfo: Record<string, unknown>;
-}
-
-async function readHostSession(
-  client: PluginInput['client'],
-  directory: string,
-  sessionID: string,
-): Promise<HostSession | RetainedRecoveryResult> {
-  const session = client.session;
-  if (typeof session?.get !== 'function') {
-    return refuse(
-      `Task ${sessionID} could not be read (session.get unavailable); no prompt was sent`,
-    );
-  }
-  try {
-    const response = await session.get({
-      path: { id: sessionID },
-      query: { directory },
-    });
-    return hostSessionFromResponse(response, sessionID);
-  } catch (error) {
-    return sessionReadRefusal(sessionID, error);
-  }
-}
-
 /** Shared ownership/identity parsing for direct and bounded startup reads. */
 function hostSessionFromResponse(
   response: unknown,
   sessionID: string,
-): HostSession | RetainedRecoveryResult {
+): HostSession | ReturnType<typeof refuse> {
   const error = responseError(response);
   if (error !== undefined) return sessionReadRefusal(sessionID, error);
   const data =
     isRecord(response) && isRecord(response.data) ? response.data : undefined;
   const parentID =
     typeof data?.parentID === 'string' ? data.parentID : undefined;
-  if (data?.id !== undefined && data.id !== sessionID) {
+  if (data?.id !== sessionID) {
     return refuse(
-      `Task ${sessionID} could not be read (session ID mismatch); no prompt was sent`,
+      `Task ${sessionID} could not be read (session ID missing or mismatch); no prompt was sent`,
     );
   }
   if (!parentID) {
@@ -1360,27 +1357,7 @@ function hostSessionFromResponse(
   };
 }
 
-/** A not-found/404 is positive evidence the host session is gone
- * (`host-missing`); any other failure is a transient read problem and
- * carries no reason code, so callers never treat it as absence. */
-function sessionReadRefusal(
-  sessionID: string,
-  error: unknown,
-): RetainedRecoveryResult {
-  const text = stringifyError(error);
-  if (/not\s*found|\b404\b/i.test(text)) {
-    return {
-      kind: 'refused',
-      reason: `Task ${sessionID} was not found on the host; no prompt was sent`,
-      reasonCode: 'host-missing',
-    };
-  }
-  return refuse(
-    `Task ${sessionID} could not be read (${text}); no prompt was sent`,
-  );
-}
-
-async function readParentTranscript(
+export async function readParentTranscript(
   client: PluginInput['client'],
   directory: string,
   parentSessionID: string,
@@ -1408,115 +1385,6 @@ async function readParentTranscript(
       ))
     ? { ...transcript, page: { complete: false } }
     : transcript;
-}
-
-interface AgentDecision {
-  kind: 'ok';
-  agent: string;
-}
-
-function resolveAgent(input: {
-  sessionID: string;
-  sessionAgent?: string;
-  childTranscript: unknown;
-  parentParts: ParentTaskPart[];
-  parentSessionID: string;
-}): AgentDecision | RetainedRecoveryResult {
-  const child = latestChildUserAgent(input.childTranscript);
-  const parent = newestParentAgent(
-    input.parentParts,
-    input.parentSessionID,
-    input.sessionID,
-  );
-  if (parent === 'conflict') {
-    return refuse(
-      `Task ${input.sessionID} agent evidence conflicts; no prompt was sent`,
-    );
-  }
-  const chosen = preferNewerAgent(child, parent);
-  if (chosen === 'conflict') {
-    return refuse(
-      `Task ${input.sessionID} agent evidence conflicts; no prompt was sent`,
-    );
-  }
-  const agent = chosen?.agent ?? input.sessionAgent;
-  if (!agent) {
-    return {
-      kind: 'refused',
-      reason: `Task ${input.sessionID} agent could not be verified; no prompt was sent`,
-      reasonCode: 'agent-unavailable',
-    };
-  }
-  if (input.sessionAgent && input.sessionAgent !== agent) {
-    return refuse(
-      `Task ${input.sessionID} agent evidence conflicts; no prompt was sent`,
-    );
-  }
-  return { kind: 'ok', agent };
-}
-
-interface TimedAgent {
-  agent: string;
-  at?: number;
-}
-
-function preferNewerAgent(
-  left: TimedAgent | undefined,
-  right: TimedAgent | undefined,
-): TimedAgent | 'conflict' | undefined {
-  if (!left) return right;
-  if (!right) return left;
-  if (left.agent === right.agent) {
-    return (left.at ?? -1) >= (right.at ?? -1) ? left : right;
-  }
-  if (left.at === undefined || right.at === undefined || left.at === right.at) {
-    return 'conflict';
-  }
-  return left.at > right.at ? left : right;
-}
-
-function latestChildUserAgent(transcript: unknown): TimedAgent | undefined {
-  if (!isRecord(transcript) || !Array.isArray(transcript.data))
-    return undefined;
-  const messages: TranscriptMessage[] = transcript.data.filter(isRecord);
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    const rawInfo = message ? message.info : undefined;
-    if (!isRecord(rawInfo) || rawInfo.role !== 'user') continue;
-    const agent = typeof rawInfo.agent === 'string' ? rawInfo.agent.trim() : '';
-    if (!agent) return undefined;
-    return { agent, at: transcriptOrderKey(message) };
-  }
-  return undefined;
-}
-
-function newestParentAgent(
-  parts: ParentTaskPart[],
-  parentSessionID: string,
-  sessionID: string,
-): TimedAgent | 'conflict' | undefined {
-  let chosen: TimedAgent | undefined;
-  for (const pairing of parts) {
-    if (pairing.sessionID !== sessionID || !pairing.agent) continue;
-    if (pairing.ref && pairing.ref.parentSessionID !== parentSessionID)
-      continue;
-    if (pairing.ref && pairing.ref.agent !== pairing.agent) continue;
-    const next = { agent: pairing.agent, at: pairing.at };
-    const preferred = preferNewerAgent(chosen, next);
-    if (preferred === 'conflict') return 'conflict';
-    chosen = preferred;
-  }
-  return chosen;
-}
-
-interface ParentTaskPart {
-  sessionID: string;
-  agent?: string;
-  at?: number;
-  description?: string;
-  prompt?: string;
-  background?: boolean;
-  ref?: ChildRef;
 }
 
 function parentDelegation(
@@ -1597,7 +1465,7 @@ function parentCancelMatchesRound(
   return false;
 }
 
-function parentTaskParts(transcript: unknown): ParentTaskPart[] {
+export function parentTaskParts(transcript: unknown): ParentTaskPart[] {
   if (!isRecord(transcript) || !Array.isArray(transcript.data)) return [];
   const pairings: ParentTaskPart[] = [];
   for (const message of transcript.data) {
@@ -1713,6 +1581,91 @@ export function appendChildRefSuffix(output: string, ref: ChildRef): string {
   const existing = readAuthoritativeChildRef(output);
   if (existing) return output;
   return `${output}\n${formatChildRef(ref)}`;
+}
+
+export function appendSchedulerMetadata(
+  output: string,
+  metadata: { logicalID: string; admissionID: string },
+): string {
+  const metadataLines = `id: ${metadata.logicalID}\nadmission_id: ${metadata.admissionID}`;
+  const childRef = readAuthoritativeChildRef(output);
+  if (!childRef) return `${output}\n${metadataLines}`;
+  const markerStart = authoritativeMarkerStart(output);
+  if (markerStart === undefined) return `${output}\n${metadataLines}`;
+  const wrapper = leadingOutputTag(output);
+  if (wrapper?.name === 'subagent') {
+    const attributes = `id="${escapeAttribute(metadata.logicalID)}" admission_id="${escapeAttribute(metadata.admissionID)}"`;
+    return `${output.slice(0, wrapper.end - 1)} ${attributes}${output.slice(wrapper.end - 1)}`;
+  }
+  const payloadStart = payloadStartAfter(
+    output,
+    wrapper?.name === 'task' ? wrapper.end : 0,
+    markerStart,
+  );
+  if (payloadStart !== undefined) {
+    const separator = output[payloadStart - 1] === '\n' ? '' : '\n';
+    return `${output.slice(0, payloadStart)}${separator}${metadataLines}\n${output.slice(payloadStart)}`;
+  }
+  const close = lastOuterClose(output);
+  if (close)
+    return `${output.slice(0, close.start)}\n${metadataLines}${output.slice(close.start)}`;
+  const markerLine = lastNonEmptyLine(output);
+  if (!markerLine) return `${output}\n${metadataLines}`;
+  const markerLineStart = output.lastIndexOf(markerLine);
+  return `${output.slice(0, markerLineStart)}${metadataLines}\n${output.slice(markerLineStart)}`;
+}
+
+function leadingOutputTag(
+  output: string,
+): { name: string; end: number } | undefined {
+  const start = /^\s*</.exec(output);
+  if (!start) return undefined;
+  let quote: string | undefined;
+  for (let end = start[0].length; end < output.length; end += 1) {
+    const character = output[end];
+    if (quote) {
+      if (character === quote) quote = undefined;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === '>') {
+      const name = /^\s*<([a-z]+)/i.exec(output)?.[1]?.toLowerCase();
+      return name ? { name, end: end + 1 } : undefined;
+    } else if (character === '<') {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function payloadStartAfter(
+  output: string,
+  start: number,
+  end: number,
+): number | undefined {
+  return ['<task_result>', '<task_error>']
+    .map((opener) => output.indexOf(opener, start))
+    .filter((index) => index >= start && index < end)
+    .sort((left, right) => left - right)[0];
+}
+
+function authoritativeMarkerStart(output: string): number | undefined {
+  const close = lastOuterClose(output);
+  const marker = close
+    ? output.slice(close.end).trim()
+    : lastNonEmptyLine(output);
+  if (!marker) return undefined;
+  const start = close
+    ? output.indexOf(marker, close.end)
+    : output.lastIndexOf(marker);
+  return start < 0 ? undefined : start;
+}
+
+function escapeAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 export function readAuthoritativeChildRef(
@@ -1923,4 +1876,202 @@ export function createAliasAuthority(options: {
   }
 
   return { resolveCanonical };
+}
+export interface HostSession {
+  kind: 'ok';
+  parentID: string;
+  agent?: string;
+  outcome?: string;
+  createdAt?: number;
+  title?: string;
+  /** Raw session info projection; round evidence is parsed from it. */
+  hostInfo: Record<string, unknown>;
+}
+
+export interface AgentDecision {
+  kind: 'ok';
+  agent: string;
+}
+
+export interface TimedAgent {
+  agent: string;
+  at?: number;
+}
+
+export interface ParentTaskPart {
+  sessionID: string;
+  agent?: string;
+  at?: number;
+  description?: string;
+  prompt?: string;
+  background?: boolean;
+  ref?: {
+    parentSessionID: string;
+    agent: string;
+    alias: string;
+    sessionID: string;
+  };
+}
+
+export async function readHostSession(
+  client: PluginInput['client'],
+  directory: string,
+  sessionID: string,
+): Promise<
+  | HostSession
+  | {
+      kind: 'refused';
+      reason: string;
+      reasonCode?: 'host-missing' | 'agent-unavailable' | undefined;
+    }
+> {
+  const session = client.session;
+  if (typeof session?.get !== 'function') {
+    return {
+      kind: 'refused',
+      reason: `Task ${sessionID} could not be read (session.get unavailable); no prompt was sent`,
+    };
+  }
+  try {
+    const response = await session.get({
+      path: { id: sessionID },
+      query: { directory },
+    });
+    return hostSessionFromResponse(response, sessionID);
+  } catch (error) {
+    return sessionReadRefusal(sessionID, error);
+  }
+}
+
+/** A not-found/404 is positive evidence the host session is gone
+ * (`host-missing`); any other failure is a transient read problem and
+ * carries no reason code, so callers never treat it as absence. */
+function sessionReadRefusal(
+  sessionID: string,
+  error: unknown,
+): {
+  kind: 'refused';
+  reason: string;
+  reasonCode?: 'host-missing' | undefined;
+} {
+  const text = stringifyError(error);
+  if (/not\s*found|\b404\b/i.test(text)) {
+    return {
+      kind: 'refused',
+      reason: `Task ${sessionID} was not found on the host; no prompt was sent`,
+      reasonCode: 'host-missing',
+    };
+  }
+  return {
+    kind: 'refused',
+    reason: `Task ${sessionID} could not be read (${text}); no prompt was sent`,
+  };
+}
+
+export function resolveAgent(input: {
+  sessionID: string;
+  sessionAgent?: string;
+  childTranscript: unknown;
+  parentParts: ParentTaskPart[];
+  parentSessionID: string;
+}):
+  | AgentDecision
+  | {
+      kind: 'refused';
+      reason: string;
+      reasonCode?: 'agent-unavailable' | 'host-missing' | undefined;
+    } {
+  const child = latestChildUserAgent(input.childTranscript);
+  const parent = newestParentAgent(
+    input.parentParts,
+    input.parentSessionID,
+    input.sessionID,
+  );
+  if (parent === 'conflict') {
+    return {
+      kind: 'refused',
+      reason: `Task ${input.sessionID} agent evidence conflicts; no prompt was sent`,
+    };
+  }
+  const chosen = preferNewerAgent(child, parent);
+  if (chosen === 'conflict') {
+    return {
+      kind: 'refused',
+      reason: `Task ${input.sessionID} agent evidence conflicts; no prompt was sent`,
+    };
+  }
+  const agent = chosen?.agent ?? input.sessionAgent;
+  if (!agent) {
+    return {
+      kind: 'refused',
+      reason: `Task ${input.sessionID} agent could not be verified; no prompt was sent`,
+      reasonCode: 'agent-unavailable',
+    };
+  }
+  if (input.sessionAgent && input.sessionAgent !== agent) {
+    return {
+      kind: 'refused',
+      reason: `Task ${input.sessionID} agent evidence conflicts; no prompt was sent`,
+    };
+  }
+  return { kind: 'ok', agent };
+}
+
+function preferNewerAgent(
+  left: TimedAgent | undefined,
+  right: TimedAgent | undefined,
+): TimedAgent | 'conflict' | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return left.at && right.at
+    ? left.at > right.at
+      ? left
+      : left.at < right.at
+        ? right
+        : left.agent === right.agent
+          ? left
+          : 'conflict'
+    : left.at === undefined && right.at === undefined
+      ? left.agent === right.agent
+        ? left
+        : 'conflict'
+      : left.at !== undefined
+        ? left
+        : right;
+}
+
+function latestChildUserAgent(transcript: unknown): TimedAgent | undefined {
+  if (!isRecord(transcript) || !Array.isArray(transcript.data))
+    return undefined;
+  const messages: TranscriptMessage[] = (transcript.data as unknown[]).filter(
+    (m): m is TranscriptMessage => isRecord(m),
+  );
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const rawInfo = message ? message.info : undefined;
+    if (!isRecord(rawInfo) || rawInfo.role !== 'user') continue;
+    const agent = typeof rawInfo.agent === 'string' ? rawInfo.agent.trim() : '';
+    if (!agent) return undefined;
+    return { agent, at: transcriptOrderKey(message as TranscriptMessage) };
+  }
+  return undefined;
+}
+
+function newestParentAgent(
+  parts: ParentTaskPart[],
+  parentSessionID: string,
+  sessionID: string,
+): TimedAgent | 'conflict' | undefined {
+  let chosen: TimedAgent | undefined;
+  for (const pairing of parts) {
+    if (pairing.sessionID !== sessionID || !pairing.agent) continue;
+    if (pairing.ref && pairing.ref.parentSessionID !== parentSessionID)
+      continue;
+    if (pairing.ref && pairing.ref.agent !== pairing.agent) continue;
+    const next = { agent: pairing.agent, at: pairing.at };
+    const preferred = preferNewerAgent(chosen, next);
+    if (preferred === 'conflict') return 'conflict';
+    chosen = preferred;
+  }
+  return chosen;
 }

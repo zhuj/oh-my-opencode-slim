@@ -16,6 +16,10 @@
  * prompt-injecting consumer must go through src/hooks/cache-safe-injection.ts.
  */
 import {
+  assertSkillNames,
+  assertSkillPolicyConfig,
+} from '../utils/skill-policy-validation';
+import {
   AGENT_ALIASES,
   ALL_AGENT_NAMES,
   DEFAULT_CHILD_INPUT_WAKE_KINDS,
@@ -27,13 +31,17 @@ import {
   SUBAGENT_NAMES,
 } from './constants';
 import type { CouncilConfig } from './council-schema';
-import { resolveEffectiveAgentOverrides } from './effective-agent-overrides';
+import {
+  compileEffectiveAgentProjection,
+  type EffectiveAgentProjection,
+} from './effective-agent-overrides';
 import {
   deepMerge,
   mergeAgentOverrides,
   PresetResolutionError,
   resolvePreset,
 } from './loader';
+import { DEFAULT_RESOURCE_PREFIXES } from './project-resource-paths';
 import { discoverProjectLocalSkillNames } from './project-skills';
 import {
   type AcpAgentsConfig,
@@ -178,6 +186,7 @@ export class RuntimeConfig {
     pluginConfig: ResolvedPluginConfig,
     hostFlavor?: string,
   ): RuntimeConfig {
+    assertSkillPolicyConfig(pluginConfig);
     const existing = registry.get(directory);
     if (existing) {
       existing.hostFlavor = hostFlavor;
@@ -236,10 +245,34 @@ export class RuntimeConfig {
   private runtimePresetName: string | null = null;
   private switchedModels = new Set<string>();
   private localSkillNamesCache: readonly string[] | undefined;
+  private projectSkillPermissionNames: readonly string[] = [];
+  /** Selection, admission and authorization share inputs and invalidation. */
+  private agentProjectionCache: EffectiveAgentProjection | undefined;
+  private modelArraysCache:
+    | Record<string, Array<{ id: string; variant?: string }>>
+    | undefined;
+  private runtimeChainsCache: Record<string, string[]> | undefined;
+
+  // All three projections use only plugin/preset/skill inputs. Host overrides
+  // and model-switch flags are consumed downstream, not by these projections.
+  private invalidateAgentProjections(): void {
+    this.agentProjectionCache = undefined;
+    this.modelArraysCache = undefined;
+    this.runtimeChainsCache = undefined;
+  }
 
   private seedPlugin(pluginConfig: ResolvedPluginConfig): void {
+    assertSkillPolicyConfig(pluginConfig);
     this.pluginConfig = deepFreeze(clonePlain(pluginConfig));
     this.localSkillNamesCache = undefined;
+    this.projectSkillPermissionNames = [];
+    this.invalidateAgentProjections();
+  }
+
+  setProjectSkillPermissionNames(names: readonly string[]): void {
+    assertSkillNames(names, 'supplemental project skill names');
+    this.projectSkillPermissionNames = [...new Set(names)];
+    this.invalidateAgentProjections();
   }
 
   /**
@@ -248,6 +281,7 @@ export class RuntimeConfig {
    * post-merge state (double-application risk).
    */
   captureHostConfig(opencodeConfig: Record<string, unknown>): void {
+    assertSkillPolicyConfig(opencodeConfig, 'host configuration');
     this.hostSnapshot = clonePlain(opencodeConfig) as HostConfigSnapshot;
   }
 
@@ -270,10 +304,37 @@ export class RuntimeConfig {
    * plugin file (root agents override the config-file preset). Mirrors the
    * loader's preset merge so this is correct even when seeded with a raw
    * (not yet loader-merged) plugin config.
+   *
+   * Memoized: the projection is a pure function of the plugin layer, the active
+   * runtime preset, and the discovered + supplemental project skill names, so
+   * every one of those mutation sites drops the cache. The host layer is NOT an
+   * input here (agent()/hostAgent() merge it per call), so captureHostConfig
+   * deliberately leaves the memo intact. The result is deep-frozen because it is
+   * shared by identity across callers; consumers must copy before mutating.
    */
   agents(
-    defaultSkills: Readonly<Record<string, readonly string[]>> = {},
+    defaultSkills?: Readonly<Record<string, readonly string[]>>,
   ): Record<string, AgentOverrideConfig> {
+    return this.agentProjection(defaultSkills).agents;
+  }
+
+  /** Internal co-owned selection/admission/authorization projection. */
+  agentProjection(
+    defaultSkills?: Readonly<Record<string, readonly string[]>>,
+  ): EffectiveAgentProjection {
+    // Marketplace defaults are caller-owned and may change between calls.
+    // Do not reuse or replace the ordinary projection for this extra input.
+    if (defaultSkills !== undefined) {
+      return this.projectAgentOverrides(defaultSkills);
+    }
+    this.agentProjectionCache ??= this.projectAgentOverrides();
+    return this.agentProjectionCache;
+  }
+
+  /** Build all deep-frozen products before raw directives are discarded. */
+  private projectAgentOverrides(
+    defaultSkills: Readonly<Record<string, readonly string[]>> = {},
+  ): EffectiveAgentProjection {
     let base = mergeAgentOverrides({}, this.pluginConfig?.agents ?? {});
     const filePreset = this.pluginConfig?.preset
       ? this.resolvedPresetAgents(this.pluginConfig.preset)
@@ -285,10 +346,17 @@ export class RuntimeConfig {
     const merged = runtimePreset
       ? mergeAgentOverrides(base, runtimePreset)
       : base;
-    return resolveEffectiveAgentOverrides(
-      merged,
-      () => this.projectLocalSkillNames(),
-      defaultSkills,
+    return deepFreeze(
+      compileEffectiveAgentProjection(
+        merged,
+        () => [
+          ...new Set([
+            ...this.projectLocalSkillNames(),
+            ...this.projectSkillPermissionNames,
+          ]),
+        ],
+        { defaultSkills, disabledSkills: this.disabledSkills },
+      ),
     );
   }
 
@@ -351,6 +419,10 @@ export class RuntimeConfig {
   get disabledCommands(): ReadonlySet<string> {
     const value = this.pluginConfig?.disabled_commands;
     return new Set(Array.isArray(value) ? value : []);
+  }
+
+  get resourcePrefixes(): readonly string[] {
+    return this.pluginConfig?.resource_prefixes ?? DEFAULT_RESOURCE_PREFIXES;
   }
 
   /** Custom agent names declared in config.agents (was getCustomAgentNames). */
@@ -440,8 +512,26 @@ export class RuntimeConfig {
    * array-configured models. Was modelArrayMap in src/index.ts (built from
    * created agentDefs: disabled agents excluded, alias-aware, variants
    * preserved, plus multi-model councillor chains from council config).
+   * Memoized with agents(); returns a defensive record with frozen values.
    */
   get modelArrays(): Record<string, Array<{ id: string; variant?: string }>> {
+    // The fallback manager's caller extends this record, so only its nested
+    // values are shared. A shallow copy protects the frozen cached projection.
+    return { ...this.cachedModelArrays() };
+  }
+
+  private cachedModelArrays(): Record<
+    string,
+    Array<{ id: string; variant?: string }>
+  > {
+    this.modelArraysCache ??= this.projectModelArrays();
+    return this.modelArraysCache;
+  }
+
+  private projectModelArrays(): Record<
+    string,
+    Array<{ id: string; variant?: string }>
+  > {
     const arrays: Record<string, Array<{ id: string; variant?: string }>> = {};
     const disabled = this.disabledAgents;
     const agents = this.agents();
@@ -477,20 +567,26 @@ export class RuntimeConfig {
         arrays[agentName] = cfg.models;
       }
     }
-    return arrays;
+    return deepFreeze(arrays);
   }
 
   /**
    * Agent name → model chain (ids only), derived from modelArrays.
    * Was runtimeChains in src/index.ts (alias-aware, disabled excluded,
    * councillor chains included).
+   * Memoized with agents(); shared by identity and deep-frozen.
    */
   get runtimeChains(): Record<string, string[]> {
+    this.runtimeChainsCache ??= this.projectRuntimeChains();
+    return this.runtimeChainsCache;
+  }
+
+  private projectRuntimeChains(): Record<string, string[]> {
     const chains: Record<string, string[]> = {};
-    for (const [name, models] of Object.entries(this.modelArrays)) {
+    for (const [name, models] of Object.entries(this.cachedModelArrays())) {
       chains[name] = models.map((entry) => entry.id);
     }
-    return chains;
+    return deepFreeze(chains);
   }
 
   /**
@@ -581,6 +677,9 @@ export class RuntimeConfig {
    * guard, mirrors the previous config-hook reset branch).
    */
   setRuntimePreset(name: string | null): void {
+    // Every path below rewrites runtimePresetName (including the clear and
+    // resolve-failure branches), so the projection may change either way.
+    this.invalidateAgentProjections();
     const presets = this.pluginConfig?.presets;
     if (!name || !presets || !Object.hasOwn(presets, name)) {
       this.runtimePresetName = null;

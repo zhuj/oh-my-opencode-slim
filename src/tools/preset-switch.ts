@@ -22,6 +22,7 @@ import {
   loadRawPluginConfigFromPath,
   mergePluginConfigs,
 } from '../config/loader';
+import { isDynamicModelRef } from '../config/model-sentinel';
 import { mergePresetMaps, resolvePresetDefinition } from '../config/presets';
 import {
   isPrototypeSensitiveName,
@@ -101,6 +102,7 @@ export interface AgentUpdate {
   inheritModelFrom?: string;
   temperature?: number;
   variant?: string;
+  dynamic?: boolean;
   options?: Record<string, unknown>;
   skills?: string[];
   skills_add?: string[];
@@ -392,6 +394,10 @@ export function mapOverrideToAgentConfig(
     if (typeof first !== 'string' && first.variant) {
       agentConfig.variant = first.variant;
     }
+  } else if (isDynamicModelRef(override.model)) {
+    // Dynamic ref ({ dynamic: 'selected' }): inherit the UI-selected model.
+    // No concrete model to record; mark so the preset is not treated as empty.
+    agentConfig.dynamic = true;
   }
 
   if (typeof override.inheritModelFrom === 'string') {
@@ -473,6 +479,7 @@ export function buildPresetSummary(
     const parts: string[] = [name];
     if (cfg.model) parts.push(`model: ${cfg.model}`);
     if (cfg.inheritModelFrom) parts.push(`inherit: ${cfg.inheritModelFrom}`);
+    if (cfg.dynamic) parts.push('dynamic: inherit');
     if (cfg.variant) parts.push(`variant: ${cfg.variant}`);
     if (cfg.temperature !== undefined) parts.push(`temp: ${cfg.temperature}`);
     if (cfg.options) parts.push('options: yes');

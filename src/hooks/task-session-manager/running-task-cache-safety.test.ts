@@ -17,6 +17,7 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils';
 import { createTaskSessionManagerHook } from './index';
+import { testSnapshotStore } from './test-snapshot-store';
 
 const SESSION = 'ses_orchestrator_1114';
 const CHILD = 'ses_child_0771';
@@ -25,10 +26,11 @@ function createHook(board: BackgroundJobBoard) {
   return createTaskSessionManagerHook(
     {
       client: { session: { status: mock(async () => ({ data: {} })) } },
-      directory: '/tmp',
-      worktree: '/tmp',
+      directory: process.cwd(),
+      worktree: process.cwd(),
     } as never,
     {
+      backgroundJobSnapshotStore: testSnapshotStore,
       maxSessionsPerAgent: 4,
       backgroundJobBoard: board,
       shouldManageSession: () => true,

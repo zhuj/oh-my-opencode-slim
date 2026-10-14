@@ -10,6 +10,7 @@ import {
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { SessionLifecycle } from '../../hooks/session-lifecycle';
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 import { createTaskReviveTool } from '../../tools/task-revive';
 import {
   BackgroundJobSupervisor,
@@ -43,6 +44,7 @@ import {
   createPendingCallTracker,
   type PendingCallTracker,
 } from './pending-call-tracker';
+import { testSnapshotStore } from './test-snapshot-store';
 import { resetUserWaitGateForTests } from './user-wait-gate';
 
 // Route getClient back to _ctx.client so existing _ctx.client.session
@@ -137,6 +139,7 @@ function historicalRunningTaskPart(
 }
 
 type HookOptions = {
+  directory?: string;
   shouldManageSession?: (sessionID: string) => boolean;
   registerSessionAsOrchestrator?: (sessionID: string) => void;
   readContextMinLines?: number;
@@ -217,10 +220,11 @@ function createHook(options?: HookOptions) {
           ...options?.sessionClient,
         },
       },
-      directory: '/tmp',
-      worktree: '/tmp',
+      directory: options?.directory ?? process.cwd(),
+      worktree: options?.directory ?? process.cwd(),
     } as never,
     {
+      backgroundJobSnapshotStore: testSnapshotStore,
       maxSessionsPerAgent: 2,
       backgroundJobBoard: options?.backgroundJobBoard,
       terminalGate: options?.terminalGate,
@@ -536,8 +540,6 @@ describe('task-session-manager hook', () => {
       now: 100,
     });
 
-    // Foreground call (no background arg): the child was awaited by a
-    // synchronous task() that foreground-fallback promoted mid-flight.
     await hook['tool.execute.before'](
       { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
       {
@@ -562,6 +564,137 @@ describe('task-session-manager hook', () => {
     expect(onLaunch).toHaveBeenCalledWith(
       expect.objectContaining({ taskID: 'ses_promoted' }),
     );
+  });
+
+  test('uses an explicit model override for background admission accounting', async () => {
+    const concurrency = new BackgroundTaskConcurrency({
+      defaultConcurrency: 0,
+      providerConcurrency: {},
+      modelConcurrency: { 'openrouter/openai/gpt-5.6-sol': 1 },
+    });
+    const pendingCallTracker = createPendingCallTracker();
+    const getModelForAgent = mock(() => 'openai/configured-default');
+    const { hook } = createHook({
+      backgroundTaskConcurrency: concurrency,
+      pendingCallTracker,
+      getModelForAgent,
+    });
+    const taskArgs = (description: string) => ({
+      background: true,
+      subagent_type: 'explorer',
+      description,
+      model: 'openrouter/openai/gpt-5.6-sol#high',
+    });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { args: taskArgs('first explicit task') },
+    );
+    expect(pendingCallTracker.peekByParent('parent-1')?.model).toBe(
+      'openrouter/openai/gpt-5.6-sol',
+    );
+    const secondAdmission = hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { args: taskArgs('second explicit task') },
+    );
+    await Promise.resolve();
+
+    expect(concurrency.snapshot()).toEqual({ active: 1, queued: 1 });
+    expect(getModelForAgent).not.toHaveBeenCalled();
+
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { output: taskLaunchOutput('ses_explicit_1') },
+    );
+    concurrency.releaseTask('ses_explicit_1');
+    await secondAdmission;
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { output: taskLaunchOutput('ses_explicit_2') },
+    );
+    concurrency.releaseTask('ses_explicit_2');
+  });
+
+  test('uses the configured agent model for admission when override is omitted', async () => {
+    const concurrency = new BackgroundTaskConcurrency({
+      defaultConcurrency: 0,
+      providerConcurrency: {},
+      modelConcurrency: { 'openai/configured-default': 1 },
+    });
+    const getModelForAgent = mock(() => 'openai/configured-default');
+    const { hook } = createHook({
+      backgroundTaskConcurrency: concurrency,
+      getModelForAgent,
+    });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        args: {
+          background: true,
+          subagent_type: 'explorer',
+          description: 'first inherited task',
+        },
+      },
+    );
+    const secondAdmission = hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      {
+        args: {
+          background: true,
+          subagent_type: 'explorer',
+          description: 'second inherited task',
+        },
+      },
+    );
+    await Promise.resolve();
+
+    expect(concurrency.snapshot()).toEqual({ active: 1, queued: 1 });
+    expect(getModelForAgent).toHaveBeenCalledTimes(2);
+
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { output: taskLaunchOutput('ses_inherited_1') },
+    );
+    concurrency.releaseTask('ses_inherited_1');
+    await secondAdmission;
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { output: taskLaunchOutput('ses_inherited_2') },
+    );
+    concurrency.releaseTask('ses_inherited_2');
+  });
+
+  test('rejects malformed model before reusable task lease acquisition', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, { taskID: 'ses_reusable' });
+    board.markReconciled('ses_reusable');
+    const acquireRelaunchLease = mock(board.acquireRelaunchLease.bind(board));
+    board.acquireRelaunchLease = acquireRelaunchLease;
+    const pendingCallTracker = createPendingCallTracker();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      pendingCallTracker,
+    });
+    const output = {
+      args: {
+        background: true,
+        subagent_type: 'oracle',
+        task_id: 'ses_reusable',
+        model: 'openai/gpt-5.6-sol#',
+      },
+    };
+
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'call-invalid' },
+        output,
+      ),
+    ).rejects.toThrow('Invalid model reference');
+
+    expect(acquireRelaunchLease).not.toHaveBeenCalled();
+    expect(pendingCallTracker.take('call-invalid')).toBeUndefined();
+    expect(output.args.task_id).toBe('ses_reusable');
   });
 
   test('finishes a queued call after its manager generation is replaced', async () => {
@@ -6193,18 +6326,36 @@ describe('task-session-manager hook', () => {
     expect(resume.args.task_id).toBe('   ');
   });
 
-  test('blank task_id refusal uses the v2 parameter name', async () => {
+  test('empty task_id starts new work on v2 instead of being refused', async () => {
     const { hook } = createHook({ hostFlavor: 'v2' });
     const resume = {
       args: { subagent_type: 'fixer', task_id: '' },
     };
 
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
-        resume,
-      ),
-    ).rejects.toThrow(/empty sessionID/);
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
+      resume,
+    );
+
+    // v2 treats an empty resume id as the new-session placeholder, so the
+    // hook deletes it rather than refusing the call.
+    expect(resume.args.task_id).toBeUndefined();
+  });
+
+  test('whitespace task_id starts new work on v2 too', async () => {
+    const { hook } = createHook({ hostFlavor: 'v2' });
+    const resume = {
+      args: { subagent_type: 'fixer', task_id: '   ' },
+    };
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
+      resume,
+    );
+
+    // A padding-only resume id carries the same intent as an empty one: start
+    // new work. v2 has no refusal path for it.
+    expect(resume.args.task_id).toBeUndefined();
   });
 
   test('blank task_id with a missing agent still refuses', async () => {
@@ -6421,96 +6572,107 @@ describe('task-session-manager hook', () => {
   });
 
   test('reads before and after launch attach, path-only, recency-capped', async () => {
-    const board = new BackgroundJobBoard();
-    const { hook } = createHook({
-      backgroundJobBoard: board,
-      idleReconcileDelayMs: 0,
-    });
-    // Context entries are disk-validated before board commit: create the
-    // files the simulated reads claim to inspect.
-    mkdirSync('/tmp/src', { recursive: true });
-    for (const name of ['small.ts', 'large.ts', 'medium.ts']) {
-      writeFileSync(
-        `/tmp/src/${name}`,
-        Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n'),
+    // Keep disk-validated context paths relative to an isolated project root.
+    const dir = createTmpDir('ctx-');
+    try {
+      const board = new BackgroundJobBoard();
+      const { hook } = createHook({
+        directory: dir,
+        backgroundJobBoard: board,
+        idleReconcileDelayMs: 0,
+      });
+      // Context entries are disk-validated before board commit: create the
+      // files the simulated reads claim to inspect.
+      mkdirSync(`${dir}/src`, { recursive: true });
+      for (const name of ['small.ts', 'large.ts', 'medium.ts']) {
+        writeFileSync(
+          `${dir}/src/${name}`,
+          Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n'),
+        );
+      }
+      await hook.event({
+        event: {
+          type: 'session.created',
+          properties: { info: { id: 'child-1', parentID: 'parent-1' } },
+        },
+      });
+      for (const [file, start, count] of [
+        ['small.ts', 1, 4],
+        ['large.ts', 1, 12],
+        ['large.ts', 7, 6],
+        ['medium.ts', 1, 5],
+      ] as const) {
+        await hook['tool.execute.after'](
+          {
+            tool: 'read',
+            sessionID: 'child-1',
+            callID: `read-${file}-${start}`,
+          },
+          {
+            output: [
+              `<path>${dir}/src/${file}</path>`,
+              '<content>',
+              ...Array.from(
+                { length: count },
+                (_, index) => `${start + index}: line`,
+              ),
+              '</content>',
+            ].join('\n'),
+          },
+        );
+      }
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+        { args: { subagent_type: 'explorer', description: 'context caps' } },
       );
-    }
-    await hook.event({
-      event: {
-        type: 'session.created',
-        properties: { info: { id: 'child-1', parentID: 'parent-1' } },
-      },
-    });
-    for (const [file, start, count] of [
-      ['small.ts', 1, 4],
-      ['large.ts', 1, 12],
-      ['large.ts', 7, 6],
-      ['medium.ts', 1, 5],
-    ] as const) {
       await hook['tool.execute.after'](
-        { tool: 'read', sessionID: 'child-1', callID: `read-${file}-${start}` },
+        { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+        { output: ['task_id: child-1', 'state: running'].join('\n') },
+      );
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'status-1' },
+        { args: { subagent_type: 'explorer', description: 'context caps' } },
+      );
+      await hook['tool.execute.after'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'status-1' },
         {
           output: [
-            `<path>/tmp/src/${file}</path>`,
-            '<content>',
-            ...Array.from(
-              { length: count },
-              (_, index) => `${start + index}: line`,
-            ),
-            '</content>',
+            'task_id: child-1',
+            'state: completed',
+            '<task_result>inspected files</task_result>',
           ].join('\n'),
         },
       );
+      const messages = createMessages('parent-1', 'continue');
+      await transformMessages(hook, messages);
+      await hook.event({
+        event: {
+          type: 'session.status',
+          properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+        },
+      });
+
+      // The parent demonstrably moved past the report: the run retires.
+      await transformMessages(
+        hook,
+        createMessagesAfterAssistantTurn('parent-1', 'reuse') as never,
+      );
+
+      const next = createMessages('parent-1', 'reuse again');
+      await transformMessages(hook, next);
+      // Path-only list (ruling: no line counts, no size threshold): deduped
+      // per path, most-recent-first, capped at the internal file cap. Every
+      // read path is tracked — small files are no longer filtered.
+      const contextFiles = board.get('child-1')?.contextFiles ?? [];
+      expect(contextFiles.map((file) => file.path).sort()).toEqual([
+        'src/large.ts',
+        'src/medium.ts',
+        'src/small.ts',
+      ]);
+      expect(boardText(next)).toBeUndefined();
+    } finally {
+      removeTmpDir(dir);
     }
-    await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
-      { args: { subagent_type: 'explorer', description: 'context caps' } },
-    );
-    await hook['tool.execute.after'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
-      { output: ['task_id: child-1', 'state: running'].join('\n') },
-    );
-    await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'status-1' },
-      { args: { subagent_type: 'explorer', description: 'context caps' } },
-    );
-    await hook['tool.execute.after'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'status-1' },
-      {
-        output: [
-          'task_id: child-1',
-          'state: completed',
-          '<task_result>inspected files</task_result>',
-        ].join('\n'),
-      },
-    );
-    const messages = createMessages('parent-1', 'continue');
-    await transformMessages(hook, messages);
-    await hook.event({
-      event: {
-        type: 'session.status',
-        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
-      },
-    });
-
-    // The parent demonstrably moved past the report: the run retires.
-    await transformMessages(
-      hook,
-      createMessagesAfterAssistantTurn('parent-1', 'reuse') as never,
-    );
-
-    const next = createMessages('parent-1', 'reuse again');
-    await transformMessages(hook, next);
-    // Path-only list (ruling: no line counts, no size threshold): deduped
-    // per path, most-recent-first, capped at the internal file cap. Every
-    // read path is tracked — small files are no longer filtered.
-    const contextFiles = board.get('child-1')?.contextFiles ?? [];
-    expect(contextFiles.map((file) => file.path).sort()).toEqual([
-      'src/large.ts',
-      'src/medium.ts',
-      'src/small.ts',
-    ]);
-    expect(boardText(next)).toBeUndefined();
   });
 
   test('reusable cap evicts only old reusable jobs, not active jobs', async () => {
@@ -6594,7 +6756,7 @@ describe('task-session-manager hook', () => {
         board.registerLaunch({
           taskID,
           parentSessionID: 'parent-1',
-          agent: 'explorer',
+          agent: taskID === 'child-1' ? 'fixer' : 'explorer',
         });
         board.updateStatus({ taskID, state: 'completed' });
       }
@@ -6640,9 +6802,16 @@ describe('task-session-manager hook', () => {
       board.addTerminalStateListener(terminal);
       const { task_revive } = createTaskReviveTool({
         input: {
-          directory: '/tmp',
+          directory: process.cwd(),
           client: {
             session: {
+              get: async ({ path }: { path: { id: string } }) => ({
+                data: {
+                  id: path.id,
+                  parentID: 'parent-1',
+                  agent: 'fixer',
+                },
+              }),
               promptAsync,
               abort,
               status: async () => ({ data: {} }),

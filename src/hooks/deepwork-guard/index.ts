@@ -14,7 +14,7 @@ import { loadPluginConfig } from '../../config';
 import { log } from '../../utils/logger';
 
 const GUARD_HOOK_NAME = 'deepwork-guard';
-const DEEPWORK_DIR = '.slim/deepwork';
+const DEEPWORK_DIR = '.local/.slim/deepwork';
 const RUNTIME_DIR = '.runtime';
 const WRITE_TOOLS = new Set(['write', 'edit']);
 const MAX_CAPTURED = 256;
@@ -106,7 +106,7 @@ export function readGuardOptions(
 
 /** Resolve the deepwork task slug a write targets, or null when the write
  * is not a task-directory write: root-level files (router heads, strays),
- * `.runtime/` bookkeeping, and paths outside `.slim/deepwork/` are not
+ * `.runtime/` bookkeeping, and paths outside `.local/.slim/deepwork/` are not
  * task writes. */
 export function taskSlug(
   deepworkRoot: string,
@@ -154,17 +154,17 @@ export function recordReceipt(
   }
 }
 
-const DEEPWORK_REF = /`?(\.slim\/deepwork\/[^`\s)\]]+)`?/g;
+const DEEPWORK_REF = /`?(\.local\/\.slim\/deepwork\/[^`\s)\]]+)`?/g;
 
 /** Deepwork artifact paths the tombstone references, under its own slug. */
 export function referencedArtifacts(content: string, slug: string): string[] {
   const refs: string[] = [];
   for (const match of content.matchAll(DEEPWORK_REF)) {
-    // Strip trailing sentence punctuation: "see .slim/deepwork/t1/a.md."
+    // Strip trailing sentence punctuation: "see .local/.slim/deepwork/t1/a.md."
     // must match the receipted path, which carries no punctuation.
     const ref = match[1]?.replace(/[.,;:!?]+$/, '');
     if (
-      ref?.startsWith(`.slim/deepwork/${slug}/`) &&
+      ref?.startsWith(`.local/.slim/deepwork/${slug}/`) &&
       !ref.includes(`/${RUNTIME_DIR}/`)
     ) {
       if (!refs.includes(ref)) refs.push(ref);

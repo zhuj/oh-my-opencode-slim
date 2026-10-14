@@ -2,6 +2,7 @@ import type { PluginInput } from '@opencode-ai/plugin';
 import {
   BackgroundJobBoard,
   type BackgroundJobExecution,
+  type BackgroundJobMutation,
   type BackgroundJobStore,
   type BackgroundJobSupervisor,
   type BackgroundTaskConcurrency,
@@ -18,6 +19,12 @@ import {
   persistedBackgroundChildren,
   recordBackgroundJobSuppression,
 } from '../../utils';
+import type { BackgroundJobRecord } from '../../utils/background-job-board';
+import {
+  type BackgroundJobSnapshotMutation,
+  type BackgroundJobSnapshotStore,
+  createBackgroundJobSnapshotStore,
+} from '../../utils/background-job-snapshot-store';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
@@ -79,6 +86,104 @@ export { BACKGROUND_JOB_BOARD_METADATA_KEY } from './board-injection';
 const IDLE_RECONCILE_DELAY_MS = 2_000;
 
 const RECOVERED_TASK_AGENT_FALLBACK = 'unknown';
+
+type PersistentBackgroundJobBoard = BackgroundJobStore &
+  Pick<
+    BackgroundJobBoard,
+    'restore' | 'addMutationListener' | 'removeMutationListener'
+  >;
+
+const PERSIST_FAILURE_LOG =
+  '[task-session-manager] failed persisting background-job mutation';
+
+/**
+ * One burst of board changes buffered for a single root, waiting to become a
+ * single read-modify-write. A board event burst (a launch fan-out, a
+ * launch-plus-drop, a reconcile sweep) then costs one whole-file rewrite
+ * instead of one per record change.
+ */
+interface PendingMutationBatch {
+  /**
+   * Keyed by the identifier `applyMutation` itself uses — the record's own
+   * taskID for upserts, the change's taskID for removals — so a coalesced
+   * write lands on the same keys sequential writes would, and the last
+   * buffered change for a key is the one that survives.
+   *
+   * Iteration order is the store's record order, so a removal cannot park a
+   * marker here: `set` would keep the slot the key already holds (just as
+   * `records[id] = record` keeps it in a snapshot that has it), leaving a
+   * task re-added in the same turn without the trailing slot its sequential
+   * delete + re-insert earned. Removals therefore delete the key, so a later
+   * upsert appends it, and `removeTaskIDs` below makes the store delete the
+   * stale entry before that upsert lands.
+   */
+  readonly byTaskID: Map<string, Record<string, unknown>>;
+  /**
+   * Every taskID a removal reached during this burst, in arrival order. All
+   * of them belong in the emitted mutation's removals: one whose surviving
+   * intent is still a removal, and one re-added afterwards, whose stale
+   * entry has to be deleted before the upsert re-inserts it — otherwise the
+   * store keeps the pre-burst position instead of the trailing one
+   * sequential writes would have produced.
+   */
+  readonly removeTaskIDs: Set<string>;
+  /**
+   * Changes the merge cannot express (a record the store will reject for
+   * lacking a string taskID). Each keeps its own write so the store's
+   * rejection and its log survive instead of being folded away.
+   */
+  readonly passthrough: Array<{
+    readonly taskID: string;
+    readonly mutation: BackgroundJobSnapshotMutation;
+  }>;
+  /** taskIDs in arrival order, for failure logs. */
+  readonly taskIDs: string[];
+}
+
+function createPendingMutationBatch(): PendingMutationBatch {
+  return {
+    byTaskID: new Map(),
+    removeTaskIDs: new Set(),
+    passthrough: [],
+    taskIDs: [],
+  };
+}
+
+/**
+ * Fold one board change into the batch. Never drops it: an expressible
+ * change resolves the per-taskID slot, anything else is queued for its own
+ * write.
+ */
+function bufferBoardMutation(
+  batch: PendingMutationBatch,
+  change: BackgroundJobMutation,
+): void {
+  // Copy now, exactly as the un-batched path did: the board owns this object
+  // and may hand a new one out before the flush runs.
+  const record = change.record ? { ...change.record } : undefined;
+  const key: unknown = record ? record.taskID : change.taskID;
+  batch.taskIDs.push(change.taskID);
+  if (typeof key !== 'string') {
+    batch.passthrough.push({
+      taskID: change.taskID,
+      mutation: {
+        upsert: record ? [record] : [],
+        removeTaskIDs: record ? [] : [change.taskID],
+      },
+    });
+    return;
+  }
+  if (record) {
+    batch.byTaskID.set(key, record);
+    return;
+  }
+  // Removal: drop the slot instead of overwriting it, so a later upsert in
+  // this same burst appends the task the way a sequential delete + re-insert
+  // would. The taskID still joins `removeTaskIDs`, which is what makes the
+  // store delete the stale entry before that upsert lands.
+  batch.byTaskID.delete(key);
+  batch.removeTaskIDs.add(key);
+}
 
 function rehydrateHistoricalRunningTasks(
   messages: unknown[],
@@ -319,11 +424,126 @@ function rehydrateHistoricalRunningTasks(
   return rehydrated;
 }
 
+function isPersistedRecord(
+  value: unknown,
+  taskID: string,
+  rootSessionID: string,
+): value is BackgroundJobRecord {
+  if (!isObjectRecord(value)) return false;
+  const finite = (item: unknown): item is number =>
+    typeof item === 'number' && Number.isFinite(item);
+  const optionalFinite = (key: string) =>
+    value[key] === undefined || finite(value[key]);
+  const optionalString = (key: string) =>
+    value[key] === undefined || typeof value[key] === 'string';
+  const taskOutputStates = ['running', 'completed', 'error', 'cancelled'];
+  return (
+    value.taskID === taskID &&
+    typeof value.parentSessionID === 'string' &&
+    value.rootSessionID === rootSessionID &&
+    typeof value.agent === 'string' &&
+    typeof value.description === 'string' &&
+    typeof value.state === 'string' &&
+    [
+      'running',
+      'completed',
+      'error',
+      'cancelled',
+      'stopped',
+      'reconciled',
+    ].includes(value.state) &&
+    typeof value.background === 'boolean' &&
+    typeof value.timedOut === 'boolean' &&
+    typeof value.recoverableAfterLiveBusy === 'boolean' &&
+    typeof value.statusUncertain === 'boolean' &&
+    typeof value.cancellationRequested === 'boolean' &&
+    typeof value.terminalUnreconciled === 'boolean' &&
+    finite(value.launchedAt) &&
+    finite(value.lastLaunchedAt) &&
+    finite(value.generation) &&
+    finite(value.terminalRevision) &&
+    finite(value.activityRevision) &&
+    finite(value.taskGeneration) &&
+    finite(value.runStartedAt) &&
+    finite(value.updatedAt) &&
+    typeof value.alias === 'string' &&
+    finite(value.lastUsedAt) &&
+    optionalString('objective') &&
+    (value.provisional === undefined ||
+      typeof value.provisional === 'boolean') &&
+    optionalFinite('deadlineExceededAt') &&
+    optionalFinite('lastLiveBusyAt') &&
+    optionalFinite('stopConfirmationStartedAt') &&
+    optionalFinite('completedAt') &&
+    optionalString('resultSummary') &&
+    optionalString('lastStatusError') &&
+    optionalFinite('totalErrors') &&
+    optionalFinite('timeoutCount') &&
+    optionalFinite('lastErrorAt') &&
+    (value.terminalState === undefined ||
+      (typeof value.terminalState === 'string' &&
+        taskOutputStates.includes(value.terminalState))) &&
+    Array.isArray(value.contextFiles) &&
+    value.contextFiles.every(
+      (file) =>
+        isObjectRecord(file) &&
+        typeof file.path === 'string' &&
+        finite(file.lastReadAt),
+    )
+  );
+}
+
+async function initializeBackgroundJobSnapshots(
+  board: PersistentBackgroundJobBoard,
+  store: BackgroundJobSnapshotStore,
+  directory: string,
+): Promise<{
+  records: BackgroundJobRecord[];
+  succeeded: boolean;
+  quarantinedRoots: ReadonlySet<string>;
+}> {
+  try {
+    const snapshots = await store.readAll();
+    const records: BackgroundJobRecord[] = [];
+    const quarantinedRoots = new Set<string>();
+    for (const snapshot of snapshots) {
+      if (!isObjectRecord(snapshot.records)) continue;
+      const rootRecords: BackgroundJobRecord[] = [];
+      let malformed = false;
+      for (const [taskID, value] of Object.entries(snapshot.records)) {
+        if (!isPersistedRecord(value, taskID, snapshot.rootSessionID)) {
+          malformed = true;
+          log(
+            '[task-session-manager] skipped malformed persisted task record',
+            {
+              taskID,
+              rootSessionID: snapshot.rootSessionID,
+            },
+          );
+          break;
+        }
+        rootRecords.push(value);
+      }
+      if (malformed) quarantinedRoots.add(snapshot.rootSessionID);
+      else records.push(...rootRecords);
+    }
+    board.restore(records);
+    return { records, succeeded: true, quarantinedRoots };
+  } catch (error) {
+    log('[task-session-manager] failed loading background-job snapshots', {
+      directory,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { records: [], succeeded: false, quarantinedRoots: new Set() };
+  }
+}
+
 export function createTaskSessionManagerHook(
-  _ctx: PluginInput,
+  _ctx: PluginInput & { hostFlavor?: string },
   options: {
     maxSessionsPerAgent: number;
-    backgroundJobBoard?: BackgroundJobStore;
+    backgroundJobBoard?: PersistentBackgroundJobBoard;
+    backgroundJobSnapshotStore?: BackgroundJobSnapshotStore;
     terminalGate?: BackgroundJobTerminalGate;
     hostOutcomeClock?: 'shared-unix-ms';
     backgroundJobSupervisor?: BackgroundJobSupervisor;
@@ -397,6 +617,118 @@ export function createTaskSessionManagerHook(
     new BackgroundJobBoard({
       maxReusablePerAgent: options.maxSessionsPerAgent,
     });
+  const backgroundJobSnapshotStore =
+    options.backgroundJobSnapshotStore ??
+    createBackgroundJobSnapshotStore(_ctx.directory);
+  const snapshotsReady = initializeBackgroundJobSnapshots(
+    backgroundJobBoard,
+    backgroundJobSnapshotStore,
+    _ctx.directory,
+  );
+  let snapshotsInitialized = false;
+  const mutationQueues = new Map<string, Promise<void>>();
+  void snapshotsReady.then(() => {
+    snapshotsInitialized = true;
+  });
+  /** Buffered bursts awaiting their flush, one per root. */
+  const pendingBatches = new Map<string, PendingMutationBatch>();
+  /** Roots whose flush is already scheduled; suppresses duplicate flushes. */
+  const rootsWithScheduledFlush = new Set<string>();
+
+  /**
+   * One write per burst. Each write is independently caught and logged, so a
+   * failure never cancels a sibling write and never escapes as an unhandled
+   * rejection from this fire-and-forget listener.
+   */
+  const writeBatchedMutation = async (
+    rootSessionID: string,
+    mutation: BackgroundJobSnapshotMutation,
+    taskIDs: readonly string[],
+  ): Promise<void> => {
+    try {
+      await backgroundJobSnapshotStore.applyMutation(
+        rootSessionID,
+        mutation,
+        Date.now(),
+      );
+    } catch (error) {
+      log(PERSIST_FAILURE_LOG, {
+        rootSessionID,
+        taskIDs,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const flushPendingBatch = async (rootSessionID: string): Promise<void> => {
+    const batch = pendingBatches.get(rootSessionID);
+    if (!batch) return;
+    pendingBatches.delete(rootSessionID);
+    // The batch is consumed here, so a mutation arriving while this write is
+    // in flight lands in a fresh batch and a fresh flush.
+    // One mutation, shaped so the store lands it exactly where sequential
+    // per-change writes would have: upserts in `byTaskID` order — the slot a
+    // key already held, or the trailing slot its last re-add earned it — plus
+    // every removal this burst touched, applied first so a re-added record is
+    // deleted before it is re-inserted.
+    const upsert = [...batch.byTaskID.values()];
+    const removeTaskIDs = [...batch.removeTaskIDs];
+    if (upsert.length > 0 || removeTaskIDs.length > 0)
+      await writeBatchedMutation(
+        rootSessionID,
+        { upsert, removeTaskIDs },
+        batch.taskIDs,
+      );
+    // Non-mergeable changes keep their own writes, after the merged one so a
+    // record the store rejects cannot hold back the valid records.
+    for (const entry of batch.passthrough)
+      await writeBatchedMutation(rootSessionID, entry.mutation, [entry.taskID]);
+  };
+
+  /**
+   * Chain one flush per root onto the existing per-root promise queue. The
+   * queue — not the buffer — is what serializes writes, so ordering and the
+   * cleanup below are unchanged.
+   */
+  const scheduleFlush = (rootSessionID: string): void => {
+    const previous = mutationQueues.get(rootSessionID) ?? Promise.resolve();
+    const next = previous.then(() => flushPendingBatch(rootSessionID));
+    mutationQueues.set(rootSessionID, next);
+    void next.finally(() => {
+      if (mutationQueues.get(rootSessionID) === next) {
+        mutationQueues.delete(rootSessionID);
+      }
+    });
+  };
+
+  const persistBoardMutation = (change: BackgroundJobMutation): void => {
+    void snapshotsReady
+      .then(({ succeeded, quarantinedRoots }) => {
+        if (!succeeded) return;
+        if (quarantinedRoots.has(change.rootSessionID)) return;
+        const batch = pendingBatches.get(change.rootSessionID) ?? null;
+        const target = batch ?? createPendingMutationBatch();
+        if (!batch) pendingBatches.set(change.rootSessionID, target);
+        bufferBoardMutation(target, change);
+        // One microtask turn is the coalescing window: every board change
+        // emitted synchronously (a launch fan-out, a launch-plus-drop, a
+        // reconcile sweep) is buffered before the first flush observes it.
+        if (rootsWithScheduledFlush.has(change.rootSessionID)) return;
+        rootsWithScheduledFlush.add(change.rootSessionID);
+        queueMicrotask(() => {
+          rootsWithScheduledFlush.delete(change.rootSessionID);
+          scheduleFlush(change.rootSessionID);
+        });
+      })
+      .catch((error: unknown) => {
+        log(PERSIST_FAILURE_LOG, {
+          rootSessionID: change.rootSessionID,
+          taskID: change.taskID,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  };
+  backgroundJobBoard.addMutationListener(persistBoardMutation);
   const rehydrateState = getBackgroundJobLifecycleLedger(backgroundJobBoard);
   const rehydrateTombstones = rehydrateState.tombstones;
   // Only adoptRequested reads boundaries, and v2 hosts never wire it.
@@ -539,15 +871,10 @@ export function createTaskSessionManagerHook(
   const probeRehydratedTaskSession = (taskID: string): void => {
     void (async () => {
       const client = getClient(_ctx);
-      // Same presence gate as readSessionOutcome: capability is probed,
-      // not assumed, and deliberately NOT gated on hostFlavor. The probe
-      // is v2-effective: the dotted `_tag === 'Session.NotFoundError'`
-      // classification only crosses the v2 plugin boundary (the host
-      // passes the raw core effect in-process). The v1 SDK wraps 4xx
-      // responses as plain `Error` with a `.cause` (or returns an
-      // `{error}` tuple when `throwOnError: false`), so on v1 the probe
-      // runs but harmlessly never tombstones — transient-error fail-open
-      // swallows the wrapped rejection. Absent method → skip silently.
+      // Probe capability without assuming it exists. Only a positively
+      // identified v2 host may treat the typed NotFound tag as proof of
+      // deletion; v1 failures remain ambiguous and fail open. An absent
+      // method is skipped silently.
       if (typeof client.session?.get !== 'function') return;
       // Freshness anchor: the generation of the record rehydrate just
       // registered (captured synchronously, before the async get). A
@@ -569,7 +896,10 @@ export function createTaskSessionManagerHook(
         });
         return;
       } catch (err) {
-        if ((err as { _tag?: string })?._tag === 'Session.NotFoundError') {
+        if (
+          _ctx.hostFlavor === 'v2' &&
+          (err as { _tag?: string })?._tag === 'Session.NotFoundError'
+        ) {
           // Freshness guard: only clean up when the board still holds the
           // generation the probe started against. A record replaced by a
           // same-ID relaunch (or already dropped) is not ours to delete.
@@ -664,6 +994,53 @@ export function createTaskSessionManagerHook(
     backgroundJobBoard,
     delayMs: options.runtimeStatusReconcileDelayMs,
     terminalGate,
+  });
+
+  const probeRestoredSession = (record: BackgroundJobRecord): void => {
+    const client = getClient(_ctx);
+    if (typeof client.session?.get !== 'function') return;
+    const generation = record.generation;
+    void client.session
+      .get({
+        path: { id: record.taskID },
+        query: { directory: _ctx.directory },
+      })
+      .then((response: unknown) => {
+        const data = isObjectRecord(response) ? response.data : undefined;
+        if (!isObjectRecord(data) || data.id !== record.taskID) return;
+        // Existence alone is not evidence that a restored session is running.
+        // Keep its conservative stopped/uncertain state until runtime evidence
+        // or an attributable lifecycle result arrives.
+      })
+      .catch((error: unknown) => {
+        if (
+          _ctx.hostFlavor !== 'v2' ||
+          !isObjectRecord(error) ||
+          error._tag !== 'Session.NotFoundError'
+        ) {
+          return;
+        }
+        if (backgroundJobBoard.get(record.taskID)?.generation !== generation) {
+          log(
+            '[task-session-manager] ignored stale persisted-session not-found',
+            {
+              taskID: record.taskID,
+              generation,
+            },
+          );
+          return;
+        }
+        options.backgroundJobSupervisor?.onSessionDeleted(record.taskID);
+        recordBackgroundJobSuppression(backgroundJobBoard, record.taskID);
+        backgroundJobBoard.drop(record.taskID);
+        options.backgroundTaskConcurrency?.releaseTask(record.taskID);
+        log('[task-session-manager] persisted task session no longer exists', {
+          taskID: record.taskID,
+        });
+      });
+  };
+  void snapshotsReady.then(({ records }) => {
+    for (const record of records) probeRestoredSession(record);
   });
 
   const idleSessionTokens = createIdleSessionTokens({
@@ -851,31 +1228,35 @@ export function createTaskSessionManagerHook(
     'tool.execute.before': (
       input: { tool: string; sessionID?: string; callID?: string },
       output: { args?: unknown },
-    ): Promise<void> =>
-      handleToolExecuteBefore(input, output, {
-        shouldManageSession: options.shouldManageSession,
-        registerSessionAsOrchestrator: options.registerSessionAsOrchestrator,
-        backgroundJobBoard,
-        backgroundJobSupervisor: options.backgroundJobSupervisor,
-        backgroundTaskConcurrency: options.backgroundTaskConcurrency,
-        getModelForAgent: options.getModelForAgent,
-        getSessionModel: options.getSessionModel,
-        sameProviderPolicy: options.sameProviderPolicy,
-        pendingCallTracker,
-        taskContextTracker,
-        getLifecycleEpoch: () => rehydrateState.nextEpoch,
-        hostFlavor: options.hostFlavor,
-        isBackgroundDefaultFlipArmed: options.isBackgroundDefaultFlipArmed,
-        recoverRetainedSession: options.recoverRetainedSession,
-        resolveCanonicalTaskRef: options.resolveCanonicalTaskRef,
-        isDisposed: options.isDisposed,
-        adoptRequested: adoptionEnabled ? adoptRequested : undefined,
-      }),
+    ): Promise<void> => {
+      const handle = (): Promise<void> =>
+        handleToolExecuteBefore(input, output, {
+          shouldManageSession: options.shouldManageSession,
+          registerSessionAsOrchestrator: options.registerSessionAsOrchestrator,
+          backgroundJobBoard,
+          backgroundJobSupervisor: options.backgroundJobSupervisor,
+          backgroundTaskConcurrency: options.backgroundTaskConcurrency,
+          getModelForAgent: options.getModelForAgent,
+          getSessionModel: options.getSessionModel,
+          sameProviderPolicy: options.sameProviderPolicy,
+          pendingCallTracker,
+          taskContextTracker,
+          getLifecycleEpoch: () => rehydrateState.nextEpoch,
+          hostFlavor: options.hostFlavor,
+          isBackgroundDefaultFlipArmed: options.isBackgroundDefaultFlipArmed,
+          recoverRetainedSession: options.recoverRetainedSession,
+          resolveCanonicalTaskRef: options.resolveCanonicalTaskRef,
+          isDisposed: options.isDisposed,
+          adoptRequested: adoptionEnabled ? adoptRequested : undefined,
+        });
+      return snapshotsInitialized ? handle() : snapshotsReady.then(handle);
+    },
 
     'tool.execute.after': async (
       input: { tool: string; sessionID?: string; callID?: string },
       output: { output: unknown; metadata?: unknown },
     ): Promise<void> => {
+      await snapshotsReady;
       await handleToolExecuteAfter(input, output, {
         directory: _ctx.directory,
         backgroundJobBoard,
@@ -905,6 +1286,7 @@ export function createTaskSessionManagerHook(
       _input: Record<string, never>,
       output: { messages?: unknown },
     ): Promise<void> => {
+      await snapshotsReady;
       const messages = Array.isArray(output.messages) ? output.messages : [];
       if (adoptionEnabled) {
         let viewSession: unknown;
@@ -974,12 +1356,15 @@ export function createTaskSessionManagerHook(
       }
     },
 
-    injectBackgroundJobBoard: (
+    injectBackgroundJobBoard: async (
       input: Record<string, never>,
       output: { messages?: unknown },
-    ) => injectBackgroundJobBoard(injectionState, input, output),
+    ) => {
+      await snapshotsReady;
+      await injectBackgroundJobBoard(injectionState, input, output);
+    },
 
-    event: (input: {
+    event: async (input: {
       event: {
         type: string;
         properties?: {
@@ -993,6 +1378,7 @@ export function createTaskSessionManagerHook(
         };
       };
     }): Promise<void> => {
+      await snapshotsReady;
       if (input.event.type === 'session.deleted') {
         const sessionID =
           input.event.properties?.info?.id ?? input.event.properties?.sessionID;
@@ -1015,6 +1401,7 @@ export function createTaskSessionManagerHook(
       if (input.event.type === 'server.instance.disposed') {
         runtimeStatusReconciler.dispose();
         if (!options.terminalGate) terminalGate.dispose();
+        backgroundJobBoard.removeMutationListener(persistBoardMutation);
       }
       return handleEvent(input, {
         inputWaits,

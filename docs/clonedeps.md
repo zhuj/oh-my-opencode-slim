@@ -15,13 +15,13 @@ runtime, SDK, framework, plugin API, or other core dependency actually behaves.
 
 When you ask for cloned dependency source, the Orchestrator:
 
-1. Checks `.slim/clonedeps.json` first and reuses existing clones when possible.
+1. Checks `.local/.slim/clonedeps.json` first and reuses existing clones when possible.
 2. Asks `@explorer` for source-repo recommendations only if more context is
    needed.
 3. Presents a small clone plan for approval.
 4. Clones each approved source repository once into
-   `.slim/clonedeps/repos/<safe-repo-name>/`.
-5. Writes `.slim/clonedeps.json` as trackable project metadata.
+   `.local/.slim/clonedeps/repos/<safe-repo-name>/`.
+5. Writes `.local/.slim/clonedeps.json` as trackable project metadata.
 6. Updates ignore files so git ignores clone contents while OpenCode can read
    them.
 7. Updates root `AGENTS.md` with a concise list of cloned repos and why each one
@@ -53,19 +53,19 @@ git operations, unless you explicitly ask it to clone immediately.
 
 ## Files It Creates
 
-### `.slim/clonedeps/repos/`
+### `.local/.slim/clonedeps/repos/`
 
 Ignored local clones live here, one folder per source repository:
 
 ```text
-.slim/clonedeps/repos/<safe-repo-name>/
+.local/.slim/clonedeps/repos/<safe-repo-name>/
 ```
 
 The safe folder name is based on the repository owner/name, not the package
 name, and may include a pinned-release suffix when multiple revisions need to
 coexist. For example, the TypeScript OpenCode repository
 `https://github.com/anomalyco/opencode.git` becomes
-`.slim/clonedeps/repos/anomalyco__opencode-v1.18.13/` when pinned to that
+`.local/.slim/clonedeps/repos/anomalyco__opencode-v1.18.13/` when pinned to that
 release.
 
 If multiple packages come from the same monorepo, they share one cloned repo path
@@ -73,7 +73,7 @@ and use different `packagePath` values in the manifest.
 
 These repositories are read-only reference source. Do not edit them.
 
-### `.slim/clonedeps.json`
+### `.local/.slim/clonedeps.json`
 
 This is the structured manifest. It is intentionally small and committable:
 
@@ -87,7 +87,7 @@ This is the structured manifest. It is intentionally small and committable:
       "resolvedVersion": "1.18.13",
       "repoUrl": "https://github.com/anomalyco/opencode.git",
       "ref": "v1.18.13@a105350812f05f914c768e468559dbd6bd508d8e",
-      "path": ".slim/clonedeps/repos/anomalyco__opencode-v1.18.13",
+      "path": ".local/.slim/clonedeps/repos/anomalyco__opencode-v1.18.13",
       "packagePath": "packages/plugin",
       "reason": "Plugin API source used by the project"
     },
@@ -96,7 +96,7 @@ This is the structured manifest. It is intentionally small and committable:
       "resolvedVersion": "1.18.13",
       "repoUrl": "https://github.com/anomalyco/opencode.git",
       "ref": "v1.18.13@a105350812f05f914c768e468559dbd6bd508d8e",
-      "path": ".slim/clonedeps/repos/anomalyco__opencode-v1.18.13",
+      "path": ".local/.slim/clonedeps/repos/anomalyco__opencode-v1.18.13",
       "packagePath": "packages/sdk/js",
       "reason": "Core SDK source used to inspect runtime behavior"
     }
@@ -118,9 +118,9 @@ Example:
 ## Cloned Dependency Source
 
 Read-only dependency source repositories are available under
-`.slim/clonedeps/repos/` for inspection. Do not edit these clones.
+`.local/.slim/clonedeps/repos/` for inspection. Do not edit these clones.
 
-- `.slim/clonedeps/repos/anomalyco__opencode-v1.18.13/` -
+- `.local/.slim/clonedeps/repos/anomalyco__opencode-v1.18.13/` -
   `anomalyco/opencode` at
   `v1.18.13@a105350812f05f914c768e468559dbd6bd508d8e`; inspect `packages/plugin` and
   `packages/sdk/js` for OpenCode plugin and SDK internals.
@@ -135,7 +135,7 @@ Read-only dependency source repositories are available under
 - Use HTTPS repository URLs by default.
 - Prefer pinned tags or commit SHAs.
 - Do not run install, build, test, or lifecycle scripts from cloned repos.
-- Git ignores `.slim/clonedeps/repos/`, but not `.slim/clonedeps.json`.
+- Git ignores `.local/.slim/clonedeps/repos/`, but not `.local/.slim/clonedeps.json`.
 - Ignore-file edits are limited to managed clonedeps marker blocks.
 
 ---

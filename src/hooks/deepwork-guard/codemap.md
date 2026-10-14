@@ -5,9 +5,10 @@
 Machine evidence for the deepwork contract's acceptance protocol (#1389/#1390).
 Two pieces, all silent when passing — the cost is code, not context:
 
-- **Receipts**: every write into a task directory (`.slim/deepwork/<slug>/`)
-  is recorded as a structured receipt line (path, bytes, first-bytes hash,
-  sessionID) under `.slim/deepwork/.runtime/receipts/<slug>.jsonl`. Witness
+- **Receipts**: every write into a task directory
+  (`.local/.slim/deepwork/<slug>/`) is recorded as a structured receipt line
+  (path, bytes, first-bytes hash, sessionID) under
+  `.local/.slim/deepwork/.runtime/receipts/<slug>.jsonl`. Witness
   only — never blocks, never mutates tool output.
 - **Completion gate**: a progress file flipping INTO `status: completed`
   (flip detection — re-edits of an already-completed file are not flips) is
@@ -39,7 +40,7 @@ error-isolated).
   256 entries (oldest evicted).
 
 ### State Management
-- All state is on disk under `.slim/deepwork/.runtime/` (machine-owned
+- All state is on disk under `.local/.slim/deepwork/.runtime/` (machine-owned
   bookkeeping; the workflow never reads it). No in-memory session state
   beyond the callID capture map.
 
@@ -59,6 +60,7 @@ error-isolated).
 
 ### Non-Goals (per the multi-seat review)
 - No path-shape deny guard (phase 3, evidence-gated graduation).
+- No legacy `.slim/deepwork` alias; only `.local/.slim/deepwork/` is guarded.
 - No context injection (the SKILL.md contract already carries the lane
   rules — injection would be prompt engineering by code).
 - No lock/lease primitives (atomic `wx`/mkdir + mtime renewal suffice;

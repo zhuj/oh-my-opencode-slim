@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
   DEFAULT_CONTEXT_FILE_CAP,
   DEFAULT_MAX_SESSIONS_PER_AGENT,
@@ -5,6 +6,8 @@ import {
 } from '../config/constants';
 import { escapeRegExp } from './agent-variant';
 import {
+  aliasHighWaterMark,
+  bumpAliasHighWaterMark,
   getPersistedBackgroundChild,
   type PersistedBackgroundChild,
   recordPersistedBackgroundChild,
@@ -13,6 +16,7 @@ import {
 import type { BackgroundJobStore } from './background-job-store';
 import {
   clearBackgroundJobSuppression,
+  getBackgroundJobLifecycleLedger,
   recordBackgroundJobSuppression,
 } from './background-job-store';
 import {
@@ -63,17 +67,20 @@ export type BackgroundJobState = TaskOutputState | 'stopped' | 'reconciled';
 export interface BackgroundJobRecord {
   taskID: string;
   parentSessionID: string;
+  rootSessionID: string;
   agent: string;
   description: string;
   objective?: string;
   state: BackgroundJobState;
   /** Unattributed lifecycle placeholder, not yet delegated work. */
   provisional?: boolean;
-  /** True only when the native task call explicitly supplied background:true. */
+  /** True when the task call resolves to background execution. */
   background: boolean;
   timedOut: boolean;
   recoverableAfterLiveBusy: boolean;
   statusUncertain: boolean;
+  /** This generation's queued input lacks attributable admission evidence. */
+  pendingPromptAdmissionID?: string;
   /** When status became unconfirmable; drives stale-uncertain removal from the board render. */
   statusUncertainSince?: number;
   cancellationRequested: boolean;
@@ -145,6 +152,8 @@ export interface BackgroundJobBoardOptions {
    * contained.
    */
   onEvictedSession?: (evicted: BackgroundJobEvictedSession) => void;
+  /** Seed numbered aliases from persisted counters when available. */
+  aliasCounterHighWater?: (parentSessionID: string, prefix: string) => number;
 }
 
 /** Snapshot of a record evicted by a retention trim, captured before the
@@ -217,6 +226,8 @@ export interface BackgroundJobLaunchInput {
   adopted?: true;
   /** Preserve the current run when this is a duplicate lifecycle observation. */
   preserveRun?: boolean;
+  /** Publish uncertainty atomically until this exact queued input is proven. */
+  pendingPromptAdmissionID?: string;
   /**
    * This plugin's own tracked native task call launched a fresh background
    * child (not a resume). Ignored for adopted/provisional input and for
@@ -265,6 +276,8 @@ export interface BackgroundJobTerminalInput {
   state: 'completed' | 'error' | 'cancelled' | 'stopped';
   resultSummary: string;
   cancellationLease?: BackgroundJobLease;
+  /** Exact-input result evidence sealed by the terminal gate, not a host hint. */
+  promptMessageID?: string;
   now?: number;
 }
 
@@ -277,7 +290,12 @@ export interface WallClockTimeoutFinalizeInput {
 }
 
 type TerminalStateListener = (taskID: string) => void;
-type MutationListener = () => void;
+export interface BackgroundJobMutation {
+  rootSessionID: string;
+  taskID: string;
+  record?: BackgroundJobRecord;
+}
+type MutationListener = (change: BackgroundJobMutation) => void;
 
 export class BackgroundJobLaunchConflictError extends Error {
   constructor(taskID: string, message: string) {
@@ -307,6 +325,16 @@ function aliasPrefixForAgent(agent: string): string {
 }
 
 export class BackgroundJobBoard implements BackgroundJobStore {
+  private readonly launchRollbacks = new WeakMap<
+    BackgroundJobRecord,
+    {
+      predecessor: BackgroundJobRecord;
+      predecessorSnapshot: BackgroundJobRecord;
+      launchSnapshot: BackgroundJobRecord;
+      lease: BackgroundJobLease;
+      deletionEpoch: number | undefined;
+    }
+  >();
   private terminalGate?: BackgroundJobTerminalGate;
   private readonly jobs = new Map<string, BackgroundJobRecord>();
   /** Persisted identity overwritten by a launch that may still be refused. */
@@ -331,6 +359,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly startedAt = Date.now();
   /** Sessions created after this board started: no earlier aliases. */
   private readonly freshParents = new Set<string>();
+  private readonly aliasCounterHighWater: (
+    parentSessionID: string,
+    prefix: string,
+  ) => number;
 
   constructor(options: BackgroundJobBoardOptions = {}) {
     this.maxReusablePerAgent =
@@ -338,6 +370,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     this.delegationTool = options.delegationTool ?? 'task';
     this.deferNumberedAliases = options.deferNumberedAliases === true;
     this.onEvictedSession = options.onEvictedSession;
+    this.aliasCounterHighWater =
+      options.aliasCounterHighWater ?? aliasHighWaterMark;
   }
 
   /** False for a production parent not created while this board runs. */
@@ -368,9 +402,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     this.terminalStateListeners = listener ? [listener] : [];
   }
 
-  /** Subscribe to ANY board mutation (set/delete/trim/drop). The listener
-   * receives no payload: re-derive from the board's read-only queries.
-   * Same style as addTerminalStateListener; fires after the mutation. */
+  /** Subscribe to persistence-relevant record changes. */
   addMutationListener(listener: MutationListener): void {
     this.mutationListeners.push(listener);
   }
@@ -381,16 +413,74 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     );
   }
 
-  private notifyMutationListeners(): void {
+  private notifyMutationListeners(change: BackgroundJobMutation): void {
     for (const listener of this.mutationListeners) {
       try {
-        listener();
+        listener(change);
       } catch (error) {
         log('Board mutation listener threw', {
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
+  }
+
+  restore(records: readonly BackgroundJobRecord[], now = Date.now()): void {
+    for (const record of records) {
+      const restored = {
+        ...record,
+        pluginLaunched: undefined,
+        externalOrigin: true as const,
+        rootSessionID: record.rootSessionID ?? record.parentSessionID,
+        state: record.state === 'running' ? 'stopped' : record.state,
+        statusUncertain:
+          record.state === 'running' ||
+          record.pendingPromptAdmissionID !== undefined
+            ? true
+            : record.statusUncertain,
+        ...(record.pendingPromptAdmissionID !== undefined
+          ? {
+              // Legacy persisted extras were not type-checked. An empty marker
+              // quarantines malformed identity without silently dropping exclusion.
+              pendingPromptAdmissionID:
+                typeof record.pendingPromptAdmissionID === 'string'
+                  ? record.pendingPromptAdmissionID
+                  : '',
+            }
+          : {}),
+        updatedAt: record.state === 'running' ? now : record.updatedAt,
+        contextFiles: record.contextFiles.map((file) => ({ ...file })),
+      };
+      this.jobs.set(record.taskID, restored);
+      const alias = /^(.*)-(\d+)$/.exec(restored.alias);
+      if (alias) {
+        const [, prefix, suffix] = alias;
+        const key = `${restored.parentSessionID}:${prefix}`;
+        const restoredCounter = Number(suffix);
+        this.counters.set(
+          key,
+          Math.max(
+            this.counters.get(key) ?? 0,
+            restoredCounter,
+            this.aliasCounterHighWater(restored.parentSessionID, prefix),
+          ),
+        );
+      }
+      this.executionSequence = Math.max(
+        this.executionSequence,
+        restored.generation,
+      );
+    }
+  }
+
+  recordsForRoot(rootSessionID: string): BackgroundJobRecord[] {
+    return [...this.jobs.values()]
+      .filter((record) => record.rootSessionID === rootSessionID)
+      .sort((a, b) => a.launchedAt - b.launchedAt)
+      .map((record) => ({
+        ...record,
+        contextFiles: record.contextFiles.map((file) => ({ ...file })),
+      }));
   }
 
   private notifyTerminalStateListeners(taskID: string): void {
@@ -411,6 +501,16 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const existing = this.jobs.get(input.taskID);
     const requestedLease = input.relaunchLease ?? input.lease;
     const liveLease = this.liveLeases.get(input.taskID);
+
+    if (
+      existing?.pendingPromptAdmissionID !== undefined &&
+      !input.preserveRun
+    ) {
+      throw new BackgroundJobLaunchConflictError(
+        input.taskID,
+        'queued input admission remains unresolved',
+      );
+    }
 
     if (requestedLease) {
       if (
@@ -458,6 +558,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         }
         const observed = {
           ...existing,
+          parentSessionID: input.parentSessionID,
+          rootSessionID:
+            this.jobs.get(input.parentSessionID)?.rootSessionID ??
+            input.parentSessionID,
           provisional: false,
           agent: input.agent || existing.agent,
           description: input.description || existing.description,
@@ -479,6 +583,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
       const updated = {
         ...existing,
+        parentSessionID: input.parentSessionID,
+        rootSessionID:
+          this.jobs.get(input.parentSessionID)?.rootSessionID ??
+          input.parentSessionID,
         provisional: false,
         generation,
         terminalRevision: 0,
@@ -491,7 +599,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         background: input.background ?? existing.background,
         timedOut: false,
         recoverableAfterLiveBusy: false,
-        statusUncertain: false,
+        statusUncertain: input.pendingPromptAdmissionID !== undefined,
+        pendingPromptAdmissionID: input.pendingPromptAdmissionID,
         // A relaunch starts a fresh episode: no stale demotion clock.
         statusUncertainSince: undefined,
         cancellationRequested: false,
@@ -512,6 +621,18 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         totalErrors: existing.totalErrors ?? 0,
         timeoutCount: existing.timeoutCount ?? 0,
       } satisfies BackgroundJobRecord;
+      if (requestedLease) {
+        // Capture inside the publication boundary, after all caller awaits.
+        this.launchRollbacks.set(updated, {
+          predecessor: existing,
+          predecessorSnapshot: structuredClone(existing),
+          launchSnapshot: structuredClone(updated),
+          lease: { ...requestedLease },
+          deletionEpoch: getBackgroundJobLifecycleLedger(
+            this,
+          ).deletionEpochs.get(input.taskID),
+        });
+      }
       this.setJob(updated);
       this.persistBackgroundChild(updated, {});
       return updated;
@@ -553,15 +674,27 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
   abandonLaunch(
     launched: BackgroundJobRecord,
-    replaced: BackgroundJobRecord,
+    lease: BackgroundJobLease,
   ): boolean {
+    const rollback = this.launchRollbacks.get(launched);
     if (
-      replaced.taskID !== launched.taskID ||
-      this.jobs.get(launched.taskID)?.generation !== launched.generation
+      !rollback ||
+      this.jobs.get(launched.taskID) !== launched ||
+      !this.validateLease(lease) ||
+      !isDeepStrictEqual(lease, rollback.lease) ||
+      !isDeepStrictEqual(launched, rollback.launchSnapshot) ||
+      !isDeepStrictEqual(rollback.predecessor, rollback.predecessorSnapshot) ||
+      getBackgroundJobLifecycleLedger(this).deletionEpochs.get(
+        launched.taskID,
+      ) !== rollback.deletionEpoch
     ) {
       return false;
     }
-    this.setJob(replaced);
+    // Commit restoration and this lease's retirement before any observer or
+    // tracker callback can re-enter. No successor token is released later.
+    this.launchRollbacks.delete(launched);
+    this.jobs.set(launched.taskID, rollback.predecessor);
+    this.liveLeases.delete(launched.taskID);
     if (this.launchPersistenceSnapshots.has(launched)) {
       restorePersistedBackgroundChild(
         launched.taskID,
@@ -569,6 +702,18 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       );
       this.launchPersistenceSnapshots.delete(launched);
     }
+    if (launched.rootSessionID !== rollback.predecessor.rootSessionID) {
+      this.notifyMutationListeners({
+        rootSessionID: launched.rootSessionID,
+        taskID: launched.taskID,
+      });
+    }
+    this.notifyMutationListeners({
+      rootSessionID: rollback.predecessor.rootSessionID,
+      taskID: launched.taskID,
+      record: rollback.predecessor,
+    });
+    this.trimRetained(launched.taskID);
     return true;
   }
 
@@ -613,6 +758,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       activityRevision: 0,
       taskGeneration: 1,
       parentSessionID: input.parentSessionID,
+      rootSessionID:
+        this.jobs.get(input.parentSessionID)?.rootSessionID ??
+        input.parentSessionID,
       agent: input.agent,
       description: input.description || `background ${input.agent} task`,
       objective: input.objective,
@@ -620,7 +768,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       background: input.background === true,
       timedOut: false,
       recoverableAfterLiveBusy: false,
-      statusUncertain: false,
+      statusUncertain: input.pendingPromptAdmissionID !== undefined,
+      ...(input.pendingPromptAdmissionID !== undefined
+        ? { pendingPromptAdmissionID: input.pendingPromptAdmissionID }
+        : {}),
       cancellationRequested: false,
       terminalUnreconciled: false,
       launchedAt: now,
@@ -652,7 +803,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   ): BackgroundJobRecord | undefined {
     const existing = this.jobs.get(input.taskID);
     if (
-      existing?.state !== 'running' ||
+      !existing ||
+      (existing.state !== 'running' &&
+        existing.pendingPromptAdmissionID === undefined) ||
       !consumeTerminalCommitToken(this.terminalGate, token, existing, input)
     )
       return existing;
@@ -670,7 +823,16 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     generation: number,
   ): BackgroundJobRecord | undefined {
     const existing = this.jobs.get(input.taskID);
-    if (existing?.state !== 'running' || existing.generation !== generation)
+    const resolvesInput =
+      existing?.pendingPromptAdmissionID !== undefined &&
+      !!input.promptMessageID &&
+      input.promptMessageID === existing.pendingPromptAdmissionID &&
+      (input.state === 'completed' || input.state === 'error');
+    if (
+      !existing ||
+      existing.generation !== generation ||
+      (existing.state !== 'running' && !resolvesInput)
+    )
       return existing;
     if (existing.deadlineExceededAt !== undefined) {
       return this.finalizeWallClockTimeout({
@@ -695,18 +857,25 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         expectedGeneration: existing.generation,
         cancellationLease: input.cancellationLease,
       });
-    return this.applyStatus({
-      ...input,
-      state: input.state,
-      expectedGeneration: existing.generation,
-    });
+    return this.applyStatus(
+      {
+        ...input,
+        state: input.state,
+        expectedGeneration: existing.generation,
+      },
+      input.promptMessageID,
+    );
   }
 
   private applyStatus(
     input: BackgroundJobStatusInput,
+    admittedPromptMessageID?: string,
   ): BackgroundJobRecord | undefined {
     const existing = this.jobs.get(input.taskID);
     if (!existing) return undefined;
+    const resolvesInput =
+      existing.pendingPromptAdmissionID !== undefined &&
+      existing.pendingPromptAdmissionID === admittedPromptMessageID;
     if (
       input.expectedGeneration !== undefined &&
       existing.generation !== input.expectedGeneration
@@ -732,10 +901,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     // Guard: stale status updates cannot reopen already terminal jobs.
     if (
-      existing.state === 'reconciled' ||
-      (existing.state === 'stopped' && input.state === 'running') ||
-      (existing.state === 'cancelled' && input.state !== 'cancelled') ||
-      (isCanonicalTerminalState(existing.state) && input.state === 'running')
+      !resolvesInput &&
+      (existing.state === 'reconciled' ||
+        (existing.state === 'stopped' && input.state === 'running') ||
+        (existing.state === 'cancelled' && input.state !== 'cancelled') ||
+        (isCanonicalTerminalState(existing.state) && input.state === 'running'))
     ) {
       return existing;
     }
@@ -743,9 +913,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const now = input.now ?? Date.now();
     const terminal = input.state !== 'running';
     const notifyTerminal =
-      terminal && !isCanonicalTerminalState(existing.state);
+      terminal && (resolvesInput || !isCanonicalTerminalState(existing.state));
     const updated: BackgroundJobRecord = {
       ...existing,
+      ...(resolvesInput ? { pendingPromptAdmissionID: undefined } : {}),
       state: input.state,
       timedOut: input.timedOut ?? false,
       recoverableAfterLiveBusy:
@@ -754,7 +925,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           : input.timedOut === true
             ? false
             : existing.recoverableAfterLiveBusy,
-      statusUncertain: input.statusUncertain ?? false,
+      statusUncertain:
+        (!resolvesInput && existing.pendingPromptAdmissionID !== undefined) ||
+        (input.statusUncertain ?? false),
       terminalUnreconciled: terminal ? true : existing.terminalUnreconciled,
       terminalRevision: existing.terminalRevision + (terminal ? 1 : 0),
       updatedAt: now,
@@ -831,7 +1004,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       timedOut: existing.deadlineExceededAt !== undefined,
       recoverableAfterLiveBusy:
         existing.recoverableAfterLiveBusy || existing.timedOut,
-      statusUncertain: existing.deadlineExceededAt !== undefined,
+      statusUncertain:
+        existing.pendingPromptAdmissionID !== undefined ||
+        existing.deadlineExceededAt !== undefined,
       // A live observation restarts the demotion clock.
       statusUncertainSince: undefined,
       terminalUnreconciled: false,
@@ -888,7 +1063,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       terminalRevision: existing.terminalRevision + 1,
       timedOut: false,
       recoverableAfterLiveBusy: false,
-      statusUncertain: false,
+      statusUncertain: existing.pendingPromptAdmissionID !== undefined,
       terminalUnreconciled: true,
       updatedAt: now,
       completedAt: existing.completedAt ?? now,
@@ -954,6 +1129,31 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return updated;
   }
 
+  confirmPromptAdmission(
+    taskID: string,
+    generation: number,
+    promptMessageID: string,
+  ): boolean {
+    const existing = this.jobs.get(taskID);
+    if (
+      existing?.generation !== generation ||
+      promptMessageID.length === 0 ||
+      existing.pendingPromptAdmissionID !== promptMessageID
+    )
+      return false;
+    this.setJob({
+      ...existing,
+      pendingPromptAdmissionID: undefined,
+      statusUncertain:
+        existing.deadlineExceededAt !== undefined
+          ? existing.statusUncertain
+          : false,
+      lastStatusError: undefined,
+      statusUncertainSince: undefined,
+    });
+    return true;
+  }
+
   markReconciled(
     taskID: string,
     now = Date.now(),
@@ -980,7 +1180,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       const updated: BackgroundJobRecord = {
         ...existing,
         terminalUnreconciled: false,
-        statusUncertain: false,
+        statusUncertain: existing.pendingPromptAdmissionID !== undefined,
         updatedAt: now,
         lastUsedAt: now,
       };
@@ -994,7 +1194,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       state: 'reconciled',
       terminalUnreconciled: false,
       statusUncertain:
-        existing.deadlineExceededAt !== undefined
+        existing.deadlineExceededAt !== undefined ||
+        existing.pendingPromptAdmissionID !== undefined
           ? existing.statusUncertain
           : false,
       updatedAt: now,
@@ -1066,7 +1267,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       terminalRevision: existing.terminalRevision + 1,
       timedOut: false,
       recoverableAfterLiveBusy: false,
-      statusUncertain: false,
+      statusUncertain: existing.pendingPromptAdmissionID !== undefined,
       cancellationRequested: true,
       terminalUnreconciled: true,
       updatedAt: now,
@@ -1090,6 +1291,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     if (
       existing?.generation !== generation ||
       existing.state !== 'running' ||
+      existing.pendingPromptAdmissionID !== undefined ||
       this.liveLeases.has(taskID)
     ) {
       return undefined;
@@ -1109,7 +1311,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     generation: number,
   ): BackgroundJobLease | undefined {
     const existing = this.jobs.get(taskID);
-    if (existing?.generation !== generation || this.liveLeases.has(taskID)) {
+    if (
+      existing?.generation !== generation ||
+      existing.pendingPromptAdmissionID !== undefined ||
+      this.liveLeases.has(taskID)
+    ) {
       return undefined;
     }
     const lease: BackgroundJobLease = {
@@ -1130,6 +1336,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     if (
       existing?.generation !== generation ||
       existing.state !== 'running' ||
+      existing.pendingPromptAdmissionID !== undefined ||
       this.liveLeases.has(taskID)
     ) {
       return undefined;
@@ -1161,6 +1368,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       (terminalRevision !== undefined &&
         existing.terminalRevision !== terminalRevision) ||
       !terminal ||
+      existing.pendingPromptAdmissionID !== undefined ||
       this.liveLeases.has(taskID)
     ) {
       return undefined;
@@ -1248,7 +1456,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     if (
       existing?.state !== 'running' ||
       existing?.generation !== input.generation ||
-      existing?.deadlineExceededAt !== undefined
+      existing?.deadlineExceededAt !== undefined ||
+      existing.pendingPromptAdmissionID !== undefined
     ) {
       return undefined;
     }
@@ -1259,7 +1468,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       timedOut: true,
       deadlineExceededAt: now,
       cancellationRequested: true,
-      statusUncertain: false,
+      statusUncertain: existing.pendingPromptAdmissionID !== undefined,
       updatedAt: now,
       resultSummary:
         input.resultSummary ??
@@ -1289,7 +1498,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       terminalRevision: existing.terminalRevision + 1,
       timedOut: true,
       recoverableAfterLiveBusy: false,
-      statusUncertain: input.statusUncertain,
+      statusUncertain:
+        existing.pendingPromptAdmissionID !== undefined ||
+        input.statusUncertain,
       cancellationRequested: true,
       terminalUnreconciled: true,
       updatedAt: now,
@@ -1349,7 +1560,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     if (
       job.state !== 'running' ||
       !job.recoverableAfterLiveBusy ||
-      job.deadlineExceededAt !== undefined
+      job.deadlineExceededAt !== undefined ||
+      job.pendingPromptAdmissionID !== undefined
     ) {
       return undefined;
     }
@@ -1376,13 +1588,39 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   /** Every record mutation funnels through here: wake mutation
    * listeners so projections can re-derive cheaply. */
   private setJob(record: BackgroundJobRecord): void {
+    const previous = this.jobs.get(record.taskID);
+    if (previous && previous.rootSessionID !== record.rootSessionID) {
+      this.notifyMutationListeners({
+        rootSessionID: previous.rootSessionID,
+        taskID: record.taskID,
+      });
+    }
     this.jobs.set(record.taskID, record);
-    this.notifyMutationListeners();
+    this.notifyMutationListeners({
+      rootSessionID: record.rootSessionID,
+      taskID: record.taskID,
+      record,
+    });
+  }
+
+  /** Detach a record and describe the change without notifying. Splitting
+   * detach from notify lets a batch empty the map before any listener runs, so
+   * a whole-board projection sees one final state instead of one per deleted
+   * job. */
+  private detachJob(taskID: string): BackgroundJobMutation | undefined {
+    const record = this.jobs.get(taskID);
+    if (!record) return undefined;
+    this.jobs.delete(taskID);
+    return {
+      rootSessionID: record.rootSessionID,
+      taskID,
+    };
   }
 
   private deleteJob(taskID: string): void {
-    this.jobs.delete(taskID);
-    this.notifyMutationListeners();
+    const change = this.detachJob(taskID);
+    if (!change) return;
+    this.notifyMutationListeners(change);
   }
 
   taskIDs(): Set<string> {
@@ -1537,18 +1775,39 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return byParent;
   }
 
+  /**
+   * Clear one parent's jobs as a single observable transition.
+   *
+   * Suppression is still recorded per job, and every record leaves the map
+   * before the first mutation notification runs, so a whole-board projection
+   * (sidebar destinations, live spinners) re-derives and re-publishes the
+   * final state once instead of once per deleted job. Deleting job by job
+   * interleaved the two, so each removal changed the projection and paid a
+   * full snapshot lock/read/write.
+   *
+   * Removal notifications stay one per taskID: the persistence owner keys
+   * every `removeTaskIDs` entry off `change.taskID`, so collapsing them into a
+   * single change would persist only one of the deletions.
+   */
   clearParent(parentSessionID: string): void {
     // A deleted parent's life ends; a restored copy (export/import emits no
     // session.created) carries numbers this board never issued.
     this.freshParents.delete(parentSessionID);
-    for (const job of this.list(parentSessionID)) {
+    const jobs = this.list(parentSessionID);
+    if (jobs.length === 0) return;
+    for (const job of jobs) {
       recordBackgroundJobSuppression(
         this,
         job.taskID,
         terminalResultPayloadOf(job),
       );
-      this.deleteJob(job.taskID);
     }
+    const changes: BackgroundJobMutation[] = [];
+    for (const job of jobs) {
+      const change = this.detachJob(job.taskID);
+      if (change) changes.push(change);
+    }
+    for (const change of changes) this.notifyMutationListeners(change);
   }
 
   drop(taskID: string): void {
@@ -1743,6 +2002,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const record: BackgroundJobRecord = {
       taskID,
       parentSessionID,
+      rootSessionID:
+        this.jobs.get(parentSessionID)?.rootSessionID ?? parentSessionID,
       agent,
       description: input.description.trim() || `recovered ${agent} session`,
       ...(input.objective !== undefined ? { objective: input.objective } : {}),
@@ -1779,8 +2040,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return record;
   }
 
-  /** Advance the in-memory counter to a trusted historical value. Does not
-   * allocate a new counter. */
+  /** Advance to a trusted historical alias without allocating a new one. */
   private noteTrustedAlias(
     parentSessionID: string,
     agent: string,
@@ -1792,15 +2052,20 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const counter = Number(match[1]);
     if (!Number.isSafeInteger(counter) || counter < 1) return;
     const key = `${parentSessionID}:${prefix}`;
-    if (counter > (this.counters.get(key) ?? 0))
+    if (counter > (this.counters.get(key) ?? 0)) {
       this.counters.set(key, counter);
+      bumpAliasHighWaterMark(parentSessionID, prefix, counter);
+    }
   }
 
   private nextAlias(parentSessionID: string, agent: string): string {
     const prefix = aliasPrefixForAgent(agent);
     const key = `${parentSessionID}:${prefix}`;
-    const next = (this.counters.get(key) ?? 0) + 1;
+    // Persisted high-water marks prevent alias reuse across restarts.
+    const seeded = this.aliasCounterHighWater(parentSessionID, prefix);
+    const next = Math.max(this.counters.get(key) ?? 0, seeded) + 1;
     this.counters.set(key, next);
+    bumpAliasHighWaterMark(parentSessionID, prefix, next);
     return `${prefix}-${next}`;
   }
 
@@ -1847,7 +2112,10 @@ export function deriveFullObjective(input: {
 function isReusable(job: BackgroundJobRecord): boolean {
   const terminal = job.terminalState ?? terminalStateOf(job.state);
   return (
-    terminal !== undefined && !job.terminalUnreconciled && !job.statusUncertain
+    terminal !== undefined &&
+    !job.terminalUnreconciled &&
+    !job.statusUncertain &&
+    job.pendingPromptAdmissionID === undefined
   );
 }
 
@@ -1875,7 +2143,10 @@ function sidebarRecency(selection: {
 
 function isRetainedStopped(job: BackgroundJobRecord): boolean {
   return (
-    job.state === 'stopped' && !job.terminalUnreconciled && !job.statusUncertain
+    job.state === 'stopped' &&
+    !job.terminalUnreconciled &&
+    !job.statusUncertain &&
+    job.pendingPromptAdmissionID === undefined
   );
 }
 

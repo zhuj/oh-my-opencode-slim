@@ -1,17 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import type { PluginInput } from '@opencode-ai/plugin';
 
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 import {
   createDeepworkGuardHook,
   guardOptionsFrom,
@@ -28,19 +21,74 @@ function makeCtx(directory: string): PluginInput {
 }
 
 function makeRoot(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'deepwork-guard-'));
-  mkdirSync(path.join(root, '.slim', 'deepwork'), { recursive: true });
+  const root = createTmpDir();
+  mkdirSync(path.join(root, '.local', '.slim', 'deepwork'), {
+    recursive: true,
+  });
   return root;
 }
 
 function clean(root: string): void {
-  rmSync(root, { recursive: true, force: true });
+  removeTmpDir(root);
 }
 
 describe('deepwork guard', () => {
+  test('enforce checks completions under the canonical local deepwork root', async () => {
+    const root = createTmpDir();
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
+    mkdirSync(deepworkRoot, { recursive: true });
+    mkdirSync(path.join(root, '.opencode'), { recursive: true });
+    writeFileSync(
+      path.join(root, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({ deepworkGuardMode: 'enforce' }),
+    );
+    const hook = createDeepworkGuardHook(makeCtx(root));
+
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'write', sessionID: 'ses-a', callID: 'c1' },
+        {
+          args: {
+            path: path.join(deepworkRoot, 't1', 'progress.md'),
+            content:
+              'status: completed\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n',
+          },
+        },
+      ),
+    ).rejects.toThrow(
+      /Completion blocked.*\.local\/\.slim\/deepwork\/t1\/ghost\.md/,
+    );
+    clean(root);
+  });
+
+  test('enforce ignores writes under the retired deepwork root', async () => {
+    const root = createTmpDir();
+    const legacyRoot = path.join(root, '.slim', 'deepwork');
+    mkdirSync(legacyRoot, { recursive: true });
+    mkdirSync(path.join(root, '.opencode'), { recursive: true });
+    writeFileSync(
+      path.join(root, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({ deepworkGuardMode: 'enforce' }),
+    );
+    const hook = createDeepworkGuardHook(makeCtx(root));
+
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'write', sessionID: 'ses-a', callID: 'c1' },
+        {
+          args: {
+            path: path.join(legacyRoot, 't1', 'progress.md'),
+            content: 'status: completed\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+    clean(root);
+  });
+
   test('taskSlug resolves task-directory writes only', () => {
     const root = makeRoot();
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     expect(
       taskSlug(deepworkRoot, path.join(deepworkRoot, 'my-task', 'progress.md')),
     ).toBe('my-task');
@@ -91,7 +139,7 @@ describe('deepwork guard', () => {
 
   test('receipt: records path, bytes, session; missing file records nothing', () => {
     const root = makeRoot();
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     const dir = path.join(deepworkRoot, 't1');
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, 'a.md'), 'hello receipt');
@@ -100,7 +148,7 @@ describe('deepwork guard', () => {
       {
         slug: 't1',
         filePath: path.join(dir, 'a.md'),
-        refPath: '.slim/deepwork/t1/a.md',
+        refPath: '.local/.slim/deepwork/t1/a.md',
       },
       'ses-a',
     );
@@ -113,7 +161,7 @@ describe('deepwork guard', () => {
     const lines = readFileSync(receiptsPath, 'utf-8').trim().split('\n');
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0])).toMatchObject({
-      path: '.slim/deepwork/t1/a.md',
+      path: '.local/.slim/deepwork/t1/a.md',
       bytes: 'hello receipt'.length,
       sessionID: 'ses-a',
     });
@@ -122,7 +170,7 @@ describe('deepwork guard', () => {
       {
         slug: 't1',
         filePath: path.join(dir, 'ghost.md'),
-        refPath: '.slim/deepwork/t1/ghost.md',
+        refPath: '.local/.slim/deepwork/t1/ghost.md',
       },
       'ses-a',
     );
@@ -134,70 +182,73 @@ describe('deepwork guard', () => {
 
   test('referencedArtifacts extracts same-slug refs only', () => {
     const content = [
-      'see `.slim/deepwork/t1/a.md` and .slim/deepwork/t1/b.md',
-      'other: .slim/deepwork/t2/c.md',
-      'runtime: .slim/deepwork/t1/.runtime/receipts/t1.jsonl',
+      'see `.local/.slim/deepwork/t1/a.md` and .local/.slim/deepwork/t1/b.md',
+      'other: .local/.slim/deepwork/t2/c.md',
+      'runtime: .local/.slim/deepwork/t1/.runtime/receipts/t1.jsonl',
     ].join('\n');
     expect(referencedArtifacts(content, 't1')).toEqual([
-      '.slim/deepwork/t1/a.md',
-      '.slim/deepwork/t1/b.md',
+      '.local/.slim/deepwork/t1/a.md',
+      '.local/.slim/deepwork/t1/b.md',
     ]);
   });
 
   test('missingReceipts compares refs against recorded paths', () => {
     const root = makeRoot();
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     const receiptsDir = path.join(deepworkRoot, '.runtime', 'receipts');
     mkdirSync(receiptsDir, { recursive: true });
     writeFileSync(
       path.join(receiptsDir, 't1.jsonl'),
-      `${JSON.stringify({ path: '.slim/deepwork/t1/a.md' })}\n`,
+      `${JSON.stringify({ path: '.local/.slim/deepwork/t1/a.md' })}\n`,
     );
     expect(
-      missingReceipts(deepworkRoot, 't1', ['.slim/deepwork/t1/a.md']),
+      missingReceipts(deepworkRoot, 't1', ['.local/.slim/deepwork/t1/a.md']),
     ).toEqual([]);
     expect(
       missingReceipts(deepworkRoot, 't1', [
-        '.slim/deepwork/t1/a.md',
-        '.slim/deepwork/t1/ghost.md',
+        '.local/.slim/deepwork/t1/a.md',
+        '.local/.slim/deepwork/t1/ghost.md',
       ]),
-    ).toEqual(['.slim/deepwork/t1/ghost.md']);
+    ).toEqual(['.local/.slim/deepwork/t1/ghost.md']);
     clean(root);
   });
 
   test('unreceiptedArtifacts: receipted refs pass, missing refs reported', () => {
     const root = makeRoot();
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     const receiptsDir = path.join(deepworkRoot, '.runtime', 'receipts');
     mkdirSync(receiptsDir, { recursive: true });
     writeFileSync(
       path.join(receiptsDir, 't1.jsonl'),
-      `${JSON.stringify({ path: '.slim/deepwork/t1/real.md' })}\n`,
+      `${JSON.stringify({ path: '.local/.slim/deepwork/t1/real.md' })}\n`,
     );
     expect(
       unreceiptedArtifacts(
         deepworkRoot,
         't1',
-        'status: completed\n\nsee `.slim/deepwork/t1/real.md`\n',
+        'status: completed\n\nsee `.local/.slim/deepwork/t1/real.md`\n',
       ),
     ).toEqual([]);
     expect(
       unreceiptedArtifacts(
         deepworkRoot,
         't1',
-        'status: completed\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+        'status: completed\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n',
       ),
-    ).toEqual(['.slim/deepwork/t1/ghost.md']);
+    ).toEqual(['.local/.slim/deepwork/t1/ghost.md']);
     clean(root);
   });
 
   test('referencedArtifacts strips trailing sentence punctuation', () => {
     expect(
       referencedArtifacts(
-        'see .slim/deepwork/t1/a.md. Also `.slim/deepwork/t1/b.md`.',
+        'see .local/.slim/deepwork/t1/a.md. Also `.local/.slim/deepwork/t1/b.md`.',
         't1',
       ),
-    ).toEqual(['.slim/deepwork/t1/a.md', '.slim/deepwork/t1/b.md']);
+    ).toEqual([
+      '.local/.slim/deepwork/t1/a.md',
+      '.local/.slim/deepwork/t1/b.md',
+    ]);
   });
 
   test('write completions are blocked before landing in enforce mode', () => {
@@ -208,14 +259,15 @@ describe('deepwork guard', () => {
       JSON.stringify({ deepworkGuardMode: 'enforce' }),
     );
     const hook = createDeepworkGuardHook(makeCtx(root));
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     expect(() =>
       hook['tool.execute.before'](
         { tool: 'write', sessionID: 'ses-a', callID: 'c1' },
         {
           args: {
             path: path.join(deepworkRoot, 't1', 'progress.md'),
-            content: 'status: completed\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+            content:
+              'status: completed\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n',
           },
         },
       ),
@@ -231,7 +283,7 @@ describe('deepwork guard', () => {
       JSON.stringify({ deepworkGuardMode: 'enforce' }),
     );
     const hook = createDeepworkGuardHook(makeCtx(root));
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     // OpenCode v1 write/edit name the target `filePath`; v2 core uses `path`.
     expect(() =>
       hook['tool.execute.before'](
@@ -239,7 +291,8 @@ describe('deepwork guard', () => {
         {
           args: {
             filePath: path.join(deepworkRoot, 't1', 'progress.md'),
-            content: 'status: completed\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+            content:
+              'status: completed\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n',
           },
         },
       ),
@@ -250,7 +303,7 @@ describe('deepwork guard', () => {
   test('failed edits record no receipt (unchanged file)', () => {
     const root = makeRoot();
     const hook = createDeepworkGuardHook(makeCtx(root));
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     const dir = path.join(deepworkRoot, 't1');
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, 'a.md'), 'old content');
@@ -279,12 +332,12 @@ describe('deepwork guard', () => {
       JSON.stringify({ deepworkGuardMode: 'enforce' }),
     );
     const hook = createDeepworkGuardHook(makeCtx(root));
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     const progressPath = path.join(deepworkRoot, 't1', 'progress.md');
     mkdirSync(path.dirname(progressPath), { recursive: true });
     writeFileSync(
       progressPath,
-      'status: active\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+      'status: active\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n',
     );
     // The edit's fragment carries no artifact refs, but the before phase
     // simulates the resulting content and blocks the flip before it lands.
@@ -311,12 +364,12 @@ describe('deepwork guard', () => {
       JSON.stringify({ deepworkGuardMode: 'enforce' }),
     );
     const hook = createDeepworkGuardHook(makeCtx(root));
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     const progressPath = path.join(deepworkRoot, 't1', 'progress.md');
     mkdirSync(path.dirname(progressPath), { recursive: true });
     writeFileSync(
       progressPath,
-      'status: active\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+      'status: active\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n',
     );
     // A body edit the simulation clears (no flip in the resulting content):
     // the before phase passes, the file lands flipped anyway, and the after
@@ -333,7 +386,7 @@ describe('deepwork guard', () => {
     );
     writeFileSync(
       progressPath,
-      'status: completed\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+      'status: completed\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n',
     );
     const output = { output: 'edited' };
     hook['tool.execute.after'](
@@ -347,7 +400,7 @@ describe('deepwork guard', () => {
   test('hook: task writes record receipts; completion prunes', () => {
     const root = makeRoot();
     const hook = createDeepworkGuardHook(makeCtx(root));
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     hook['tool.execute.before'](
       { tool: 'write', sessionID: 'ses-a', callID: 'c1' },
       {
@@ -368,13 +421,13 @@ describe('deepwork guard', () => {
       {
         args: {
           path: path.join(deepworkRoot, 't1', 'progress.md'),
-          content: 'status: completed\n\nsee `.slim/deepwork/t1/a.md`\n',
+          content: 'status: completed\n\nsee `.local/.slim/deepwork/t1/a.md`\n',
         },
       },
     );
     writeFileSync(
       path.join(deepworkRoot, 't1', 'progress.md'),
-      'status: completed\n\nsee `.slim/deepwork/t1/a.md`\n',
+      'status: completed\n\nsee `.local/.slim/deepwork/t1/a.md`\n',
     );
     hook['tool.execute.after'](
       { tool: 'write', sessionID: 'ses-a', callID: 'c2' },
@@ -389,14 +442,14 @@ describe('deepwork guard', () => {
   test('completion re-edits do not re-trigger the gate (flip idempotence)', () => {
     const root = makeRoot();
     const hook = createDeepworkGuardHook(makeCtx(root));
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     const progressPath = path.join(deepworkRoot, 't1', 'progress.md');
     mkdirSync(path.join(deepworkRoot, 't1'), { recursive: true });
     // The file is already completed; a re-edit (typo fix) referencing a
     // ghost artifact must NOT trigger the gate.
     writeFileSync(
       progressPath,
-      'status: completed\n\nsee `.slim/deepwork/t1/a.md`\n',
+      'status: completed\n\nsee `.local/.slim/deepwork/t1/a.md`\n',
     );
     expect(() =>
       hook['tool.execute.before'](
@@ -405,7 +458,7 @@ describe('deepwork guard', () => {
           args: {
             path: progressPath,
             newString:
-              'status: completed\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+              'status: completed\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n',
           },
         },
       ),
@@ -416,7 +469,7 @@ describe('deepwork guard', () => {
   test('phantom writes produce no receipt and fail the gate', () => {
     const root = makeRoot();
     const hook = createDeepworkGuardHook(makeCtx(root));
-    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    const deepworkRoot = path.join(root, '.local', '.slim', 'deepwork');
     // A lane "writes" a file that never lands: the before-hook captures it,
     // the after-hook's stat fails, no receipt is recorded.
     hook['tool.execute.before'](
@@ -432,9 +485,10 @@ describe('deepwork guard', () => {
     expect(
       existsSync(path.join(deepworkRoot, '.runtime', 'receipts', 't1.jsonl')),
     ).toBe(false);
-    const content = 'status: completed\n\nsee `.slim/deepwork/t1/ghost.md`\n';
+    const content =
+      'status: completed\n\nsee `.local/.slim/deepwork/t1/ghost.md`\n';
     expect(unreceiptedArtifacts(deepworkRoot, 't1', content)).toEqual([
-      '.slim/deepwork/t1/ghost.md',
+      '.local/.slim/deepwork/t1/ghost.md',
     ]);
     clean(root);
   });

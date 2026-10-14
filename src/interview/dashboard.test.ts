@@ -1,10 +1,11 @@
 import { describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import { get } from 'node:http';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { withTmpDir } from '../test-utils';
 import { createDashboardServer } from './dashboard';
 import { bindFreePort } from './test-port';
+import type { InterviewStateEntry } from './types';
 
 // Helper to start a dashboard on a held port (bindFreePort keeps the
 // listener open, the dashboard adopts it — no TOCTOU window).
@@ -35,11 +36,14 @@ async function startDashboard() {
 }
 
 // Helper to create a temp directory with interview files
-async function createTempInterviewDir() {
-  const tempDir = await fs.mkdtemp(path.join(tmpdir(), 'dashboard-test-'));
-  const interviewDir = path.join(tempDir, 'interview');
-  await fs.mkdir(interviewDir, { recursive: true });
-  return tempDir;
+async function withTempInterviewDir<T>(
+  callback: (tempDir: string) => Promise<T>,
+): Promise<T> {
+  return withTmpDir(async (tempDir) => {
+    const interviewDir = path.join(tempDir, '.local', 'interview');
+    await fs.mkdir(interviewDir, { recursive: true });
+    return callback(tempDir);
+  });
 }
 
 async function openSseConnection(
@@ -116,162 +120,438 @@ async function openSseConnection(
 
 describe('dashboard server', () => {
   test('uses each manual folder project outputFolder', async () => {
-    const originalEnv = { ...process.env };
-    const tempDir = await fs.mkdtemp(path.join(tmpdir(), 'dashboard-project-'));
-    const userConfigDir = await fs.mkdtemp(
-      path.join(tmpdir(), 'dashboard-user-config-'),
-    );
-    try {
-      delete process.env.OPENCODE_CONFIG_DIR;
-      process.env.XDG_CONFIG_HOME = userConfigDir;
-
-      const configDir = path.join(tempDir, '.opencode');
-      await fs.mkdir(configDir, { recursive: true });
-      await fs.writeFile(
-        path.join(configDir, 'oh-my-opencode-slim.json'),
-        JSON.stringify({ interview: { outputFolder: 'specs' } }),
-      );
-      await fs.mkdir(path.join(tempDir, 'specs'));
-      await fs.writeFile(
-        path.join(tempDir, 'specs', 'foo.md'),
-        '# Foo\n\n## Summary\nA spec',
-      );
-
-      const { port, server } = await bindFreePort();
-      const dashboard = createDashboardServer({
-        port,
-        outputFolder: 'interview',
-        server,
-      });
-      dashboard.addManualFolder(tempDir);
+    await withTmpDir(async (root) => {
+      const originalEnv = { ...process.env };
+      const tempDir = path.join(root, 'project');
+      const userConfigDir = path.join(root, 'user-config');
       try {
-        const baseUrl = await dashboard.start();
-        const response = await fetch(
-          `${baseUrl}/api/files?token=${dashboard.authToken}`,
+        delete process.env.OPENCODE_CONFIG_DIR;
+        process.env.XDG_CONFIG_HOME = userConfigDir;
+
+        const configDir = path.join(tempDir, '.opencode');
+        await fs.mkdir(configDir, { recursive: true });
+        await fs.writeFile(
+          path.join(configDir, 'oh-my-opencode-slim.json'),
+          JSON.stringify({ interview: { outputFolder: 'specs' } }),
         );
-        expect(response.status).toBe(200);
-        expect(await response.json()).toMatchObject({
-          files: expect.arrayContaining([
-            expect.objectContaining({ fileName: 'foo.md' }),
-          ]),
+        await fs.mkdir(path.join(tempDir, '.local', 'specs'), {
+          recursive: true,
         });
+        await fs.writeFile(
+          path.join(tempDir, '.local', 'specs', 'foo.md'),
+          '# Foo\n\n## Summary\nA spec',
+        );
+
+        const { port, server } = await bindFreePort();
+        const dashboard = createDashboardServer({
+          port,
+          outputFolder: 'interview',
+          server,
+        });
+        dashboard.addManualFolder(tempDir);
+        try {
+          const baseUrl = await dashboard.start();
+          const response = await fetch(
+            `${baseUrl}/api/files?token=${dashboard.authToken}`,
+          );
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({
+            files: expect.arrayContaining([
+              expect.objectContaining({ fileName: 'foo.md' }),
+            ]),
+          });
+        } finally {
+          dashboard.close();
+        }
       } finally {
-        dashboard.close();
+        process.env = originalEnv;
       }
-    } finally {
-      process.env = originalEnv;
-      await fs.rm(tempDir, { recursive: true, force: true });
-      await fs.rm(userConfigDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test('falls back to the default folder for projects without interview config', async () => {
-    const originalEnv = { ...process.env };
-    const tempDir = await fs.mkdtemp(
-      path.join(tmpdir(), 'dashboard-projects-'),
-    );
-    const userConfigDir = await fs.mkdtemp(
-      path.join(tmpdir(), 'dashboard-user-config-'),
-    );
-    try {
-      delete process.env.OPENCODE_CONFIG_DIR;
-      process.env.XDG_CONFIG_HOME = userConfigDir;
-      const ownerDir = path.join(tempDir, 'owner');
-      const secondDir = path.join(tempDir, 'second');
-      await fs.mkdir(path.join(ownerDir, '.opencode'), { recursive: true });
-      await fs.writeFile(
-        path.join(ownerDir, '.opencode', 'oh-my-opencode-slim.json'),
-        JSON.stringify({ interview: { outputFolder: 'specs' } }),
-      );
-      await fs.mkdir(path.join(ownerDir, 'specs'), { recursive: true });
-      await fs.mkdir(path.join(secondDir, 'interview'), { recursive: true });
-      await fs.writeFile(
-        path.join(secondDir, 'interview', 'x.md'),
-        '# X\n\n## Summary\nA spec',
-      );
-
-      const { port, server } = await bindFreePort();
-      const dashboard = createDashboardServer({
-        port,
-        outputFolder: 'specs',
-        server,
-      });
-      dashboard.addManualFolder(ownerDir);
-      dashboard.addManualFolder(secondDir);
+    await withTmpDir(async (tempDir) => {
+      const originalEnv = { ...process.env };
+      const userConfigDir = path.join(tempDir, 'user-config');
       try {
-        const baseUrl = await dashboard.start();
-        const response = await fetch(
-          `${baseUrl}/api/files?token=${dashboard.authToken}`,
+        delete process.env.OPENCODE_CONFIG_DIR;
+        process.env.XDG_CONFIG_HOME = userConfigDir;
+        const ownerDir = path.join(tempDir, 'owner');
+        const secondDir = path.join(tempDir, 'second');
+        await fs.mkdir(path.join(ownerDir, '.opencode'), { recursive: true });
+        await fs.writeFile(
+          path.join(ownerDir, '.opencode', 'oh-my-opencode-slim.json'),
+          JSON.stringify({ interview: { outputFolder: 'specs' } }),
         );
-        expect(await response.json()).toMatchObject({
-          files: expect.arrayContaining([
-            expect.objectContaining({ fileName: 'x.md', directory: secondDir }),
-          ]),
+        await fs.mkdir(path.join(ownerDir, '.local', 'specs'), {
+          recursive: true,
         });
+        await fs.mkdir(path.join(secondDir, '.local', 'interview'), {
+          recursive: true,
+        });
+        await fs.writeFile(
+          path.join(secondDir, '.local', 'interview', 'x.md'),
+          '# X\n\n## Summary\nA spec',
+        );
+
+        const { port, server } = await bindFreePort();
+        const dashboard = createDashboardServer({
+          port,
+          outputFolder: 'specs',
+          server,
+        });
+        dashboard.addManualFolder(ownerDir);
+        dashboard.addManualFolder(secondDir);
+        try {
+          const baseUrl = await dashboard.start();
+          const response = await fetch(
+            `${baseUrl}/api/files?token=${dashboard.authToken}`,
+          );
+          expect(await response.json()).toMatchObject({
+            files: expect.arrayContaining([
+              expect.objectContaining({
+                fileName: 'x.md',
+                directory: secondDir,
+              }),
+            ]),
+          });
+        } finally {
+          dashboard.close();
+        }
       } finally {
-        dashboard.close();
+        process.env = originalEnv;
       }
-    } finally {
-      process.env = originalEnv;
-      await fs.rm(tempDir, { recursive: true, force: true });
-      await fs.rm(userConfigDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test('uses v2 ancestor project config for manual folders', async () => {
-    const originalEnv = { ...process.env };
-    const tempDir = await fs.mkdtemp(path.join(tmpdir(), 'dashboard-v2-'));
-    const userConfigDir = await fs.mkdtemp(
-      path.join(tmpdir(), 'dashboard-user-config-'),
-    );
-    try {
-      delete process.env.OPENCODE_CONFIG_DIR;
-      process.env.XDG_CONFIG_HOME = userConfigDir;
-      const ancestorDir = path.join(tempDir, 'workspace');
-      const repoDir = path.join(ancestorDir, 'repo');
-      await fs.mkdir(path.join(ancestorDir, '.opencode'), { recursive: true });
-      await fs.writeFile(
-        path.join(ancestorDir, '.opencode', 'oh-my-opencode-slim.json'),
-        JSON.stringify({ interview: { outputFolder: 'specs' } }),
-      );
-      await fs.mkdir(path.join(repoDir, '.git'), { recursive: true });
-      await fs.mkdir(path.join(repoDir, '.opencode'), { recursive: true });
-      await fs.writeFile(
-        path.join(repoDir, '.opencode', 'oh-my-opencode-slim.json'),
-        JSON.stringify({ interview: { dashboard: true } }),
-      );
-      await fs.mkdir(path.join(repoDir, 'specs'));
-      await fs.writeFile(
-        path.join(repoDir, 'specs', 'x.md'),
-        '# X\n\n## Summary\nA spec',
-      );
-
-      const { port, server } = await bindFreePort();
-      const dashboard = createDashboardServer({
-        port,
-        outputFolder: 'interview',
-        hostFlavor: 'v2',
-        server,
-      });
-      dashboard.addManualFolder(repoDir);
+    await withTmpDir(async (tempDir) => {
+      const originalEnv = { ...process.env };
+      const userConfigDir = path.join(tempDir, 'user-config');
       try {
-        const baseUrl = await dashboard.start();
-        const response = await fetch(
-          `${baseUrl}/api/files?token=${dashboard.authToken}`,
-        );
-        expect(await response.json()).toMatchObject({
-          files: expect.arrayContaining([
-            expect.objectContaining({ fileName: 'x.md', directory: repoDir }),
-          ]),
+        delete process.env.OPENCODE_CONFIG_DIR;
+        process.env.XDG_CONFIG_HOME = userConfigDir;
+        const ancestorDir = path.join(tempDir, 'workspace');
+        const repoDir = path.join(ancestorDir, 'repo');
+        await fs.mkdir(path.join(ancestorDir, '.opencode'), {
+          recursive: true,
         });
+        await fs.writeFile(
+          path.join(ancestorDir, '.opencode', 'oh-my-opencode-slim.json'),
+          JSON.stringify({ interview: { outputFolder: 'specs' } }),
+        );
+        await fs.mkdir(path.join(repoDir, '.git'), { recursive: true });
+        await fs.mkdir(path.join(repoDir, '.opencode'), { recursive: true });
+        await fs.writeFile(
+          path.join(repoDir, '.opencode', 'oh-my-opencode-slim.json'),
+          JSON.stringify({ interview: { dashboard: true } }),
+        );
+        await fs.mkdir(path.join(repoDir, '.local', 'specs'), {
+          recursive: true,
+        });
+        await fs.writeFile(
+          path.join(repoDir, '.local', 'specs', 'x.md'),
+          '# X\n\n## Summary\nA spec',
+        );
+
+        const { port, server } = await bindFreePort();
+        const dashboard = createDashboardServer({
+          port,
+          outputFolder: 'interview',
+          hostFlavor: 'v2',
+          server,
+        });
+        dashboard.addManualFolder(repoDir);
+        try {
+          const baseUrl = await dashboard.start();
+          const response = await fetch(
+            `${baseUrl}/api/files?token=${dashboard.authToken}`,
+          );
+          expect(await response.json()).toMatchObject({
+            files: expect.arrayContaining([
+              expect.objectContaining({ fileName: 'x.md', directory: repoDir }),
+            ]),
+          });
+        } finally {
+          dashboard.close();
+        }
       } finally {
-        dashboard.close();
+        process.env = originalEnv;
       }
-    } finally {
-      process.env = originalEnv;
-      await fs.rm(tempDir, { recursive: true, force: true });
-      await fs.rm(userConfigDir, { recursive: true, force: true });
-    }
+    });
+  });
+
+  describe('output folder routing', () => {
+    test('recovers every registered folder in a shared project without starting a server', async () => {
+      await withTmpDir(async (directory) => {
+        const dashboard = createDashboardServer({
+          port: 0,
+          outputFolder: 'interview',
+        });
+        try {
+          for (const folder of ['first', 'second']) {
+            const target = path.join(directory, '.local', folder);
+            await fs.mkdir(target, { recursive: true });
+            await fs.writeFile(
+              path.join(target, `${folder}.md`),
+              `---\nsessionID: ${folder}\n---\n# ${folder}`,
+            );
+            dashboard.registerSession({
+              sessionID: folder,
+              directory,
+              outputFolder: folder === 'second' ? '.local/second' : folder,
+              pid: 0,
+              registeredAt: folder === 'first' ? 1 : 2,
+            });
+          }
+          await dashboard.refreshFiles();
+          for (const folder of ['first', 'second']) {
+            expect(dashboard.getState(`recovered-${folder}`)).toMatchObject({
+              sessionID: folder,
+              mode: 'session-disconnected',
+              filePath: path.join(directory, '.local', folder, `${folder}.md`),
+            });
+          }
+        } finally {
+          dashboard.close();
+        }
+      });
+    });
+
+    test.each(['in-process', 'http'] as const)(
+      'invalidates scans and fallback documents when a session changes folders (%s)',
+      async (registration) => {
+        await withTmpDir(async (directory) => {
+          for (const folder of ['first', 'second']) {
+            const target = path.join(directory, '.local', folder);
+            await fs.mkdir(target, { recursive: true });
+            await fs.writeFile(
+              path.join(target, `${folder}.md`),
+              `# ${folder}`,
+            );
+            await fs.writeFile(path.join(target, 'shared.md'), `# ${folder}`);
+          }
+          const { dashboard, baseUrl, authToken, cleanup } =
+            await startDashboard();
+          try {
+            const register = async (outputFolder: string) => {
+              const info = {
+                sessionID: 'session-folders',
+                directory,
+                outputFolder,
+                pid: 0,
+                registeredAt: Date.now(),
+              };
+              if (registration === 'in-process')
+                dashboard.registerSession(info);
+              else {
+                const response = await fetch(
+                  `${baseUrl}/api/register?token=${authToken}`,
+                  {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify(info),
+                  },
+                );
+                expect(response.status).toBe(200);
+              }
+            };
+            const files = async () => {
+              const response = await fetch(
+                `${baseUrl}/api/files?token=${authToken}`,
+              );
+              expect(response.status).toBe(200);
+              const data = (await response.json()) as {
+                files: Array<{ fileName: string; directory: string }>;
+              };
+              return data.files
+                .filter((file) => file.directory === directory)
+                .map((file) => file.fileName)
+                .sort();
+            };
+            const state = async () => {
+              const response = await fetch(
+                `${baseUrl}/api/interviews/live-run-shared/state?token=${authToken}`,
+              );
+              expect(response.status).toBe(200);
+              return (await response.json()) as {
+                document: string;
+                markdownPath: string;
+              };
+            };
+            dashboard.pushState({
+              interviewId: 'live-run-shared',
+              sessionID: 'session-folders',
+              idea: 'Shared',
+              mode: 'session-disconnected',
+              summary: '',
+              title: 'Shared',
+              questions: [],
+              pendingAnswers: null,
+              lastUpdatedAt: Date.now(),
+              filePath: '',
+              nudgeAction: null,
+            });
+            await register('missing');
+            expect((await state()).document).toBe('');
+            expect(await files()).toEqual([]);
+            await register('first');
+            expect(await files()).toEqual(['first.md', 'shared.md']);
+            expect((await state()).document).toBe('# first');
+            await register('second');
+            expect(await files()).toEqual(['second.md', 'shared.md']);
+            expect(await state()).toMatchObject({
+              document: '# second',
+              markdownPath: path.join(
+                directory,
+                '.local',
+                'second',
+                'shared.md',
+              ),
+            });
+          } finally {
+            cleanup();
+          }
+        });
+      },
+    );
+
+    test('scans different folders in one project and resolves each owning session', async () => {
+      await withTmpDir(async (directory) => {
+        const { dashboard, baseUrl, authToken, cleanup } =
+          await startDashboard();
+        try {
+          for (const folder of ['first', 'second']) {
+            const target = path.join(directory, '.local', folder);
+            await fs.mkdir(target, { recursive: true });
+            await fs.writeFile(
+              path.join(target, `${folder}.md`),
+              `# ${folder}`,
+            );
+            await fs.writeFile(path.join(target, 'shared.md'), `# ${folder}`);
+            dashboard.registerSession({
+              sessionID: folder,
+              directory,
+              outputFolder: folder,
+              pid: 0,
+              registeredAt: folder === 'first' ? 1 : 2,
+            });
+            dashboard.pushState({
+              interviewId: `live-${folder}-shared`,
+              sessionID: folder,
+              idea: folder,
+              mode: 'session-disconnected',
+              summary: '',
+              title: folder,
+              questions: [],
+              pendingAnswers: null,
+              lastUpdatedAt: Date.now(),
+              filePath: '',
+              nudgeAction: null,
+            });
+          }
+          const response = await fetch(
+            `${baseUrl}/api/files?token=${authToken}`,
+          );
+          expect(response.status).toBe(200);
+          const data = (await response.json()) as {
+            files: Array<{ fileName: string; directory: string }>;
+          };
+          expect(
+            data.files
+              .filter((file) => file.directory === directory)
+              .map((file) => file.fileName)
+              .sort(),
+          ).toEqual(['first.md', 'second.md', 'shared.md', 'shared.md']);
+          for (const folder of ['first', 'second']) {
+            const response = await fetch(
+              `${baseUrl}/api/interviews/live-${folder}-shared/state?token=${authToken}`,
+            );
+            expect(response.status).toBe(200);
+            expect(await response.json()).toMatchObject({
+              document: `# ${folder}`,
+              markdownPath: path.join(directory, '.local', folder, 'shared.md'),
+            });
+          }
+        } finally {
+          cleanup();
+        }
+      });
+    });
+
+    test('refreshes changed project folders and preserves recovered file paths across external edits', async () => {
+      await withTmpDir(async (directory) => {
+        const { dashboard, baseUrl, authToken, cleanup } =
+          await startDashboard();
+        try {
+          const configDir = path.join(directory, '.opencode');
+          await fs.mkdir(configDir);
+          const configPath = path.join(configDir, 'oh-my-opencode-slim.json');
+          for (const folder of ['first', 'second']) {
+            const target = path.join(directory, '.local', folder);
+            await fs.mkdir(target, { recursive: true });
+            await fs.writeFile(
+              path.join(target, `${folder}.md`),
+              `---\nsessionID: owner-${folder}\n---\n# ${folder}`,
+            );
+          }
+          await fs.writeFile(
+            configPath,
+            JSON.stringify({ interview: { outputFolder: 'first' } }),
+          );
+          dashboard.addManualFolder(directory);
+          await dashboard.refreshFiles();
+          expect(dashboard.getState('recovered-first')?.mode).toBe(
+            'session-disconnected',
+          );
+          const list = async () => {
+            const response = await fetch(
+              `${baseUrl}/api/files?token=${authToken}`,
+            );
+            const data = (await response.json()) as {
+              files: Array<{ fileName: string; directory: string }>;
+            };
+            return data.files
+              .filter((file) => file.directory === directory)
+              .map((file) => file.fileName);
+          };
+          expect(await list()).toEqual(['first.md']);
+          await fs.writeFile(
+            configPath,
+            JSON.stringify({ interview: { outputFolder: 'second' } }),
+          );
+          expect(await list()).toEqual(['second.md']);
+          await dashboard.refreshFiles();
+          expect(dashboard.getState('recovered-second')?.mode).toBe(
+            'session-disconnected',
+          );
+          const filePath = path.join(directory, '.local', 'first', 'first.md');
+          const state = async () => {
+            const response = await fetch(
+              `${baseUrl}/api/interviews/recovered-first/state?token=${authToken}`,
+            );
+            expect(response.status).toBe(200);
+            return (await response.json()) as {
+              document: string;
+              markdownPath: string;
+            };
+          };
+          expect((await state()).document).toContain('# first');
+          await fs.writeFile(filePath, '# Edited externally');
+          expect(await state()).toMatchObject({
+            document: '# Edited externally',
+            markdownPath: filePath,
+          });
+          await fs.writeFile(`${filePath}.new`, '# Atomic replacement');
+          await fs.rename(`${filePath}.new`, filePath);
+          expect((await state()).document).toBe('# Atomic replacement');
+          await fs.unlink(filePath);
+          expect((await state()).document).toBe('');
+        } finally {
+          cleanup();
+        }
+      });
+    });
   });
 
   describe('server lifecycle', () => {
@@ -332,6 +612,231 @@ describe('dashboard server', () => {
           'SSE response closed before initial state event',
         );
         await connection.closed;
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('dashboard security', () => {
+    function privateState(): InterviewStateEntry {
+      return {
+        interviewId: 'security-private',
+        sessionID: 'private-owner',
+        idea: 'Private feature idea',
+        mode: 'awaiting-user',
+        summary: 'Confidential summary',
+        title: 'Private title',
+        questions: [],
+        pendingAnswers: null,
+        lastUpdatedAt: 1_792_496_400_000,
+        filePath: '',
+        nudgeAction: null,
+        document: '# Private specification',
+      };
+    }
+
+    test.each([
+      ['existing', 'security-private'],
+      ['unknown', 'security-missing'],
+      ['invalid', 'invalid!'],
+      ['foreign-origin', 'security-private'],
+      ['invalid-credentials', 'security-private'],
+    ])(
+      'rejects unauthenticated SSE before disclosure (%s)',
+      async (kind, id) => {
+        const { dashboard, baseUrl, cleanup } = await startDashboard();
+        const controller = new AbortController();
+        try {
+          dashboard.pushState(privateState());
+          const headers: Record<string, string> = {};
+          if (kind === 'foreign-origin')
+            headers.origin = 'https://foreign.invalid';
+          if (kind === 'invalid-credentials') {
+            headers.authorization = 'Bearer invalid';
+            headers.cookie = 'dashboard_token=invalid';
+          }
+          const response = await fetch(
+            `${baseUrl}/api/interviews/${id}/events`,
+            {
+              headers,
+              signal: controller.signal,
+            },
+          );
+          expect(response.status).toBe(401);
+          expect(response.headers.get('content-type')).toContain(
+            'application/json',
+          );
+          expect(
+            response.headers.get('access-control-allow-origin'),
+          ).toBeNull();
+          expect(response.headers.get('set-cookie')).toBeNull();
+          expect(await response.json()).toEqual({ error: 'Unauthorized' });
+        } finally {
+          controller.abort();
+          cleanup();
+        }
+      },
+    );
+
+    test.each(['cookie', 'bearer', 'query'] as const)(
+      'authorizes initial SSE, broadcasts and polling with existing %s credentials',
+      async (method) => {
+        const { dashboard, baseUrl, authToken, cleanup } =
+          await startDashboard();
+        const controller = new AbortController();
+        let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+        try {
+          const entry = privateState();
+          dashboard.pushState(entry);
+          const headers: Record<string, string> = {};
+          let query = '';
+          if (method === 'cookie') {
+            const page = await fetch(
+              `${baseUrl}/interview/${entry.interviewId}`,
+            );
+            expect(page.status).toBe(200);
+            const cookie = page.headers.get('set-cookie');
+            expect(cookie).toContain('HttpOnly');
+            expect(cookie).toContain('SameSite=Strict');
+            expect(cookie).toContain('Path=/');
+            if (!cookie)
+              throw new Error('Interview page did not set its cookie');
+            headers.cookie = cookie.split(';')[0];
+            await page.text();
+          } else if (method === 'bearer') {
+            headers.authorization = `Bearer ${authToken}`;
+          } else {
+            query = `?token=${authToken}`;
+          }
+          const url = `${baseUrl}/api/interviews/${entry.interviewId}`;
+          const deniedPoll = await fetch(`${url}/state`);
+          expect(deniedPoll.status).toBe(401);
+          expect(await deniedPoll.json()).toEqual({ error: 'Unauthorized' });
+          const poll = await fetch(`${url}/state${query}`, { headers });
+          expect(poll.status).toBe(200);
+          expect(await poll.json()).toMatchObject({
+            interview: { id: entry.interviewId },
+            summary: entry.summary,
+          });
+          const stream = await fetch(`${url}/events${query}`, {
+            headers,
+            signal: controller.signal,
+          });
+          expect(stream.status).toBe(200);
+          expect(stream.headers.get('content-type')).toBe('text/event-stream');
+          expect(stream.headers.get('access-control-allow-origin')).toBeNull();
+          if (!stream.body) throw new Error('SSE response has no body');
+          reader = stream.body.getReader();
+          const decoder = new TextDecoder();
+          let buffered = '';
+          const readState = async () => {
+            for (;;) {
+              const boundary = buffered.indexOf('\n\n');
+              if (boundary >= 0) {
+                const event = buffered.slice(0, boundary);
+                buffered = buffered.slice(boundary + 2);
+                const prefix = 'event: state\ndata: ';
+                if (event.startsWith(prefix)) {
+                  return JSON.parse(event.slice(prefix.length));
+                }
+                continue;
+              }
+              const chunk = await reader?.read();
+              if (!chunk || chunk.done)
+                throw new Error('SSE closed before state');
+              buffered += decoder.decode(chunk.value, { stream: true });
+            }
+          };
+          expect(await readState()).toMatchObject({
+            interview: { id: entry.interviewId },
+            summary: entry.summary,
+            document: entry.document,
+          });
+          dashboard.pushState({
+            ...entry,
+            summary: 'Updated confidential summary',
+            document: '# Revised private specification',
+            lastUpdatedAt: entry.lastUpdatedAt + 1,
+          });
+          expect(await readState()).toMatchObject({
+            summary: 'Updated confidential summary',
+            document: '# Revised private specification',
+          });
+        } finally {
+          try {
+            await reader?.cancel();
+          } finally {
+            controller.abort();
+            cleanup();
+          }
+        }
+      },
+    );
+
+    test('public health exposes only counts and an opaque change signature', async () => {
+      const { dashboard, baseUrl, cleanup } = await startDashboard();
+      try {
+        const entry = privateState();
+        dashboard.pushState(entry);
+        const response = await fetch(`${baseUrl}/api/health`);
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        const health = JSON.parse(body);
+        expect(health).toEqual({
+          status: 'ok',
+          sessions: 0,
+          interviews: 1,
+          sig: expect.stringMatching(/^[0-9a-f]{64}$/),
+        });
+        for (const value of [
+          entry.interviewId,
+          entry.sessionID,
+          entry.idea,
+          entry.mode,
+          entry.summary,
+          entry.title,
+          String(entry.lastUpdatedAt),
+          entry.document,
+        ]) {
+          if (value) expect(body).not.toContain(value);
+        }
+      } finally {
+        cleanup();
+      }
+    });
+
+    test('public health is stable until the existing change tuple changes', async () => {
+      const { dashboard, baseUrl, cleanup } = await startDashboard();
+      try {
+        const health = async () => {
+          const response = await fetch(`${baseUrl}/api/health`);
+          expect(response.status).toBe(200);
+          return response.text();
+        };
+        const empty = await health();
+        expect(await health()).toBe(empty);
+        const entry = privateState();
+        dashboard.pushState(entry);
+        const first = await health();
+        expect(first).not.toBe(empty);
+        expect(await health()).toBe(first);
+        dashboard.pushState({ ...entry });
+        expect(await health()).toBe(first);
+        dashboard.pushState({ ...entry, mode: 'awaiting-agent' });
+        const busy = await health();
+        expect(busy).not.toBe(first);
+        expect(await health()).toBe(busy);
+        dashboard.pushState({
+          ...entry,
+          lastUpdatedAt: entry.lastUpdatedAt + 1,
+        });
+        const updated = await health();
+        expect(updated).not.toBe(first);
+        dashboard.removeSession(entry.sessionID);
+        expect(await health()).toBe(empty);
+        dashboard.pushState({ ...entry, interviewId: 'another-private' });
+        expect(await health()).not.toBe(first);
       } finally {
         cleanup();
       }
@@ -488,95 +993,107 @@ describe('dashboard server', () => {
     });
 
     test('uses a registered session output folder for its directory', async () => {
-      const originalEnv = { ...process.env };
-      const tempDir = await fs.mkdtemp(
-        path.join(tmpdir(), 'dashboard-register-'),
-      );
-      const userConfigDir = await fs.mkdtemp(
-        path.join(tmpdir(), 'dashboard-user-config-'),
-      );
-      delete process.env.OPENCODE_CONFIG_DIR;
-      process.env.XDG_CONFIG_HOME = userConfigDir;
-      await fs.mkdir(path.join(tempDir, 'specs'));
-      await fs.writeFile(
-        path.join(tempDir, 'specs', 'x.md'),
-        '# X\n\n## Summary\nA spec',
-      );
-      const { baseUrl, authToken, dashboard, cleanup } = await startDashboard();
-      dashboard.addManualFolder(tempDir);
-      try {
-        const response = await fetch(
-          `${baseUrl}/api/register?token=${authToken}`,
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              sessionID: 'session-registered-folder',
-              directory: tempDir,
-              outputFolder: 'specs',
-            }),
-            headers: { 'content-type': 'application/json' },
-          },
-        );
-        expect(response.status).toBe(200);
-        expect(
-          await (await fetch(`${baseUrl}/api/files?token=${authToken}`)).json(),
-        ).toMatchObject({
-          files: expect.arrayContaining([
-            expect.objectContaining({ fileName: 'x.md', directory: tempDir }),
-          ]),
-        });
-      } finally {
-        cleanup();
-        process.env = originalEnv;
-        await fs.rm(tempDir, { recursive: true, force: true });
-        await fs.rm(userConfigDir, { recursive: true, force: true });
-      }
+      await withTmpDir(async (tempDir) => {
+        const originalEnv = { ...process.env };
+        const userConfigDir = path.join(tempDir, 'user-config');
+        try {
+          delete process.env.OPENCODE_CONFIG_DIR;
+          process.env.XDG_CONFIG_HOME = userConfigDir;
+          await fs.mkdir(path.join(tempDir, '.local', 'specs'), {
+            recursive: true,
+          });
+          await fs.writeFile(
+            path.join(tempDir, '.local', 'specs', 'x.md'),
+            '# X\n\n## Summary\nA spec',
+          );
+          const { baseUrl, authToken, dashboard, cleanup } =
+            await startDashboard();
+          dashboard.addManualFolder(tempDir);
+          try {
+            const response = await fetch(
+              `${baseUrl}/api/register?token=${authToken}`,
+              {
+                method: 'POST',
+                body: JSON.stringify({
+                  sessionID: 'session-registered-folder',
+                  directory: tempDir,
+                  outputFolder: 'specs',
+                }),
+                headers: { 'content-type': 'application/json' },
+              },
+            );
+            expect(response.status).toBe(200);
+            expect(
+              await (
+                await fetch(`${baseUrl}/api/files?token=${authToken}`)
+              ).json(),
+            ).toMatchObject({
+              files: expect.arrayContaining([
+                expect.objectContaining({
+                  fileName: 'x.md',
+                  directory: tempDir,
+                }),
+              ]),
+            });
+          } finally {
+            cleanup();
+          }
+        } finally {
+          process.env = originalEnv;
+        }
+      });
     });
 
     test('ignores invalid registered output folders', async () => {
-      const originalEnv = { ...process.env };
-      const tempDir = await fs.mkdtemp(
-        path.join(tmpdir(), 'dashboard-invalid-'),
-      );
-      const userConfigDir = await fs.mkdtemp(
-        path.join(tmpdir(), 'dashboard-user-config-'),
-      );
-      delete process.env.OPENCODE_CONFIG_DIR;
-      process.env.XDG_CONFIG_HOME = userConfigDir;
-      await fs.mkdir(path.join(tempDir, 'interview'));
-      await fs.writeFile(
-        path.join(tempDir, 'interview', 'x.md'),
-        '# X\n\n## Summary\nA spec',
-      );
-      const { baseUrl, authToken, dashboard, cleanup } = await startDashboard();
-      dashboard.addManualFolder(tempDir);
-      try {
-        const response = await fetch(
-          `${baseUrl}/api/register?token=${authToken}`,
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              sessionID: 'session-invalid-folder',
-              directory: tempDir,
-              outputFolder: '../evil',
-            }),
-            headers: { 'content-type': 'application/json' },
-          },
-        );
-        expect(response.status).toBe(200);
-        expect(
-          await (await fetch(`${baseUrl}/api/files?token=${authToken}`)).json(),
-        ).toMatchObject({
-          files: expect.arrayContaining([
-            expect.objectContaining({ fileName: 'x.md', directory: tempDir }),
-          ]),
-        });
-      } finally {
-        cleanup();
-        process.env = originalEnv;
-        await fs.rm(tempDir, { recursive: true, force: true });
-        await fs.rm(userConfigDir, { recursive: true, force: true });
-      }
+      await withTmpDir(async (tempDir) => {
+        const originalEnv = { ...process.env };
+        const userConfigDir = path.join(tempDir, 'user-config');
+        try {
+          delete process.env.OPENCODE_CONFIG_DIR;
+          process.env.XDG_CONFIG_HOME = userConfigDir;
+          await fs.mkdir(path.join(tempDir, '.local', 'interview'), {
+            recursive: true,
+          });
+          await fs.writeFile(
+            path.join(tempDir, '.local', 'interview', 'x.md'),
+            '# X\n\n## Summary\nA spec',
+          );
+          const { baseUrl, authToken, dashboard, cleanup } =
+            await startDashboard();
+          dashboard.addManualFolder(tempDir);
+          try {
+            const response = await fetch(
+              `${baseUrl}/api/register?token=${authToken}`,
+              {
+                method: 'POST',
+                body: JSON.stringify({
+                  sessionID: 'session-invalid-folder',
+                  directory: tempDir,
+                  outputFolder: '../evil',
+                }),
+                headers: { 'content-type': 'application/json' },
+              },
+            );
+            expect(response.status).toBe(200);
+            expect(
+              await (
+                await fetch(`${baseUrl}/api/files?token=${authToken}`)
+              ).json(),
+            ).toMatchObject({
+              files: expect.arrayContaining([
+                expect.objectContaining({
+                  fileName: 'x.md',
+                  directory: tempDir,
+                }),
+              ]),
+            });
+          } finally {
+            cleanup();
+          }
+        } finally {
+          process.env = originalEnv;
+        }
+      });
     });
 
     test('rejects missing sessionID', async () => {
@@ -905,46 +1422,56 @@ describe('dashboard server', () => {
     });
 
     test('includes document content from .md file when filePath points to real file', async () => {
-      const tempDir = await createTempInterviewDir();
-      const { baseUrl, authToken, dashboard, cleanup } = await startDashboard();
-      try {
-        // Create a markdown file
-        const mdPath = path.join(tempDir, 'interview', 'doc-test.md');
-        await fs.writeFile(mdPath, '# Test Document\n\nContent here.', 'utf8');
+      await withTempInterviewDir(async (tempDir) => {
+        const { baseUrl, authToken, dashboard, cleanup } =
+          await startDashboard();
+        try {
+          // Create a markdown file
+          const mdPath = path.join(
+            tempDir,
+            '.local',
+            'interview',
+            'doc-test.md',
+          );
+          await fs.writeFile(
+            mdPath,
+            '# Test Document\n\nContent here.',
+            'utf8',
+          );
 
-        // Register the temp directory as a session
-        dashboard.registerSession({
-          sessionID: 'session-doc',
-          directory: tempDir,
-          pid: 0,
-          registeredAt: Date.now(),
-        });
+          // Register the temp directory as a session
+          dashboard.registerSession({
+            sessionID: 'session-doc',
+            directory: tempDir,
+            pid: 0,
+            registeredAt: Date.now(),
+          });
 
-        // Push state with filePath
-        dashboard.pushState({
-          interviewId: 'doc-test',
-          sessionID: 'session-doc',
-          idea: 'Doc Test',
-          mode: 'completed',
-          summary: 'Test',
-          title: 'Doc Test',
-          questions: [],
-          pendingAnswers: null,
-          lastUpdatedAt: Date.now(),
-          filePath: mdPath,
-          nudgeAction: null,
-        });
+          // Push state with filePath
+          dashboard.pushState({
+            interviewId: 'doc-test',
+            sessionID: 'session-doc',
+            idea: 'Doc Test',
+            mode: 'completed',
+            summary: 'Test',
+            title: 'Doc Test',
+            questions: [],
+            pendingAnswers: null,
+            lastUpdatedAt: Date.now(),
+            filePath: mdPath,
+            nudgeAction: null,
+          });
 
-        const response = await fetch(
-          `${baseUrl}/api/interviews/doc-test/state?token=${authToken}`,
-        );
-        const data = (await response.json()) as { document: string };
-        expect(data.document).toContain('# Test Document');
-        expect(data.document).toContain('Content here.');
-      } finally {
-        cleanup();
-        await fs.rm(tempDir, { recursive: true, force: true });
-      }
+          const response = await fetch(
+            `${baseUrl}/api/interviews/doc-test/state?token=${authToken}`,
+          );
+          const data = (await response.json()) as { document: string };
+          expect(data.document).toContain('# Test Document');
+          expect(data.document).toContain('Content here.');
+        } finally {
+          cleanup();
+        }
+      });
     });
 
     test('returns isBusy true when mode is awaiting-agent', async () => {
@@ -1941,39 +2468,47 @@ describe('dashboard server', () => {
 
   describe('file scanning (GET /api/files)', () => {
     test('lists interview files from registered sessions', async () => {
-      const tempDir = await createTempInterviewDir();
-      const { baseUrl, authToken, dashboard, cleanup } = await startDashboard();
-      try {
-        // Create a test markdown file
-        const mdPath = path.join(tempDir, 'interview', 'test-file.md');
-        await fs.writeFile(
-          mdPath,
-          '# Test File\n\n## Current spec\n\nSpec content.\n\n## Q&A history\n\n',
-          'utf8',
-        );
+      await withTempInterviewDir(async (tempDir) => {
+        const { baseUrl, authToken, dashboard, cleanup } =
+          await startDashboard();
+        try {
+          // Create a test markdown file
+          const mdPath = path.join(
+            tempDir,
+            '.local',
+            'interview',
+            'test-file.md',
+          );
+          await fs.writeFile(
+            mdPath,
+            '# Test File\n\n## Current spec\n\nSpec content.\n\n## Q&A history\n\n',
+            'utf8',
+          );
 
-        // Register session with the temp directory
-        dashboard.registerSession({
-          sessionID: 'session-files',
-          directory: tempDir,
-          pid: 0,
-          registeredAt: Date.now(),
-        });
+          // Register session with the temp directory
+          dashboard.registerSession({
+            sessionID: 'session-files',
+            directory: tempDir,
+            pid: 0,
+            registeredAt: Date.now(),
+          });
 
-        const response = await fetch(`${baseUrl}/api/files?token=${authToken}`);
-        expect(response.status).toBe(200);
-        const data = (await response.json()) as {
-          files: Array<{ fileName: string; title: string }>;
-        };
-        // os.homedir() is always scanned, so other files may appear.
-        // Assert our file is present rather than asserting exact count.
-        const ourFile = data.files.find((f) => f.fileName === 'test-file.md');
-        expect(ourFile?.fileName).toBe('test-file.md');
-        expect(ourFile?.title).toBe('Test File');
-      } finally {
-        cleanup();
-        await fs.rm(tempDir, { recursive: true, force: true });
-      }
+          const response = await fetch(
+            `${baseUrl}/api/files?token=${authToken}`,
+          );
+          expect(response.status).toBe(200);
+          const data = (await response.json()) as {
+            files: Array<{ fileName: string; title: string }>;
+          };
+          // os.homedir() is always scanned, so other files may appear.
+          // Assert our file is present rather than asserting exact count.
+          const ourFile = data.files.find((f) => f.fileName === 'test-file.md');
+          expect(ourFile?.fileName).toBe('test-file.md');
+          expect(ourFile?.title).toBe('Test File');
+        } finally {
+          cleanup();
+        }
+      });
     });
 
     test('requires auth', async () => {

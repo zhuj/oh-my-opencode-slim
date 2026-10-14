@@ -83,6 +83,7 @@ export class TmuxMultiplexer implements Multiplexer {
     }
 
     try {
+      const flavor = options?.viewerFlavor ?? 'v1';
       const opencodeCmd = `env OPENCODE_DISABLE_TERMINAL_TITLE=1 ${buildViewCommand(
         sessionId,
         serverUrl,
@@ -94,10 +95,16 @@ export class TmuxMultiplexer implements Multiplexer {
       // OPENCODE_PASSWORD. Inject it as a spawn-time tmux environment entry
       // (`-e`), never through the shell command text.
       const viewerSecretArgs =
-        options?.viewerFlavor === 'v2-remote' &&
-        options.viewerPassword !== undefined
+        flavor === 'v2-remote' && options?.viewerPassword !== undefined
           ? ['-e', `OPENCODE_PASSWORD=${options.viewerPassword}`]
           : [];
+
+      // `opencode mini` takes no directory argument, so for the v2 flavors the
+      // pane cwd is the only way the viewer selects the project (`-c`). Set it
+      // for exactly that combination: a missing directory makes tmux fall
+      // back to $HOME with exit code 0 and no warning, so an unconditional
+      // `-c` would silently move every existing `tui` pane.
+      const paneCwdArgs = viewerNeedsPaneCwd(options) ? ['-c', directory] : [];
 
       const result = await this.splitPane(
         tmux,
@@ -106,9 +113,7 @@ export class TmuxMultiplexer implements Multiplexer {
         this.storedLayout,
         opencodeCmd,
         viewerSecretArgs,
-        // v2 mini commands omit the directory, so the split pins the child
-        // session's project directory itself.
-        viewerNeedsPaneCwd(options) ? ['-c', directory] : [],
+        paneCwdArgs,
       );
       const paneId = result.stdout.trim();
 
@@ -347,6 +352,11 @@ export class TmuxMultiplexer implements Multiplexer {
     return this.binaryPath;
   }
 
+  /**
+   * `paneCwdArgs` carries `split-window -c <dir>` for the viewers that take
+   * no directory argument (see `viewerNeedsPaneCwd`); it is empty otherwise,
+   * which keeps existing `tui` pane placement byte-identical.
+   */
   private async splitPane(
     tmux: string,
     socket: string,
@@ -354,7 +364,7 @@ export class TmuxMultiplexer implements Multiplexer {
     layout: MultiplexerLayout,
     opencodeCmd: string,
     viewerSecretArgs: string[] = [],
-    miniCwdArgs: string[] = [],
+    paneCwdArgs: string[] = [],
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const args = [
       '-S',
@@ -366,8 +376,8 @@ export class TmuxMultiplexer implements Multiplexer {
       '-F',
       '#{pane_id}',
       ...this.targetArgs(targetPane),
+      ...paneCwdArgs,
       ...viewerSecretArgs,
-      ...miniCwdArgs,
       opencodeCmd,
     ];
     log('[tmux] spawnPane: executing', {

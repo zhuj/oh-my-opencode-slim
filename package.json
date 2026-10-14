@@ -107,7 +107,9 @@
     "gray-matter": "^4.0.3",
     "jsdom": "^30.0.0",
     "jsonc-parser": "^3.3.1",
+    "leven": "4.1.0",
     "lru-cache": "^11.5.3",
+    "picomatch": "^4.0.7",
     "semver": "^7.7.3",
     "turndown": "^7.2.4",
     "zod": "^4.6.5"
@@ -122,6 +124,7 @@
     "@opencode/plugin": "2.1.2",
     "@types/jsdom": "30",
     "@types/node": "^26.6.2",
+    "@types/picomatch": "^4.0.3",
     "@types/semver": "^7.7.1",
     "@types/turndown": "^5.0.6",
     "all-contributors-cli": "^6.26.1",

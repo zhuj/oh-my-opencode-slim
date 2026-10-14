@@ -125,6 +125,10 @@ export function consumeTerminalCommitToken(
   return (
     authorization.record === record &&
     authorization.input === input &&
+    (record.pendingPromptAdmissionID === undefined ||
+      (typeof input.promptMessageID === 'string' &&
+        input.promptMessageID.length > 0 &&
+        input.promptMessageID === record.pendingPromptAdmissionID)) &&
     authorization.validate()
   );
 }
@@ -393,6 +397,14 @@ export function createBackgroundJobTerminalGate(options: {
     return value;
   }
 
+  function promptMessageIDFor(run: RunRef): string | undefined {
+    const record = board.get(run.taskID);
+    return record?.generation === run.generation
+      ? (record.pendingPromptAdmissionID ??
+          options.promptMessageIDFor?.(run.taskID, run.generation))
+      : undefined;
+  }
+
   function capture(run: RunRef): ObservationToken | undefined {
     const value = observation(run);
     if (!value) return;
@@ -406,7 +418,7 @@ export function createBackgroundJobTerminalGate(options: {
         run.generation,
       ),
       baselineMessageID: options.baselineFor?.(run.taskID, run.generation),
-      promptMessageID: options.promptMessageIDFor?.(run.taskID, run.generation),
+      promptMessageID: promptMessageIDFor(run),
       attemptStartedAt: options.attemptStartedAtFor?.(
         run.taskID,
         run.generation,
@@ -430,8 +442,7 @@ export function createBackgroundJobTerminalGate(options: {
         token.attemptStartedAt &&
       options.baselineFor?.(token.taskID, token.generation) ===
         token.baselineMessageID &&
-      options.promptMessageIDFor?.(token.taskID, token.generation) ===
-        token.promptMessageID &&
+      promptMessageIDFor(token) === token.promptMessageID &&
       options.observationRevisionFor?.(token.taskID, token.generation) ===
         token.attemptRevision
     );
@@ -494,7 +505,10 @@ export function createBackgroundJobTerminalGate(options: {
     const value = observation(token);
     const before = board.get(token.taskID);
     if (!before || !value || !current(token)) return { kind: 'stale' };
-    if (before.state !== 'running') {
+    if (
+      before.state !== 'running' &&
+      before.pendingPromptAdmissionID === undefined
+    ) {
       const terminal =
         before.state === 'reconciled' ? before.terminalState : before.state;
       return terminal === state && before.resultSummary === text
@@ -506,6 +520,10 @@ export function createBackgroundJobTerminalGate(options: {
       state,
       resultSummary: text,
       cancellationLease: lease,
+      ...(attribution === 'transcript' &&
+      (state === 'completed' || state === 'error')
+        ? { promptMessageID: token.promptMessageID }
+        : {}),
       now: now(),
     });
     const candidateSignal = value.candidate?.signal;

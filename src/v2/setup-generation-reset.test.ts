@@ -9,9 +9,8 @@
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   hasLiveInstances,
   resetLiveDirectoriesForTests,
@@ -73,7 +72,7 @@ describe('v2 generation warning latches', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-gen-reset-'));
+    fixtureRoot = createTmpDir('omo-v2-gen-reset-');
     logDir = path.join(fixtureRoot, 'logs');
     process.env.OPENCODE_CONFIG_DIR = path.join(fixtureRoot, 'config');
     process.env.XDG_CONFIG_HOME = path.join(fixtureRoot, 'xdg-config');
@@ -89,7 +88,7 @@ describe('v2 generation warning latches', () => {
       if (!(key in originalEnv)) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
-    await rm(fixtureRoot, { recursive: true, force: true });
+    removeTmpDir(fixtureRoot);
   });
 
   test('resetV2GenerationWarnings rearms the setup-side latches', async () => {
@@ -194,7 +193,7 @@ describe('v2 setup directory claim', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-claim-'));
+    fixtureRoot = createTmpDir('omo-v2-claim-');
     process.env.OPENCODE_CONFIG_DIR = path.join(fixtureRoot, 'config');
     process.env.XDG_CONFIG_HOME = path.join(fixtureRoot, 'xdg-config');
     process.env.XDG_DATA_HOME = path.join(fixtureRoot, 'xdg-data');
@@ -210,7 +209,7 @@ describe('v2 setup directory claim', () => {
     }
     Object.assign(process.env, originalEnv);
     resetLiveDirectoriesForTests();
-    await rm(fixtureRoot, { recursive: true, force: true });
+    removeTmpDir(fixtureRoot);
   });
 
   test('setup failure after factory init releases the claim', async () => {

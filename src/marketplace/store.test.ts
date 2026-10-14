@@ -1,18 +1,17 @@
-import { describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fsModule from 'node:fs';
 import {
   cpSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { resolveMarketplaceActivation } from './activation';
 import { canonicalizeMarketplaceValue } from './canonical';
 import {
@@ -89,8 +88,16 @@ function v3Bundle(version = '1.0.0'): MarketplacePackageBundle {
   };
 }
 
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) removeTmpDir(dir);
+});
+
 function tempRoot(): string {
-  return mkdtempSync(join(tmpdir(), 'marketplace-store-'));
+  const root = createTmpDir();
+  tempDirs.push(root);
+  return root;
 }
 
 function createStoreWithInterruptedUpdate(

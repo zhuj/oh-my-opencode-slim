@@ -1,5 +1,4 @@
 import type { Server } from 'node:http';
-import path from 'node:path';
 import type { PluginInput } from '@opencode-ai/plugin';
 import type { PluginConfig } from '../config';
 import { log } from '../utils';
@@ -10,7 +9,10 @@ import {
   readDashboardAuthFile,
   tryBecomeDashboard,
 } from './dashboard';
-import { interviewOwnerSessionID } from './document';
+import {
+  createInterviewDirectoryPath,
+  interviewOwnerSessionID,
+} from './document';
 import type { InterviewSessionRuntime } from './runtime';
 import { createInterviewServer, createInterviewServerDeps } from './server';
 import { createInterviewService } from './service';
@@ -378,7 +380,10 @@ export function createDashboardManager(
       // Fallback: wire up a local per-session server for the manager's
       // service, exactly like the non-dashboard mode would.
       isDashboard = false;
-      const resolvedOutputPath = path.join(ctx.directory, outputFolder);
+      const resolvedOutputPath = createInterviewDirectoryPath(
+        ctx.directory,
+        outputFolder,
+      );
       fallbackServer = createInterviewServer(
         createInterviewServerDeps(service, resolvedOutputPath, 0),
       );

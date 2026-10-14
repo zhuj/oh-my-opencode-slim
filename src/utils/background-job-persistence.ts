@@ -1,7 +1,7 @@
 /**
- * Persistence for background-job lifecycle state (tombstones and
- * deletion epochs) over the optional v2 host storage domain
- * (`ctx.storage`).
+ * Persistence for background-job lifecycle state (tombstones, child identities,
+ * deletion epochs, alias high-water marks) over the optional v2 host storage
+ * domain (`ctx.storage`).
  *
  * Design invariants:
  * - **Write-through.** `recordBackgroundJobSuppression` /
@@ -33,9 +33,11 @@
  *   fire-and-forget with logged (never thrown) failures — persistence
  *   loss degrades to today's process-local behavior.
  *
- * Aliases are not persisted: a production board numbers only parents
- * created while it runs, and an old alias resolves only through its
- * marker in the parent's history (see docs/background-orchestration.md).
+ * Alias counters persist per `<parentSessionID>:<prefix>` as supplemental
+ * metadata, not proof that old parents can safely receive numbered aliases.
+ * Production boards still number only parents created while they run.
+ * Alias-to-task mappings come from snapshots or verified parent history
+ * (see docs/background-orchestration.md), not from these counters.
  */
 
 import { log } from './logger';
@@ -56,6 +58,7 @@ const KEY_ROOT = 'omo/bgj/';
 const TOMBSTONE_PREFIX = `${KEY_ROOT}tombstone/`;
 const EPOCH_PREFIX = `${KEY_ROOT}epoch/`;
 const CHILD_PREFIX = `${KEY_ROOT}child/`;
+const ALIAS_PREFIX = `${KEY_ROOT}alias/`;
 
 /** Persisted tombstone entries self-cap at this many most-recent items. */
 export const MAX_PERSISTED_TOMBSTONES = 500;
@@ -106,6 +109,8 @@ export interface PersistedBackgroundJobState {
   deletionEpochs: Map<string, number>;
   /** Highest deletion epoch seen; keeps future epochs monotonic. */
   nextEpoch: number;
+  /** `<parentSessionID>:<prefix>` → last-seen alias counter. */
+  aliasHighWaterMarks: Map<string, number>;
 }
 
 function emptyState(): PersistedBackgroundJobState {
@@ -114,6 +119,7 @@ function emptyState(): PersistedBackgroundJobState {
     children: new Map(),
     deletionEpochs: new Map(),
     nextEpoch: 0,
+    aliasHighWaterMarks: new Map(),
   };
 }
 
@@ -126,6 +132,8 @@ const liveTombstones = new Map<string, PersistedTombstoneEntry>();
 const liveChildren = new Map<string, PersistedBackgroundChild>();
 /** Per-key serialized write queues (no concurrent RMW on one key). */
 const writeQueues = new Map<string, Promise<void>>();
+/** Backend-loaded or queued alias maxima, keyed by full storage key. */
+const writtenAliasMax = new Map<string, number>();
 /**
  * Reconfiguration fence: incremented on every configure() call. Queued
  * writes capture the epoch at enqueue time and refuse to execute after a
@@ -181,7 +189,12 @@ export function configureBackgroundJobPersistence(
   loaded = emptyState();
   liveTombstones.clear();
   liveChildren.clear();
+  writtenAliasMax.clear();
   writeQueues.clear();
+}
+
+function aliasKey(parent: string, prefix: string): string {
+  return `${ALIAS_PREFIX}${parent}:${prefix}`;
 }
 
 function tombstoneKey(taskID: string): string {
@@ -289,6 +302,14 @@ export async function loadInitialBackgroundJobPersistence(): Promise<PersistedBa
         const taskID = entry.key.slice(EPOCH_PREFIX.length);
         if (typeof entry.value === 'number' && Number.isFinite(entry.value)) {
           state.deletionEpochs.set(taskID, entry.value);
+        }
+      } else if (entry.key.startsWith(ALIAS_PREFIX)) {
+        const composite = entry.key.slice(ALIAS_PREFIX.length);
+        if (typeof entry.value === 'number' && Number.isFinite(entry.value)) {
+          state.aliasHighWaterMarks.set(composite, entry.value);
+          // Bumps use the full key too, so stale recovery cannot lower a
+          // backend-loaded floor on the next write.
+          writtenAliasMax.set(entry.key, entry.value);
         }
       }
     }
@@ -558,4 +579,34 @@ function enforceTombstoneCap(): void {
       await backend?.remove(epochKey(record.taskID));
     });
   }
+}
+
+/** Alias counter floor from the backend snapshot and live queued writes.
+ * This metadata advances counters across boards but does not restore
+ * alias-to-task mappings or authorize numbering for old parents. */
+export function aliasHighWaterMark(
+  parentSessionID: string,
+  prefix: string,
+): number {
+  const composite = `${parentSessionID}:${prefix}`;
+  return Math.max(
+    loaded.aliasHighWaterMarks.get(composite) ?? 0,
+    writtenAliasMax.get(aliasKey(parentSessionID, prefix)) ?? 0,
+  );
+}
+
+/** Persist a monotonic alias counter floor, serialized per storage key. */
+export function bumpAliasHighWaterMark(
+  parentSessionID: string,
+  prefix: string,
+  counter: number,
+): void {
+  if (!backend) return;
+  const key = aliasKey(parentSessionID, prefix);
+  const current = writtenAliasMax.get(key) ?? 0;
+  if (counter <= current) return;
+  writtenAliasMax.set(key, counter);
+  enqueueWrite(key, async () => {
+    await backend?.set(key, counter);
+  });
 }

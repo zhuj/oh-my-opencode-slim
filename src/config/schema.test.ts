@@ -9,6 +9,7 @@ import {
 } from 'bun:test';
 import { z } from 'zod';
 import {
+  AgentOverrideConfigSchema,
   DISABLED_COMMANDS_VALUES,
   DISABLED_HOOKS_VALUES,
   InterviewConfigSchema,
@@ -23,6 +24,26 @@ import {
   resetMultiplexerDiagnostics,
 } from './schema';
 
+describe('skillCommandMode', () => {
+  it.each(['none', 'full', 'reference'])('accepts %s at the root', (mode) => {
+    expect(PluginConfigSchema.parse({ skillCommandMode: mode })).toEqual({
+      skillCommandMode: mode,
+    });
+  });
+
+  it('keeps an omitted mode unset for config-layer inheritance', () => {
+    expect(PluginConfigSchema.parse({})).not.toHaveProperty('skillCommandMode');
+  });
+
+  it.each(
+    ['FULL', '', 'disabled', null, false, 1, {}, []].map((mode) => [mode]),
+  )('rejects invalid root mode %j', (skillCommandMode) => {
+    expect(PluginConfigSchema.safeParse({ skillCommandMode }).success).toBe(
+      false,
+    );
+  });
+});
+
 describe('ProviderModelIdSchema', () => {
   it('accepts and preserves model remainders with spaces and nested segments', () => {
     const ids = [
@@ -35,8 +56,37 @@ describe('ProviderModelIdSchema', () => {
     for (const id of ids) {
       const result = ProviderModelIdSchema.safeParse(id);
       expect(result.success).toBe(true);
+      if (result.success) expect(result.data).toBe(id);
+    }
+  });
+
+  it('accepts qualified references with nested paths and literal model colons', () => {
+    const references = [
+      'openai/team/gpt-5.6',
+      'openai/team/gpt-5.6:high',
+      'openai/team/gpt-5.6:2026:high',
+    ];
+
+    for (const reference of references) {
+      const result = ProviderModelIdSchema.safeParse(reference);
+
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it('accepts qualified references with optional hash variants losslessly', () => {
+    const references = [
+      'openai/gpt-5.6#high',
+      'openai/team/gpt-5.6:2026#high',
+      'openai/team/gpt-5.6:2026',
+    ];
+
+    for (const reference of references) {
+      const result = ProviderModelIdSchema.safeParse(reference);
+
+      expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.data).toBe(id);
+        expect(result.data).toBe(reference);
       }
     }
   });
@@ -50,6 +100,35 @@ describe('ProviderModelIdSchema', () => {
       'provider name/model',
     ]) {
       expect(ProviderModelIdSchema.safeParse(id).success).toBe(false);
+    }
+  });
+
+  it('rejects providerless references', () => {
+    const references = ['gpt-5.6', 'gpt-5.6:high', 'gpt-5.6#high'];
+
+    for (const reference of references) {
+      const result = ProviderModelIdSchema.safeParse(reference);
+
+      expect(result.success).toBe(false);
+    }
+  });
+
+  it('rejects malformed provider, model, and variant delimiters', () => {
+    const references = [
+      'openai//gpt-5.6',
+      'openai/gpt-5.6/',
+      'openai/gpt-5.6#',
+      'openai/team/gpt-5.6#high#extra',
+      '$gpt-5.6#high',
+      'openai$#high',
+      'openai$$team/gpt-5.6#high',
+      'openai$team/gpt-5.6##high',
+    ];
+
+    for (const reference of references) {
+      const result = ProviderModelIdSchema.safeParse(reference);
+
+      expect(result.success).toBe(false);
     }
   });
 });
@@ -133,6 +212,29 @@ describe('PluginConfigSchema fallback continuation policy', () => {
         fallback: { continuationPolicy: 'sometimes' },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('PluginConfigSchema resource prefixes', () => {
+  it('rejects absolute, parent-traversing, and blank prefixes', () => {
+    for (const prefix of [
+      '/outside',
+      '../outside',
+      '',
+      'C:\\outside',
+      '\\\\server\\share',
+    ]) {
+      expect(
+        PluginConfigSchema.safeParse({ resource_prefixes: [prefix] }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('preserves an omitted field and explicit empty list', () => {
+    expect(PluginConfigSchema.parse({}).resource_prefixes).toBeUndefined();
+    expect(
+      PluginConfigSchema.parse({ resource_prefixes: [] }).resource_prefixes,
+    ).toEqual([]);
   });
 });
 
@@ -228,6 +330,35 @@ describe('PluginConfigSchema preset syntax', () => {
     const generated = z.toJSONSchema(PresetSchema) as { oneOf?: unknown[] };
 
     expect(generated.oneOf).toHaveLength(3);
+  });
+});
+
+describe('AgentOverrideConfigSchema model', () => {
+  it('preserves valid fallback entries and variants', () => {
+    const model = [
+      'providerless-model',
+      { id: 'openai/team/gpt-5.6:2026#high', variant: 'max' },
+    ];
+
+    const result = AgentOverrideConfigSchema.safeParse({ model });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.model).toEqual(model);
+    }
+  });
+
+  it('preserves the dynamic selected-model reference', () => {
+    const result = AgentOverrideConfigSchema.safeParse({
+      model: { dynamic: 'selected' },
+      variant: 'high',
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.model).toEqual({ dynamic: 'selected' });
+      expect(result.data.variant).toBe('high');
+    }
   });
 });
 
@@ -394,6 +525,22 @@ describe('MultiplexerConfigSchema', () => {
       layout: 'main-vertical',
       main_pane_size: 60,
     });
+  });
+
+  it('accepts explicit viewer choices and drops invalid viewer values', () => {
+    expect(MultiplexerConfigSchema.parse({ viewer: 'tui' }).viewer).toBe('tui');
+    expect(MultiplexerConfigSchema.parse({ viewer: 'mini' }).viewer).toBe(
+      'mini',
+    );
+    const bad = MultiplexerConfigSchema.safeParse({ viewer: 'full' });
+    // An unknown interface disables pane management rather than failing the
+    // whole plugin config (same policy as every other multiplexer key).
+    expect(bad.success).toBe(true);
+    if (bad.success) {
+      expect(bad.data.type).toBe('none');
+      // The host resolves the omitted viewer to its v1/v2 default.
+      expect(bad.data.viewer).toBeUndefined();
+    }
   });
 
   it('exports an unsanitized schema that keeps invalid values visible', () => {
@@ -563,6 +710,11 @@ describe('InterviewConfigSchema outputFolder', () => {
     expect(
       InterviewConfigSchema.safeParse({
         outputFolder: String.raw`interviews\specs`,
+      }).success,
+    ).toBe(true);
+    expect(
+      InterviewConfigSchema.safeParse({
+        outputFolder: '.local/interviews/specs',
       }).success,
     ).toBe(true);
   });

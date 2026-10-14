@@ -1,16 +1,17 @@
 import { afterAll } from 'bun:test';
-import { mkdtempSync, readdirSync, rm, rmSync } from 'node:fs';
+import { readdirSync, rm } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from './src/test-utils';
 
 // bun test shares one process: keep every test off the real user dirs.
-const root = mkdtempSync(join(tmpdir(), `omos-test-${process.pid}-`));
+const root = createTmpDir(`omos-test-${process.pid}-`);
 process.env.XDG_DATA_HOME = join(root, 'data');
 process.env.XDG_CONFIG_HOME = join(root, 'config');
 process.env.OPENCODE_LOG_DIR = join(root, 'log');
 // Takes precedence over XDG_CONFIG_HOME; tests that need it set their own.
 delete process.env.OPENCODE_CONFIG_DIR;
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+afterAll(() => removeTmpDir(root));
 // A signal or --bail skips afterAll; best effort: reclaim roots of dead runs.
 try {
   for (const name of readdirSync(tmpdir())) {

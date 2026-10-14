@@ -17,16 +17,12 @@ const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024;
 const IMAGES_GITIGNORE_RULE = 'images/';
 const IMAGES_GITIGNORE_BYTES = Buffer.from(`${IMAGES_GITIGNORE_RULE}\n`);
 
-function opencodeDirPath(workDir: string): string {
-  return join(workDir, '.opencode');
+function localDirPath(workDir: string): string {
+  return join(workDir, '.local');
 }
 
-function opencodeGitignorePath(workDir: string): string {
-  return join(opencodeDirPath(workDir), '.gitignore');
-}
-
-function imagesDirPath(workDir: string): string {
-  return join(opencodeDirPath(workDir), 'images');
+function localGitignorePath(workDir: string): string {
+  return join(localDirPath(workDir), '.gitignore');
 }
 
 function pathIsSymlink(target: string): boolean {
@@ -45,16 +41,28 @@ function isRegularFile(target: string): boolean {
   }
 }
 
-function isUnsafeOpencodeGitignorePath(workDir: string): boolean {
+/**
+ * Refuse to create/overwrite/append `.local/.gitignore` when the ignore file
+ * or its `.local` parent is a symlink (would mutate an external target).
+ */
+function isUnsafeLocalGitignorePath(workDir: string): boolean {
   return (
-    pathIsSymlink(opencodeDirPath(workDir)) ||
-    pathIsSymlink(opencodeGitignorePath(workDir))
+    pathIsSymlink(localDirPath(workDir)) ||
+    pathIsSymlink(localGitignorePath(workDir))
   );
 }
 
+function imagesDirPath(workDir: string): string {
+  return join(localDirPath(workDir), 'images');
+}
+
+/**
+ * Refuse mkdir/cleanup/writes when `.local` or `.local/images` is a
+ * symlink (would create, delete, or write through an external target).
+ */
 function isUnsafeImageSavePath(workDir: string): boolean {
   return (
-    pathIsSymlink(opencodeDirPath(workDir)) ||
+    pathIsSymlink(localDirPath(workDir)) ||
     pathIsSymlink(imagesDirPath(workDir))
   );
 }
@@ -72,10 +80,10 @@ function ensureImagesGitignore(
   workDir: string,
   logFn: (msg: string) => void,
 ): boolean {
-  const gitignorePath = opencodeGitignorePath(workDir);
+  const gitignorePath = localGitignorePath(workDir);
   try {
-    if (isUnsafeOpencodeGitignorePath(workDir)) {
-      logFn('[image-hook] refusing to update symlinked .opencode/.gitignore');
+    if (isUnsafeLocalGitignorePath(workDir)) {
+      logFn('[image-hook] refusing to update symlinked .local/.gitignore');
       return false;
     }
 
@@ -248,7 +256,7 @@ export function processImageAttachments(args: {
 
   const saveDir = imagesDirPath(workDir);
   if (isUnsafeImageSavePath(workDir)) {
-    log('[image-hook] refusing to write via symlinked .opencode/images path');
+    log('[image-hook] refusing to write via symlinked .local/images path');
     return false;
   }
 

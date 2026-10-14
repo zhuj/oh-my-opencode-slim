@@ -1,6 +1,6 @@
-import path from 'node:path';
 import type { PluginInput } from '@opencode-ai/plugin';
 import type { InterviewConfig } from '../config';
+import { createInterviewDirectoryPath } from './document';
 import { createInterviewServer, createInterviewServerDeps } from './server';
 import { createInterviewService } from './service';
 
@@ -24,7 +24,10 @@ export function createPerSessionInterviewServer(
   dispose: () => void;
 } {
   const service = createInterviewService(ctx, interviewConfig);
-  const resolvedOutputPath = path.join(ctx.directory, outputFolder);
+  const resolvedOutputPath = createInterviewDirectoryPath(
+    ctx.directory,
+    outputFolder,
+  );
   const server = createInterviewServer(
     createInterviewServerDeps(service, resolvedOutputPath, 0),
   );

@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
-import { CouncilConfigSchema } from '../config';
+import { type AgentOverrideConfig, CouncilConfigSchema } from '../config';
 import { RuntimeConfig } from '../config/runtime';
 import type { MarketplaceActivationStore } from '../marketplace/activation';
 import { MarketplacePackageManifestSchema } from '../marketplace/schemas';
+import { withTmpDirSync } from '../test-utils';
 import {
   adaptPermissions,
   snapshotNativeAgentForRegistry,
@@ -37,6 +37,53 @@ function build(
     ...options,
   } as Parameters<typeof buildResolvedAgentRegistry>[1]);
 }
+
+test('R3: removal-only prototype-sensitive names stay denied in SDK, native, and child rules', () => {
+  const removed = ['constructor', 'toString', 'hasOwnProperty', '__proto__'];
+  const runtime = runtimeFor({
+    agents: {
+      oracle: { permission: { skill: 'allow' }, skills_remove: removed },
+    },
+  });
+  const registry = build(runtime, {}, { hostFlavor: 'v2' });
+  const sdkPermissions = registry.getSdkAgentProjection().oracle.permission;
+  const sdkSkill = Object.entries(sdkPermissions ?? {}).find(
+    ([key]) => key === 'skill',
+  )?.[1];
+  if (
+    sdkSkill === null ||
+    typeof sdkSkill !== 'object' ||
+    Array.isArray(sdkSkill)
+  )
+    throw new Error('SDK projection is missing its skill map');
+  const sdk = compilePermissionPolicy({
+    baselineRules: [],
+    hostRules: adaptPermissions(sdkPermissions).filter(
+      (rule): rule is V2PermissionRule =>
+        rule.effect === 'allow' ||
+        rule.effect === 'ask' ||
+        rule.effect === 'deny',
+    ),
+  });
+  const native = registry.nativePolicies.oracle;
+  const child = compilePermissionPolicy({
+    baselineRules: [],
+    hostRules: registry.compileChildPermissions('oracle', native.rules),
+  });
+  for (const policy of [sdk, native, child]) {
+    for (const name of removed) {
+      expect(policy.decide('skill', name)).toBe('deny');
+    }
+  }
+  for (const name of removed) {
+    expect(Object.entries(sdkSkill).find(([key]) => key === name)?.[1]).toBe(
+      'deny',
+    );
+  }
+  expect(sdk.decide('skill', 'ordinary-skill')).toBe('allow');
+  expect(native.decide('skill', 'ordinary-skill')).toBe('allow');
+  expect(child.decide('skill', 'ordinary-skill')).toBe('allow');
+});
 
 function marketplacePackage(
   id: string,
@@ -104,7 +151,492 @@ function marketplaceOptions(
   };
 }
 
+test.each(['!123'])(
+  'R1 literal: SDK native child and alias retain %s',
+  (id) => {
+    const runtime = runtimeFor({
+      agents: {
+        'market-agent': {
+          displayName: 'LiteralVisible',
+          skills_include_local: true,
+        },
+      },
+    });
+    runtime.setProjectSkillPermissionNames(['!local', '!discovered']);
+    const registry = build(
+      runtime,
+      { mcp: { 'host-mcp': { type: 'local' } } },
+      {
+        hostFlavor: 'v2',
+        marketplace: {
+          selectedPackageIds: ['team/literal'],
+          store: marketplaceStore({
+            'team/literal': marketplacePackage('team/literal', {
+              skills: [id],
+            }),
+          }),
+          pluginVersion: '3.2.0',
+          availableSkillNames: [id, '!local', '!discovered'],
+        },
+      },
+    );
+    for (const name of ['market-agent', 'LiteralVisible']) {
+      const native = registry.nativePolicies[name];
+      const sdk = compilePermissionPolicy({
+        baselineRules: [],
+        hostRules: adaptPermissions(
+          registry.getSdkAgentProjection()[name].permission,
+        ).filter(
+          (rule): rule is V2PermissionRule =>
+            rule.effect === 'allow' ||
+            rule.effect === 'ask' ||
+            rule.effect === 'deny',
+        ),
+      });
+      const child = compilePermissionPolicy({
+        baselineRules: [],
+        hostRules: registry.compileChildPermissions(name, native.rules),
+      });
+      for (const policy of [native, sdk, child]) {
+        for (const resource of [id, '!local', '!discovered'])
+          expect(policy.decide('skill', resource)).toBe('allow');
+        expect(policy.decide('skill', '123')).toBe('deny');
+        expect(policy.decide('skill', 'local')).toBe('deny');
+        expect(policy.decide('skill', 'outside')).toBe('deny');
+      }
+    }
+  },
+);
+
+test('R3: marketplace __proto__ exclusion survives SDK, native, alias, and child projections', () => {
+  const runtime = runtimeFor({
+    agents: {
+      'market-agent': {
+        displayName: 'ProtoVisible',
+        skills: ['*', '!__proto__'],
+      },
+    },
+  });
+  const registry = build(
+    runtime,
+    { mcp: { 'host-mcp': { type: 'local' } } },
+    {
+      hostFlavor: 'v2',
+      marketplace: {
+        selectedPackageIds: ['team/proto'],
+        store: marketplaceStore({
+          'team/proto': marketplacePackage('team/proto', {
+            skills: ['__proto__', 'ordinary-skill'],
+          }),
+        }),
+        pluginVersion: '3.2.0',
+        availableSkillNames: ['__proto__', 'ordinary-skill'],
+      },
+    },
+  );
+  for (const name of ['market-agent', 'ProtoVisible']) {
+    const sdkPermissions = registry.getSdkAgentProjection()[name].permission;
+    const sdkSkill = Object.entries(sdkPermissions ?? {}).find(
+      ([key]) => key === 'skill',
+    )?.[1];
+    if (
+      sdkSkill === null ||
+      typeof sdkSkill !== 'object' ||
+      Array.isArray(sdkSkill)
+    )
+      throw new Error('SDK projection is missing its skill map');
+    expect(Object.hasOwn(sdkSkill, '__proto__')).toBe(true);
+    expect(
+      Object.entries(sdkSkill).find(([key]) => key === '__proto__')?.[1],
+    ).toBe('deny');
+    const sdk = compilePermissionPolicy({
+      baselineRules: [],
+      hostRules: adaptPermissions(sdkPermissions).filter(
+        (rule): rule is V2PermissionRule =>
+          rule.effect === 'allow' ||
+          rule.effect === 'ask' ||
+          rule.effect === 'deny',
+      ),
+    });
+    const native = registry.nativePolicies[name];
+    const child = compilePermissionPolicy({
+      baselineRules: [],
+      hostRules: registry.compileChildPermissions(name, native.rules),
+    });
+    for (const policy of [native, sdk, child]) {
+      expect(policy.decide('skill', '__proto__')).toBe('deny');
+      expect(policy.decide('skill', 'ordinary-skill')).toBe('allow');
+    }
+  }
+});
+
+test('R3: disabled __proto__ survives SDK, native, aliases, and child rules', () => {
+  const runtime = runtimeFor({
+    disabled_skills: ['__proto__'],
+    agents: {
+      oracle: { displayName: 'DisabledProtoVisible', skills: ['*'] },
+    },
+  });
+  const registry = build(runtime, {}, { hostFlavor: 'v2' });
+  for (const name of ['oracle', 'DisabledProtoVisible']) {
+    const sdkPermissions = registry.getSdkAgentProjection()[name].permission;
+    const sdkSkill = Object.entries(sdkPermissions ?? {}).find(
+      ([key]) => key === 'skill',
+    )?.[1];
+    if (
+      sdkSkill === null ||
+      typeof sdkSkill !== 'object' ||
+      Array.isArray(sdkSkill)
+    )
+      throw new Error('SDK projection is missing its skill map');
+    expect(Object.hasOwn(sdkSkill, '__proto__')).toBe(true);
+    expect(
+      Object.entries(sdkSkill).find(([key]) => key === '__proto__')?.[1],
+    ).toBe('deny');
+    const sdk = compilePermissionPolicy({
+      baselineRules: [],
+      hostRules: adaptPermissions(sdkPermissions).filter(
+        (rule): rule is V2PermissionRule =>
+          rule.effect === 'allow' ||
+          rule.effect === 'ask' ||
+          rule.effect === 'deny',
+      ),
+    });
+    const native = registry.nativePolicies[name];
+    const child = compilePermissionPolicy({
+      baselineRules: [],
+      hostRules: registry.compileChildPermissions(name, native.rules),
+    });
+    for (const policy of [native, sdk, child]) {
+      expect(policy.decide('skill', '__proto__')).toBe('deny');
+      expect(policy.decide('skill', 'ordinary-skill')).toBe('allow');
+    }
+  }
+});
+
+describe('S2 admission versus authorization', () => {
+  function skillRegistry(
+    owner: AgentOverrideConfig,
+    hostRules: readonly V2PermissionRule[] = [],
+    hostAgents: Record<string, unknown> = {},
+  ) {
+    const runtime = runtimeFor({
+      agents: { 'market-agent': { displayName: 'MarketVisible', ...owner } },
+    });
+    runtime.setProjectSkillPermissionNames(['local-selected']);
+    return build(
+      runtime,
+      { mcp: { 'host-mcp': { type: 'local' } }, agent: hostAgents },
+      {
+        hostFlavor: 'v2',
+        ...marketplaceOptions(
+          ['team/s2'],
+          marketplaceStore({
+            'team/s2': marketplacePackage('team/s2', {
+              skills: ['skill-a', 'review-a'],
+            }),
+          }),
+        ),
+        nativePermissionsByAgent: { 'market-agent': hostRules },
+      },
+    );
+  }
+
+  function expectDecisions(
+    registry: ReturnType<typeof skillRegistry>,
+    expected: Record<string, 'allow' | 'ask' | 'deny'>,
+    sdkExpected = expected,
+  ) {
+    for (const name of ['market-agent', 'MarketVisible']) {
+      const config = registry.getSdkAgentProjection()[name];
+      const sdk = compilePermissionPolicy({
+        baselineRules: [],
+        hostRules: adaptPermissions(config.permission),
+      });
+      const native = registry.nativePolicies[name];
+      const emitted = registry.compileChildPermissions(name, native.rules);
+      const child = compilePermissionPolicy({
+        baselineRules: [],
+        hostRules: emitted,
+      });
+      for (const [resource, effect] of Object.entries(expected)) {
+        expect(
+          `${name}/${resource}/native: ${native.decide('skill', resource)}`,
+        ).toBe(`${name}/${resource}/native: ${effect}`);
+        expect(
+          `${name}/${resource}/child: ${child.decide('skill', resource)}`,
+        ).toBe(`${name}/${resource}/child: ${effect}`);
+        expect(
+          `${name}/${resource}/sdk: ${sdk.decide('skill', resource)}`,
+        ).toBe(`${name}/${resource}/sdk: ${sdkExpected[resource]}`);
+      }
+    }
+  }
+
+  test('a broad host allow cannot admit an unselected skill', () => {
+    const registry = skillRegistry({ permission: { skill: 'ask' } }, [
+      { action: '*', resource: '*', effect: 'allow' },
+    ]);
+    expectDecisions(
+      registry,
+      { 'skill-a': 'allow', 'review-a': 'allow', unadmitted: 'deny' },
+      { 'skill-a': 'ask', 'review-a': 'ask', unadmitted: 'deny' },
+    );
+  });
+
+  test('host allow inside admission wins and a later host deny still wins', () => {
+    const registry = skillRegistry(
+      { permission: { skill: 'deny' }, skills_include_local: true },
+      [
+        { action: 'skill', resource: '*', effect: 'allow' },
+        { action: 'skill', resource: 'review-a', effect: 'deny' },
+      ],
+    );
+    expectDecisions(
+      registry,
+      {
+        'skill-a': 'allow',
+        'review-a': 'deny',
+        'local-selected': 'allow',
+        unadmitted: 'deny',
+      },
+      {
+        'skill-a': 'deny',
+        'review-a': 'deny',
+        'local-selected': 'deny',
+        unadmitted: 'deny',
+      },
+    );
+  });
+
+  test('local selected-but-ask remains admitted without exposing unknown names', () => {
+    const registry = skillRegistry({
+      permission: { skill: { '*': 'ask' } },
+      skills_include_local: true,
+    });
+    expectDecisions(registry, {
+      'skill-a': 'ask',
+      'review-a': 'ask',
+      'local-selected': 'ask',
+      unadmitted: 'deny',
+    });
+  });
+
+  test('an explicit empty base removes the package default admission', () => {
+    const registry = skillRegistry(
+      { permission: { skill: 'ask' }, skills: [] },
+      [{ action: '*', resource: '*', effect: 'allow' }],
+    );
+    expectDecisions(registry, {
+      'skill-a': 'deny',
+      'review-a': 'deny',
+      unadmitted: 'deny',
+    });
+  });
+
+  test('an empty base can select local names without auto-allowing them', () => {
+    const registry = skillRegistry({
+      skills: [],
+      skills_include_local: true,
+      permission: { skill: 'ask' },
+    });
+    expectDecisions(registry, {
+      'skill-a': 'deny',
+      'review-a': 'deny',
+      'local-selected': 'ask',
+      unadmitted: 'deny',
+    });
+  });
+
+  test('ordered host config rules preserve exceptions inside admission only', () => {
+    const registry = skillRegistry({ permission: { skill: 'ask' } }, [], {
+      'market-agent': {
+        permission: { skill: { '*': 'allow', 'review-a': 'deny' } },
+      },
+    });
+    expectDecisions(registry, {
+      'skill-a': 'allow',
+      'review-a': 'deny',
+      unadmitted: 'deny',
+    });
+  });
+
+  test('ask tokens select capabilities but remain consent-gated', () => {
+    const registry = skillRegistry({ skills: ['?skill-a'] });
+    expectDecisions(registry, {
+      'skill-a': 'ask',
+      'review-a': 'deny',
+      unadmitted: 'deny',
+    });
+  });
+
+  test('a deliberate wildcard remains open-ended with exclusions', () => {
+    const registry = skillRegistry({ skills: ['?*', '!blocked'] });
+    expectDecisions(registry, {
+      future: 'ask',
+      blocked: 'deny',
+      'skill-a': 'ask',
+    });
+  });
+});
+
 describe('finalized existing-agent registry', () => {
+  test.each(['ask', 'deny'] as const)(
+    'S2: marketplace defaults use the same bounded %s projection',
+    (effect) => {
+      const runtime = runtimeFor({
+        agents: {
+          'market-agent': {
+            displayName: 'MarketVisible',
+            permission: { skill: effect },
+            skills_include_local: true,
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['review-a']);
+      const registry = build(
+        runtime,
+        { mcp: { 'host-mcp': { type: 'local' } } },
+        {
+          hostFlavor: 'v2',
+          ...marketplaceOptions(
+            ['team/s2'],
+            marketplaceStore({
+              'team/s2': marketplacePackage('team/s2', {
+                skills: ['skill-a', 'review-a'],
+              }),
+            }),
+          ),
+        },
+      );
+      for (const name of ['market-agent', 'MarketVisible']) {
+        expect(registry.nativePolicies[name].decide('skill', 'skill-a')).toBe(
+          effect,
+        );
+        expect(registry.nativePolicies[name].decide('skill', 'review-a')).toBe(
+          effect,
+        );
+      }
+    },
+  );
+
+  test.each(['ask', 'deny'] as const)(
+    'S2: repeated marketplace defaults are deliberate but other defaults stay %s',
+    (effect) => {
+      const runtime = runtimeFor({
+        agents: {
+          'market-agent': {
+            displayName: 'MarketVisible',
+            permission: { skill: effect },
+            skills_add: ['skill-a'],
+            skills_include_local: true,
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['local-selected']);
+      const registry = build(
+        runtime,
+        { mcp: { 'host-mcp': { type: 'local' } } },
+        {
+          hostFlavor: 'v2',
+          ...marketplaceOptions(
+            ['team/s2'],
+            marketplaceStore({
+              'team/s2': marketplacePackage('team/s2', {
+                skills: ['skill-a', 'review-a'],
+              }),
+            }),
+          ),
+        },
+      );
+      for (const name of ['market-agent', 'MarketVisible']) {
+        expect(registry.nativePolicies[name].decide('skill', 'skill-a')).toBe(
+          'allow',
+        );
+        expect(registry.nativePolicies[name].decide('skill', 'review-a')).toBe(
+          effect,
+        );
+        expect(
+          registry.nativePolicies[name].decide('skill', 'local-selected'),
+        ).toBe(effect);
+        expect(
+          registry.nativePolicies[name].decide('skill', 'unadmitted'),
+        ).toBe('deny');
+        const config = registry.finalAgentConfig[name] as {
+          permission: Record<string, unknown>;
+        };
+        const sdk = compilePermissionPolicy({
+          baselineRules: [],
+          hostRules: adaptPermissions(config.permission),
+        });
+        expect(sdk.decide('skill', 'skill-a')).toBe('allow');
+        expect(sdk.decide('skill', 'review-a')).toBe(effect);
+        expect(sdk.decide('skill', 'local-selected')).toBe(effect);
+        expect(sdk.decide('skill', 'unadmitted')).toBe('deny');
+      }
+    },
+  );
+
+  test('S2: alias reconciliation preserves explicit authority and host narrowing', () => {
+    const runtime = runtimeFor({
+      agents: {
+        librarian: { permission: { skill: 'ask' }, skills_include_local: true },
+        explorer: { displayName: 'Scout', skills_add: ['deliberate'] },
+      },
+    });
+    runtime.setProjectSkillPermissionNames(['local']);
+    const registry = build(runtime, {}, { hostFlavor: 'v2' });
+    for (const name of ['explorer', 'librarian', 'explore', 'Scout']) {
+      expect(registry.nativePolicies[name].decide('skill', 'local')).toBe(
+        'ask',
+      );
+      expect(registry.nativePolicies[name].decide('skill', 'deliberate')).toBe(
+        'allow',
+      );
+    }
+    const narrowed = build(
+      runtime,
+      { agent: { explorer: { permission: { skill: 'deny' } } } },
+      { hostFlavor: 'v2' },
+    );
+    expect(narrowed.nativePolicies.explorer.decide('skill', 'deliberate')).toBe(
+      'deny',
+    );
+  });
+
+  test.each(['ask', 'deny'] as const)(
+    'S2: automatic skills retain scalar %s across canonical and visible native policies',
+    (effect) => {
+      const runtime = runtimeFor({
+        agents: {
+          oracle: {
+            displayName: 'Reviewer',
+            permission: { skill: effect },
+            skills_include_local: true,
+          },
+          specialist: {
+            model: 'provider/model',
+            permission: { skill: effect },
+            skills_include_local: true,
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['discovered']);
+      const registry = build(runtime, {}, { hostFlavor: 'v2' });
+      for (const name of ['oracle', 'Reviewer', 'specialist']) {
+        expect(
+          registry.nativePolicies[name].decide('skill', 'discovered'),
+        ).toBe(effect);
+        expect(
+          registry.nativePolicies[name].decide(
+            'skill',
+            'requesting-code-review',
+          ),
+        ).toBe(effect);
+      }
+    },
+  );
+
   test('owns host inputs and exposes isolated projections', () => {
     const runtime = runtimeFor({
       agents: { explorer: { model: 'plugin/model' } },
@@ -2793,6 +3325,118 @@ describe('child permission payload stance tail', () => {
     { action: 'edit', resource: 'src/*', effect: 'allow' },
   ];
 
+  test.each(['allow', 'ask', 'deny'] as const)(
+    'S1: an exact bare-prefix host %s does not cover subcommands',
+    (effect) => {
+      const runtime = runtimeFor({
+        agents: {
+          oracle: {
+            permission: { execute: { '*': 'deny', 'git *': 'allow' } },
+          },
+        },
+      });
+      const registry = build(runtime, {}, { hostFlavor: 'v2' });
+      const ceiling: V2PermissionRule[] = [
+        { action: 'execute', resource: '*', effect: 'deny' },
+        { action: 'execute', resource: 'git *', effect: 'allow' },
+      ];
+      const payload: V2PermissionRule[] = [
+        { action: 'execute', resource: '*', effect: 'deny' },
+        { action: 'execute', resource: 'git', effect },
+      ];
+      const compiled = registry.compileChildPermissions('oracle', payload);
+
+      expect(decideOf(compiled)('execute', 'git')).toBe(effect);
+      expect(decideOf(compiled)('execute', 'git status')).toBe('deny');
+      expectHostMeetCeiling(payload, compiled, ceiling, 'execute', [
+        'git',
+        'git ',
+        'git status',
+        'git commit',
+        'gitx',
+        'npm test',
+      ]);
+      expect(registry.compileChildPermissions('oracle', compiled)).toEqual(
+        compiled,
+      );
+    },
+  );
+
+  test.each([
+    { grant: 'git *', host: 'git *', exception: 'git status' },
+    { grant: 'git **', host: 'git', exception: 'git status' },
+    { grant: 'git *', host: 'git **', exception: 'git status' },
+    { grant: 'git', host: 'git *', exception: 'git' },
+    { grant: 'C:\\repo *', host: 'C:/repo', exception: 'C:/repo status' },
+    { grant: 'git *', host: 'git ?', exception: 'git a' },
+  ])(
+    'S1: full-language containment for $grant versus $host',
+    ({ grant, host, exception }) => {
+      const runtime = runtimeFor({
+        agents: {
+          oracle: {
+            permission: { execute: { '*': 'deny', [grant]: 'allow' } },
+          },
+        },
+      });
+      const registry = build(runtime, {}, { hostFlavor: 'v2' });
+      const ceiling: V2PermissionRule[] = [
+        { action: 'execute', resource: '*', effect: 'deny' },
+        { action: 'execute', resource: grant, effect: 'allow' },
+      ];
+      const payload: V2PermissionRule[] = [
+        { action: 'exec*', resource: '*', effect: 'deny' },
+        { action: 'execute', resource: host, effect: 'allow' },
+        { action: 'execute', resource: exception, effect: 'allow' },
+        { action: 'execute', resource: 'git private *', effect: 'ask' },
+        { action: 'execute', resource: 'git private secret', effect: 'deny' },
+      ];
+      const compiled = registry.compileChildPermissions('oracle', payload);
+      expectHostMeetCeiling(payload, compiled, ceiling, 'execute', [
+        'git',
+        'git ',
+        'git a',
+        'git status',
+        'git private',
+        'git private secret',
+        'git private public',
+        'gitx',
+        'C:/repo',
+        'C:/repo status',
+        'C:\\repo status',
+        'C:/repo/private',
+      ]);
+      expect(registry.compileChildPermissions('oracle', compiled)).toEqual(
+        compiled,
+      );
+    },
+  );
+
+  test('S1: a partial action cover never opens the remaining action language', () => {
+    const runtime = runtimeFor({
+      agents: {
+        oracle: { permission: { 'exec*': { '*': 'deny', 'git *': 'allow' } } },
+      },
+    });
+    const registry = build(runtime, {}, { hostFlavor: 'v2' });
+    const payload: V2PermissionRule[] = [
+      { action: '*', resource: '*', effect: 'deny' },
+      { action: 'execute', resource: 'git', effect: 'allow' },
+      { action: 'exec?', resource: 'git *', effect: 'ask' },
+    ];
+    const compiled = registry.compileChildPermissions('oracle', payload);
+    for (const action of ['execute', 'exec', 'execx', 'execution', 'read']) {
+      expectNeverLooser(payload, compiled, action, [
+        'git',
+        'git status',
+        'npm',
+      ]);
+    }
+    expect(registry.compileChildPermissions('oracle', compiled)).toEqual(
+      compiled,
+    );
+  });
+
   const EDIT_GRID = [
     'src/index.ts',
     'src/private/approved.ts',
@@ -3141,20 +3785,18 @@ describe('marketplace agent customization', () => {
     files: Record<string, string>,
     use: (project: string) => void,
   ) => {
-    const project = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'omos-marketplace-custom-'),
-    );
-    try {
-      for (const [relativePath, content] of Object.entries(files)) {
-        const file = path.join(project, relativePath);
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, content);
+    withTmpDirSync((project) => {
+      try {
+        for (const [relativePath, content] of Object.entries(files)) {
+          const file = path.join(project, relativePath);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, content);
+        }
+        use(project);
+      } finally {
+        RuntimeConfig.reset(project);
       }
-      use(project);
-    } finally {
-      RuntimeConfig.reset(project);
-      fs.rmSync(project, { recursive: true, force: true });
-    }
+    });
   };
 
   test('preserves the manifest defaults without owner overrides', () => {

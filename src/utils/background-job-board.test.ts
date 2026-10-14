@@ -6,6 +6,7 @@ import {
 } from './background-job-board';
 import { BackgroundJobCoordinator } from './background-job-coordinator';
 import { BackgroundJobBoard } from './background-job-fixture';
+import { getBackgroundJobLifecycleLedger } from './background-job-store';
 
 describe('BackgroundJobBoard', () => {
   test('T-B: silent adoption does not outrank known F2 sessions', () => {
@@ -65,6 +66,341 @@ describe('BackgroundJobBoard', () => {
     } finally {
       clock.mockRestore();
     }
+  });
+
+  test('nested launches inherit the top-level root session', () => {
+    const board = new BackgroundJobBoard();
+    const child = board.registerLaunch({
+      taskID: 'child',
+      parentSessionID: 'root',
+      agent: 'explorer',
+      now: 1,
+    });
+    const grandchild = board.registerLaunch({
+      taskID: 'grandchild',
+      parentSessionID: 'child',
+      agent: 'fixer',
+      now: 2,
+    });
+    expect(child.rootSessionID).toBe('root');
+    expect(grandchild.rootSessionID).toBe('root');
+    expect(
+      board
+        .recordsForRoot('root')
+        .map((job) => job.taskID)
+        .sort(),
+    ).toEqual(['child', 'grandchild']);
+  });
+
+  test('recordsForRoot and restore isolate context file snapshots', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child',
+      parentSessionID: 'root',
+      agent: 'explorer',
+      now: 1,
+    });
+    board.addContext('child', [
+      {
+        path: 'src/file.ts',
+        lastReadAt: 2,
+      },
+    ]);
+
+    const snapshot = board.recordsForRoot('root');
+    expect(snapshot[0]?.contextFiles).toEqual([
+      { path: 'src/file.ts', lastReadAt: 2 },
+    ]);
+    const restored = new ProductionBoard();
+    restored.restore(snapshot, 10);
+
+    snapshot[0].contextFiles[0].path = 'src/changed.ts';
+    snapshot[0].contextFiles[0].lastReadAt = 3;
+    snapshot[0].contextFiles.push({ path: 'src/extra.ts', lastReadAt: 4 });
+
+    expect(board.get('child')?.contextFiles).toEqual([
+      { path: 'src/file.ts', lastReadAt: 2 },
+    ]);
+    expect(restored.get('child')?.contextFiles).toEqual([
+      { path: 'src/file.ts', lastReadAt: 2 },
+    ]);
+  });
+
+  test('restoring running records makes them non-running without notifications', () => {
+    const source = new BackgroundJobBoard();
+    const running = source.registerLaunch({
+      taskID: 'child',
+      parentSessionID: 'root',
+      agent: 'explorer',
+      now: 1,
+    });
+    const restored = new BackgroundJobBoard();
+    const notifications: unknown[] = [];
+    restored.addMutationListener((change) => notifications.push(change));
+    restored.restore([running], 10);
+    expect(restored.get('child')).toMatchObject({
+      rootSessionID: 'root',
+      state: 'stopped',
+      statusUncertain: true,
+    });
+    expect(notifications).toEqual([]);
+  });
+
+  test('restored aliases remain resolvable and are not reused without storage', () => {
+    const source = new ProductionBoard();
+    const original = source.registerLaunch({
+      taskID: 'original',
+      parentSessionID: 'parent',
+      agent: 'explorer',
+    });
+    const restored = new ProductionBoard();
+    restored.restore([original]);
+
+    expect(restored.resolve('parent', 'exp-1')?.taskID).toBe('original');
+    expect(
+      restored.registerLaunch({
+        taskID: 'next',
+        parentSessionID: 'parent',
+        agent: 'explorer',
+      }).alias,
+    ).toBe('exp-2');
+  });
+
+  test('restored aliases seed counters independently by parent and prefix', () => {
+    const source = new ProductionBoard();
+    const records = [
+      source.registerLaunch({
+        taskID: 'a',
+        parentSessionID: 'parent-a',
+        agent: 'explorer',
+      }),
+      source.registerLaunch({
+        taskID: 'b',
+        parentSessionID: 'parent-a',
+        agent: 'fixer',
+      }),
+      source.registerLaunch({
+        taskID: 'c',
+        parentSessionID: 'parent-b',
+        agent: 'explorer',
+      }),
+    ];
+    const restored = new ProductionBoard();
+    restored.restore(records);
+
+    expect(
+      restored.registerLaunch({
+        taskID: 'd',
+        parentSessionID: 'parent-a',
+        agent: 'explorer',
+      }).alias,
+    ).toBe('exp-2');
+    expect(
+      restored.registerLaunch({
+        taskID: 'e',
+        parentSessionID: 'parent-a',
+        agent: 'fixer',
+      }).alias,
+    ).toBe('fix-2');
+    expect(
+      restored.registerLaunch({
+        taskID: 'f',
+        parentSessionID: 'parent-b',
+        agent: 'explorer',
+      }).alias,
+    ).toBe('exp-2');
+  });
+
+  test('restored aliases do not lower a higher backend high-water mark', () => {
+    const source = new ProductionBoard();
+    const record = source.registerLaunch({
+      taskID: 'original',
+      parentSessionID: 'parent',
+      agent: 'explorer',
+    });
+    const restored = new ProductionBoard({
+      aliasCounterHighWater: () => 8,
+    });
+    restored.restore([record]);
+
+    expect(
+      restored.registerLaunch({
+        taskID: 'next',
+        parentSessionID: 'parent',
+        agent: 'explorer',
+      }).alias,
+    ).toBe('exp-9');
+  });
+
+  test('moving a task emits deletion for its previous root before the upsert', () => {
+    const board = new BackgroundJobBoard();
+    const changes: Array<{
+      rootSessionID: string;
+      taskID: string;
+      record?: unknown;
+    }> = [];
+    board.addMutationListener((change) => changes.push(change));
+    board.registerLaunch({
+      taskID: 'child',
+      parentSessionID: 'root-a',
+      agent: 'explorer',
+      now: 1,
+    });
+    board.registerLaunch({
+      taskID: 'child',
+      parentSessionID: 'root-b',
+      agent: 'explorer',
+      now: 2,
+    });
+    expect(changes.slice(-2)).toMatchObject([
+      { rootSessionID: 'root-a', taskID: 'child' },
+      {
+        rootSessionID: 'root-b',
+        taskID: 'child',
+        record: { rootSessionID: 'root-b' },
+      },
+    ]);
+    expect(changes.at(-2)?.record).toBeUndefined();
+  });
+
+  test('clearParent notifies only after the whole parent is gone', () => {
+    const board = new BackgroundJobBoard();
+    for (const taskID of ['a', 'b', 'c', 'd']) {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent',
+        agent: 'oracle',
+        now: 1,
+      });
+    }
+    board.registerLaunch({
+      taskID: 'keep',
+      parentSessionID: 'other',
+      agent: 'oracle',
+      now: 1,
+    });
+
+    // Every projection call must observe the final state: one whole-board
+    // recompute per notification burst instead of one per deleted job.
+    const observed: number[] = [];
+    board.addMutationListener(() => observed.push(board.list('parent').length));
+    board.clearParent('parent');
+
+    expect(observed.length).toBeGreaterThan(0);
+    expect(new Set(observed)).toEqual(new Set([0]));
+    expect(board.list('parent')).toEqual([]);
+    expect(board.taskIDs()).toEqual(new Set(['keep']));
+  });
+
+  test('clearParent matches per-job drops in state and removal stream', () => {
+    const seed = (board: BackgroundJobBoard): void => {
+      for (const taskID of ['a', 'b', 'c']) {
+        board.registerLaunch({
+          taskID,
+          parentSessionID: 'parent',
+          agent: 'oracle',
+          now: 1,
+        });
+      }
+      board.registerLaunch({
+        taskID: 'keep',
+        parentSessionID: 'other',
+        agent: 'oracle',
+        now: 1,
+      });
+    };
+
+    const cleared = new BackgroundJobBoard();
+    seed(cleared);
+    const clearedChanges: unknown[] = [];
+    cleared.addMutationListener((change) => clearedChanges.push(change));
+    cleared.clearParent('parent');
+
+    const dropped = new BackgroundJobBoard();
+    seed(dropped);
+    const droppedChanges: unknown[] = [];
+    dropped.addMutationListener((change) => droppedChanges.push(change));
+    for (const taskID of ['a', 'b', 'c']) dropped.drop(taskID);
+
+    expect(cleared.list()).toEqual(dropped.list());
+    expect(cleared.taskIDs()).toEqual(dropped.taskIDs());
+    expect(cleared.sidebarHistoryByParentAgent()).toEqual(
+      dropped.sidebarHistoryByParentAgent(),
+    );
+    // The persistence owner sees one removal change per taskID either way.
+    expect(clearedChanges).toEqual(droppedChanges);
+  });
+
+  test('clearParent records suppression for every cleared job', () => {
+    const board = new BackgroundJobBoard();
+    for (const taskID of ['a', 'b', 'c']) {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent',
+        agent: 'oracle',
+        now: 1,
+      });
+    }
+    board.registerLaunch({
+      taskID: 'keep',
+      parentSessionID: 'other',
+      agent: 'oracle',
+      now: 1,
+    });
+
+    board.clearParent('parent');
+
+    const ledger = getBackgroundJobLifecycleLedger(board);
+    expect([...ledger.tombstones].sort()).toEqual(['a', 'b', 'c']);
+    expect([...ledger.deletionEpochs.keys()].sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  test('record updates, provisional promotion, retention trim and deletion notify persistence owner', () => {
+    const board = new BackgroundJobBoard({ maxReusablePerAgent: 1 });
+    const changes: Array<{
+      rootSessionID: string;
+      taskID: string;
+      record?: unknown;
+    }> = [];
+    board.addMutationListener((change) => changes.push(change));
+    board.registerLaunch({
+      taskID: 'provisional',
+      parentSessionID: 'root',
+      agent: 'oracle',
+      provisional: true,
+      now: 1,
+    });
+    board.promoteProvisional('provisional');
+    expect(
+      changes.some(
+        (change) => change.taskID === 'provisional' && change.record,
+      ),
+    ).toBe(true);
+    board.registerLaunch({
+      taskID: 'old',
+      parentSessionID: 'root',
+      agent: 'oracle',
+      now: 2,
+    });
+    board.updateStatus({ taskID: 'old', state: 'completed', now: 3 });
+    board.markReconciled('old', 4);
+    board.registerLaunch({
+      taskID: 'new',
+      parentSessionID: 'root',
+      agent: 'oracle',
+      now: 5,
+    });
+    board.updateStatus({ taskID: 'new', state: 'completed', now: 6 });
+    board.markReconciled('new', 7);
+    expect(
+      changes.some((change) => change.taskID === 'old' && !change.record),
+    ).toBe(true);
+    board.drop('new');
+    expect(changes.at(-1)).toMatchObject({
+      rootSessionID: 'root',
+      taskID: 'new',
+    });
+    expect(changes.at(-1)?.record).toBeUndefined();
   });
 
   test('registers background launches as running jobs with aliases', () => {

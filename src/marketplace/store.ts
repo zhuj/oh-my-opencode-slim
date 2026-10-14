@@ -77,6 +77,10 @@ export interface MarketplaceStoreInspection {
 }
 
 type MutationMode = 'install' | 'update';
+interface ReconciliationVerification {
+  verify(id: string): void;
+  invalidate(id: string): void;
+}
 const PACKAGE_READ_ERROR_CODES = new Set([
   'EACCES',
   'EBADF',
@@ -800,27 +804,50 @@ export class MarketplaceStore {
     lease: MarketplaceLease,
   ): void {
     lease.commit(() => {
-      this.reconcileRepairQuarantines(lockfile);
-      this.reconcileRemovalQuarantines(lockfile);
+      // Only reuse guards inside this lease. Restoring package bytes invalidates
+      // the guard, and subsequent store calls always verify disk afresh.
+      const verified = new Map<string, { error?: unknown }>();
+      const verification: ReconciliationVerification = {
+        verify: (id) => {
+          let result = verified.get(id);
+          if (!result) {
+            try {
+              this.loadLockedPackage(lockfile, id);
+              result = {};
+            } catch (error) {
+              // Operational read failures can be transient even under a lease;
+              // retain the existing per-entry retry behavior for those errors.
+              if (!(error instanceof MarketplaceIntegrityError)) throw error;
+              result = { error };
+            }
+            verified.set(id, result);
+          }
+          if ('error' in result) throw result.error;
+        },
+        invalidate: (id) => {
+          verified.delete(id);
+        },
+      };
+      this.reconcileRepairQuarantines(lockfile, verification);
+      this.reconcileRemovalQuarantines(lockfile, verification);
       this.removePendingStages();
-      this.removeUnselectedVersions(lockfile);
+      this.removeUnselectedVersions(lockfile, verification);
     });
   }
 
-  private reconcileRepairQuarantines(lockfile: MarketplaceLockfile): void {
+  private reconcileRepairQuarantines(
+    lockfile: MarketplaceLockfile,
+    verification: ReconciliationVerification,
+  ): void {
     const repairRoot = path.join(this.paths.stagingDir, 'repair');
     for (const publisher of childDirectories(repairRoot)) {
       for (const name of childDirectories(path.join(repairRoot, publisher))) {
         const packageDir = path.join(repairRoot, publisher, name);
         const id = `${publisher}/${name}`;
         const selectedEntry = lockfile.packages[id];
-        let selectedPackageVerified = false;
         const verifySelectedPackage = (): boolean => {
           if (!selectedEntry) return false;
-          if (!selectedPackageVerified) {
-            this.loadLockedPackage(lockfile, id);
-            selectedPackageVerified = true;
-          }
+          verification.verify(id);
           return true;
         };
         for (const version of childDirectories(packageDir)) {
@@ -845,10 +872,11 @@ export class MarketplaceStore {
               fs.mkdirSync(path.dirname(selectedPath), { recursive: true });
               fs.renameSync(backupPath, selectedPath);
               syncDirectory(path.dirname(selectedPath));
+              verification.invalidate(id);
               continue;
             }
             try {
-              this.loadLockedPackage(lockfile, id);
+              verification.verify(id);
             } catch (error) {
               if (isPackageReadFailure(error)) continue;
               throw error;
@@ -864,7 +892,10 @@ export class MarketplaceStore {
     this.removeEmptyDirectory(repairRoot);
   }
 
-  private reconcileRemovalQuarantines(lockfile: MarketplaceLockfile): void {
+  private reconcileRemovalQuarantines(
+    lockfile: MarketplaceLockfile,
+    verification: ReconciliationVerification,
+  ): void {
     const removedRoot = path.join(this.paths.stagingDir, 'removed');
     for (const publisher of childDirectories(removedRoot)) {
       for (const name of childDirectories(path.join(removedRoot, publisher))) {
@@ -882,10 +913,11 @@ export class MarketplaceStore {
             fs.mkdirSync(path.dirname(installedPath), { recursive: true });
             fs.renameSync(quarantinePath, installedPath);
             syncDirectory(path.dirname(installedPath));
+            verification.invalidate(id);
             continue;
           }
           try {
-            this.loadLockedPackage(lockfile, id);
+            verification.verify(id);
           } catch (error) {
             if (isPackageReadFailure(error)) continue;
             throw error;
@@ -907,7 +939,10 @@ export class MarketplaceStore {
     this.removeEmptyDirectory(pendingRoot);
   }
 
-  private removeUnselectedVersions(lockfile: MarketplaceLockfile): void {
+  private removeUnselectedVersions(
+    lockfile: MarketplaceLockfile,
+    verification: ReconciliationVerification,
+  ): void {
     for (const publisher of childDirectories(this.paths.packagesDir)) {
       const publisherPath = path.join(this.paths.packagesDir, publisher);
       for (const name of childDirectories(publisherPath)) {
@@ -924,7 +959,7 @@ export class MarketplaceStore {
           // This pruning is optional: leave old bytes in place on package
           // read failures so unrelated operations and exact repair can proceed.
           try {
-            this.loadLockedPackage(lockfile, id);
+            verification.verify(id);
           } catch (error) {
             if (isPackageReadFailure(error)) continue;
             throw error;
@@ -933,7 +968,11 @@ export class MarketplaceStore {
         for (const version of unselectedVersions) {
           removeTree(path.join(packageDir, version));
         }
-        if (!selectedVersion) this.removeEmptyDirectory(packageDir);
+        if (!selectedVersion) {
+          // All listed entries were removed successfully under the lease.
+          fs.rmdirSync(packageDir);
+          syncDirectory(path.dirname(packageDir));
+        }
       }
       this.removeEmptyDirectory(publisherPath);
     }

@@ -35,15 +35,123 @@ and its [filesystem walk](https://github.com/anomalyco/opencode/blob/527f0b931d1
 | **Custom agents** | `agents` configuration block | Define new specialized agents by keying them under `agents.<custom-name>` with required `model`, custom system `prompt`, and optional routing guidance. |
 | **Built-in prompt overrides** | `.opencode/oh-my-opencode-slim/<agent>.md` | Override the built-in system prompt for any agent (e.g. `oracle.md`, `explorer.md`, `orchestrator.md`, or custom agents). Acts as the default when no inline `prompt` is set in config. |
 | **Append prompts** | `.opencode/oh-my-opencode-slim/<agent>_append.md` | Append additional rules or guidelines to the existing base (inline, file, or default built-in) prompt without overriding it completely. |
+| **Shared base layer** | Every constructed agent | Adds role-neutral scope, evidence, uncertainty, and truthful-validation guidance once after prompt composition. |
 | **Per-agent skills** | `agents.<agent>.skills` | Explicitly restrict or authorize specific local codebase skills/scripts that this agent is allowed to execute. |
-| **Automatic project-local skills** | `agents.<agent>.skills_include_local` | Add valid skills from current and ancestor `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees without listing every skill name. |
+| **Automatic project-local skills** | `agents.<agent>.skills_include_local` | Opt in to granting valid names discovered under plugin-owned project skill roots and the current and ancestor native `.opencode/skills` names-only scan within the host's discovery boundary. |
 | **Per-agent MCPs** | `agents.<agent>.mcps` | Assign, restrict, or authorize specific Model Context Protocol (MCP) servers (like `context7` or `gh_grep`) to specific agents. |
 | **Presets** | `presets` configuration block | Bundle named agent environments. User and project preset definitions deep-merge; the active preset then merges into `agents`. |
 | **Precedence** | User config, project config, presets, prompt files | Project-local settings take precedence over user-global settings, while root `agents.*` entries beat active preset entries. |
 
 ---
 
+## Project-local resource roots
+
+Plugin-owned project resources are discovered beneath category directories at
+eligible ancestors from the host-supplied active directory through the
+host-supplied OpenCode project/worktree boundary, including that boundary.
+When the host does not provide a valid boundary, discovery fails closed rather
+than substituting the process working directory. That boundary walk never steps
+above the boundary or outside it through a symlink. The default ordered
+prefixes are `.local`, `.local/.slim`, and `.opencode`; rules and eligible
+extra skills use `rules/` and `skills/` under each prefix. The `.opencode`
+prefix does not transfer native OpenCode resource ownership to the plugin:
+native skills, commands, agents, and `AGENTS.md` remain host-owned.
+
+Rules have one additional source outside that walk: `rules/` under every
+OpenCode config directory (`OPENCODE_CONFIG_DIR`, then
+`XDG_CONFIG_HOME/opencode` or `~/.config/opencode`). These global rules are
+resolved by a separate step that the boundary walk cannot produce, and each
+config directory is resolved independently so an unreadable one costs only
+itself rather than the whole injection pass. Global rules keep a
+`global-rules/` label in their injected heading instead of the `..`-laden
+relative path the project walk would otherwise produce. Symlinks are not
+resolved, so a symlinked config directory keeps the path you configured. This
+source covers `rules` only; global `skills`, `commands`, and `agents` stay
+host-owned.
+
+A rule's identity is its filename, so global rules register unconditionally and
+a project rule overrides a global rule of the same name:
+
+- A project rule with the same filename replaces the global one entirely. Only
+  the more specific rule is injected.
+- An **empty** project rule file with that filename disables the global rule.
+  It exists only to claim the name, and nothing is injected for it.
+- To disable a global rule for one file rather than every file, use the
+  project's own selectors (`globs`, `paths`, `applyTo`) as usual.
+
+Matching rules are injected least specific first, so the most specific rule
+appears last and reads as the final word. Rules at the same specificity are
+ordered by prefix, then filename.
+
+### How specificity is measured
+
+Specificity is a directory's **depth**: how many hops it sits below your home
+directory. Home is depth `0`, `~/work/proj` is `1`, `~/work/proj/app` is `2`.
+Deeper is more specific, so ordering by ascending depth is exactly "most generic
+first, most specific last" — the order injected context wants. The same measure
+orders rules, skills, commands, and agents; `rules` and `skills` are the
+categories the plugin discovers project-local today.
+
+Two kinds of root sit outside that scale and are deliberately ranked below
+everything a project owns:
+
+- A root under an OpenCode config directory is machine-wide shared state, so it
+  takes the smallest depth there is and always sorts first.
+- A root outside your home directory takes its hop count minus a fixed offset,
+  which ranks it below every home-based root while leaving its order relative to
+  other non-home roots intact.
+
+Depth is measured from the path as the project spells it. Symlinks are not
+resolved, so `a/b/c/d/e` scores as written even when `a/b/c` points somewhere
+else. The boundary walk still refuses any root that resolves outside the project
+boundary, so this affects how a root is named and ranked, never whether it is
+allowed in.
+
+Configure `resource_prefixes` to replace that default list:
+
+```jsonc
+{
+  "resource_prefixes": [".local", ".team-config"]
+}
+```
+
+An explicit list replaces the defaults; a project-config list replaces a
+user-config list, while omission inherits the user list. An explicit empty
+list (`"resource_prefixes": []`) disables prefix-based plugin discovery of
+extra rules and skills. It does not disable the separate names-only scan of
+the current and eligible ancestor native `.opencode/skills` trees used by the
+`skills_include_local` permission option below.
+
+Prefixes are relative directory fragments, not paths or glob patterns.
+Absolute paths and `..` traversal are rejected. Resource discovery is
+deterministic: within one ancestor the configured prefix order decides, and
+ancestors themselves rank by depth. Resource-specific collision rules are
+described below.
+
 ## Configuration Precedence
+
+### Hierarchical rules
+
+For a successful `read`, `write`, `edit`, or multi-file patch operation, the
+plugin uses structured resolved file paths from the host result to find matching
+`.md` and `.mdc` rule files under discovered `rules/` roots. Rules support
+`alwaysApply`, `globs`, `paths`, and `applyTo` frontmatter selectors, including
+negative patterns. Empty or absent selectors do not match every file. Matches
+are ordered by depth, then prefix order and stable filename; this is ordering,
+not an override rule. Native `AGENTS.md` is not parsed or injected by this
+feature.
+
+Matching rules are appended to the fresh result of the file operation, leaving
+the original output and earlier conversation content unchanged. Repeated
+unchanged rules are deduplicated per session; changed rule content can be
+included again. Rule bodies use a 50,000-token ceiling. When valid usage and
+model-context evidence is available, the total budget is further capped at
+half the remaining context; if usage evidence is unavailable, the fixed
+ceiling is used. Malformed/unreadable rules and discovery failures
+are skipped without changing the file operation's result. V1 and V2 use their
+respective supported host result-path and lifecycle APIs; pathless results do
+not trigger rule injection. State is cleared on session deletion and
+compaction, and all state is cleared on plugin disposal.
 
 When oh-my-opencode-slim loads, it resolves configuration properties and prompt templates across multiple layers. The inheritance precedence operates strictly as follows:
 
@@ -106,7 +214,12 @@ See [Skills Assignment](skills.md#adding-or-removing-skills-on-top-of-an-inherit
 
 ### Including all project-local skills automatically
 
-When a repository carries several project skills under `.opencode/skills` or `.agents/skills`, set `skills_include_local: true` instead of repeating every local skill name in `skills_add`:
+When a repository carries project skills under the default or configured
+`skills/` roots, set `skills_include_local: true` to opt in to granting those
+discovered skill names without repeating each name in `skills_add`. Native
+ OpenCode skills remain host-owned; the plugin's current and eligible ancestor
+`.opencode/skills` scan used for this option reads names only and does not load
+or register their content:
 
 ```text
 .opencode/skills/
@@ -127,18 +240,24 @@ When a repository carries several project skills under `.opencode/skills` or `.a
 }
 ```
 
-The flag behaves like automatically adding every valid skill discovered under
-the current and ancestor `.opencode/skills/**/SKILL.md` and
-`.agents/skills/**/SKILL.md` trees within the host's discovery boundary.
-Duplicate names across both roots are granted once; sibling trees are not
-searched. OpenCode selects which actual skill is loaded. Skill identity comes
-from the `name` frontmatter field, not the directory name.
-The option works in global user config and may be overridden per project.
-This matches OpenCode's ancestor directory discovery, not every host-specific
-skill format. OpenCode v2 uses path-derived IDs, so keep the frontmatter name
-equal to the skill directory name when using this flag on v2. If another local
-`SKILL.md` is added later, it is picked up on reload without another config
-edit.
+The flag opts into automatically granting valid discovered project skill names.
+The native names-only scan includes current and ancestor
+`.opencode/skills/**/SKILL.md` trees within the host's discovery boundary;
+duplicate names are included once, and sibling trees are not searched.
+Extra skill content is made available through the host's supported skill API;
+discovering a skill by itself does not grant agent permission. Plugin-owned
+project skill candidates require a nonempty `name` frontmatter field, which is
+their identity rather than the directory name. For native V2 collision checks,
+the host's own fallback applies when its optional `name` is omitted: a top-level
+Markdown filename or a `SKILL.md` parent-directory name. New files are picked
+up on normal plugin/host initialization; discovery does not add a filesystem
+watcher.
+
+For native V2 skills, keep the frontmatter name aligned with the host's skill ID
+when using automatic grants, so name-based permission rules target the intended
+ host skill. The option works in global user config and may be overridden per
+ project. Names are granted once; sibling trees are not searched. New files are
+ picked up on normal initialization rather than through a filesystem watcher.
 
 It composes with the existing directives. For example, include all project-local skills but exclude one from `fixer`:
 
@@ -153,13 +272,41 @@ It composes with the existing directives. For example, include all project-local
 }
 ```
 
-`skills_remove` still wins over automatically included local skills. Global
-skills, other compatibility directories, configured external paths, and URL
-skill sources are intentionally outside this flag's scope. The existing safety
-checks remain: symlinked `.opencode`, `.agents`, or `skills` roots pointing
-outside their ancestor location are skipped, and symlinked skill entries are
-not followed.
-OpenCode itself remains responsible for registering and loading skills.
+`skills_remove`, explicit `!deny`, disabled-skill policy, and explicit
+`?ask` permissions retain their existing precedence over automatic inclusion.
+Known native skill-name collisions keep the host definition; duplicate names
+among plugin-owned roots retain the first candidate in deterministic resolver
+order. Keep names unique across all host and plugin skill sources. The plugin
+does not scan unrelated user/global sources just to detect collisions. This
+option does not grant global skills, configured external paths, or URL skill
+sources.
+The existing safety checks remain: symlinked native `.opencode` or `skills`
+roots pointing outside their ancestor location are skipped, and symlinked skill
+entries are not followed. Compatibility directories are outside the names-only
+scan's scope. OpenCode remains responsible for registering and loading skills.
+
+### V1 and V2 host integration
+
+On OpenCode V1, eligible extra skill directories are added to the mutable
+`skills.paths` before host discovery, without replacing existing paths. On V2,
+eligible extra skill definitions are registered through the public skill
+transform API. Both integrations exclude native host-owned roots and known
+collisions; the host continues to own available-skill rendering and content.
+The current and eligible ancestor `.opencode/skills` permission-name scan is
+names-only, including when `resource_prefixes` is empty. These plugin-owned additions are discovered
+during normal initialization, not by a watcher.
+
+On V2 these registered project skills also join the event-driven `/<skill-id>`
+command catalog, alongside global/user and registered bundled skills. Explicit
+commands own collisions. The body is always inlined; command activation delivers
+the skill content whether or not the skill is granted to the active agent.
+Arguments and attachments are preserved. Reload to rediscover these
+plugin-owned files; host skill/plugin inventory updates reconcile the command
+catalog automatically. See [Skill Slash Commands](skills.md#skill-slash-commands)
+ for lifecycle and command-only reload limits. Global skills, configured
+ external paths, URL sources, and unrelated compatibility directories remain
+ outside this option's scope. Symlinked roots resolving outside their ancestor
+ location and symlinked skill entries are skipped.
 
 ---
 
@@ -229,6 +376,17 @@ is **inline > file > agent default**:
      finalPrompt = effectiveBase
      ```
 
+4. **Shared base layer:**
+   Every agent returned by the plugin is finalized with the same deterministic
+   role-neutral prefix after the effective prompt, append prompt, display-name
+   rewrites, and routing guidance are composed:
+   ```
+   finalPrompt = sharedBasePrompt + "\n\n" + composedRolePrompt
+   ```
+   A replacement prompt replaces the role-specific body, not this shared
+   prefix. The base layer is also applied to custom agents, ACP wrappers, and
+   dynamic councillor agents.
+
 ### Host Vocabulary in Custom Prompts
 
 Prompt text you supply is used **verbatim** for delegation vocabulary — the
@@ -261,6 +419,64 @@ The control-tool names (`task_status`, `task_message`,
 `task_reply`, `task_revive`, `task_cancel`) are identical on both hosts. On v2
 they take `sessionID` and also accept `task_id` as a deprecated alias (never
 emitted).
+
+---
+
+## Prompt Section Templates
+
+Replacement and append prompt files can opt into deterministic sections that
+are generated when the agent definitions are constructed. The feature is
+opt-in: the first line of the prompt file must be exactly:
+
+```md
+<!-- slim-prompt-template:v1 -->
+```
+
+After the marker, use these placeholders:
+
+| Placeholder | Injected content |
+|---|---|
+| `{{slim.section.intent_gate}}` | Per-turn intent classification and authorization boundaries. |
+| `{{slim.section.agents}}` | Safe agent aliases available to the current configuration. |
+| `{{slim.section.task_management}}` | Whether the orchestrator wake scheduler is enabled. |
+| `{{slim.section.verification}}` | Diagnostics, tests, build, and runtime verification guidance. |
+| `{{slim.section.orchestration}}` | High-level outcome ownership and phase separation. |
+| `{{slim.section.delegation}}` | Bounded briefs, dependencies, write ownership, and parallel lanes. |
+| `{{slim.section.result_synthesis}}` | Reconciliation of specialist reports and verified evidence. |
+
+Example `.opencode/oh-my-opencode-slim/orchestrator.md`:
+
+```md
+<!-- slim-prompt-template:v1 -->
+
+# Repository Workflow
+
+{{slim.section.intent_gate}}
+
+{{slim.section.agents}}
+
+{{slim.section.orchestration}}
+
+{{slim.section.delegation}}
+
+{{slim.section.result_synthesis}}
+
+Keep repository-specific instructions below these generated sections.
+```
+
+The same rendering applies to `<agent>.md` replacement prompts and
+`<agent>_append.md` append prompts. Inline `agents.<agent>.prompt` values still
+override replacement files, but a resolved append file is still appended and
+rendered. Unmarked file bodies remain byte-for-byte unchanged and do not opt
+into section substitution accidentally; the shared base is still added to the
+final agent prompt. Escape a placeholder as
+`\{{slim.section.agents}}` when it must remain literal; unknown or malformed
+placeholders fail agent construction with the prompt source in the error.
+
+Sections contain construction-time configuration only. They never include the
+current user message, timestamps, session identifiers, live task state, or
+other per-request values, which keeps the prompt prefix deterministic for
+provider prompt caching.
 
 ---
 

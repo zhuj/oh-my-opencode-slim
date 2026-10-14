@@ -183,6 +183,11 @@ describe('RuntimeConfig', () => {
     expect(runtime.imageRouting).toBe('direct');
     expect(runtime.companion).toBeUndefined();
     expect(runtime.council).toBeUndefined();
+    expect(runtime.resourcePrefixes).toEqual([
+      '.local',
+      '.local/.slim',
+      '.opencode',
+    ]);
   });
 
   test('disabled collection defaults with an empty config', () => {
@@ -204,6 +209,8 @@ describe('RuntimeConfig', () => {
       layout: 'main-vertical',
       main_pane_size: 60,
     });
+    // The TUI wiring derives the default surface from the host flavor.
+    expect(runtime.multiplexer.viewer).toBeUndefined();
     expect(runtime.backgroundJobs.maxSessionsPerAgent).toBe(2);
     // The job board is never rendered on any host, so there is no
     // boardInjection switch to read.
@@ -255,6 +262,7 @@ describe('RuntimeConfig', () => {
       routingBlock: false,
       setDefaultAgent: false,
       compactSidebar: false,
+      resource_prefixes: ['.custom'],
       image_routing: 'auto',
       disabled_agents: ['observer', 'orchestrator'],
       disabled_tools: ['webfetch'],
@@ -273,6 +281,7 @@ describe('RuntimeConfig', () => {
     expect(runtime.routingBlock).toBe(false);
     expect(runtime.setDefaultAgent).toBe(false);
     expect(runtime.compactSidebar).toBe(false);
+    expect(runtime.resourcePrefixes).toEqual(['.custom']);
     expect(runtime.imageRouting).toBe('auto');
     // orchestrator is protected and cannot be disabled
     expect(runtime.disabledAgents).toEqual(new Set(['observer']));
@@ -325,6 +334,92 @@ describe('RuntimeConfig', () => {
       DEFAULT_CHILD_INPUT_WAKE_KINDS,
     );
   });
+
+  test('supplemental project names are opt-in and reset on reinitialization', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: {
+        oracle: { skills: ['?ask', '!deny'], skills_include_local: true },
+      },
+    });
+    runtime.setProjectSkillPermissionNames(['extra', 'extra']);
+    expect(runtime.agents().oracle?.skills).toEqual(['?ask', '!deny', 'extra']);
+    runtime.setProjectSkillPermissionNames(['not-granted']);
+    RuntimeConfig.init(DIRECTORY, { agents: { oracle: { skills: ['base'] } } });
+    expect(runtime.agents().oracle?.skills).toEqual(['base']);
+  });
+
+  test.each(['deny', 'ask', 'allow'] as const)(
+    'automatic local skill discovery preserves exact %s permission rules',
+    (rule) => {
+      resetRegistry();
+      const runtime = RuntimeConfig.init(DIRECTORY, {
+        agents: {
+          oracle: {
+            skills_include_local: true,
+            permission: { skill: { exact: rule } },
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['exact', 'other']);
+      expect(runtime.agents().oracle?.skills).toContain('other');
+      expect(runtime.agents().oracle?.skills).not.toContain('exact');
+    },
+  );
+
+  test('wildcard skill permission suppresses automatic local additions', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: {
+        oracle: {
+          skills: ['explicit'],
+          skills_add: ['added'],
+          skills_include_local: true,
+          permission: { skill: { '*': 'deny' } },
+        },
+      },
+    });
+    runtime.setProjectSkillPermissionNames(['local']);
+    expect(runtime.agents().oracle?.skills).toEqual(['explicit', 'added']);
+  });
+
+  test.each([true, false])(
+    'marketplace defaults do not contaminate the ordinary agent cache (defaults first: %s)',
+    (defaultsFirst) => {
+      resetRegistry();
+      const runtime = RuntimeConfig.init(DIRECTORY, {
+        agents: {
+          packaged: {
+            skills_remove: ['removed'],
+            skills_include_local: true,
+            permission: { skill: { restricted: 'deny' } },
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['local', 'restricted']);
+      const defaults = { packaged: ['bundled', 'removed'] };
+      const first = defaultsFirst ? runtime.agents(defaults) : runtime.agents();
+      const second = defaultsFirst
+        ? runtime.agents()
+        : runtime.agents(defaults);
+      const withDefaults = defaultsFirst ? first : second;
+      const ordinary = defaultsFirst ? second : first;
+
+      expect(withDefaults.packaged.skills).toEqual(['bundled', 'local']);
+      expect(ordinary.packaged.skills).toEqual(['local']);
+      expect(runtime.agents()).toBe(ordinary);
+      expect(withDefaults.packaged.permission).toEqual({
+        skill: { restricted: 'deny' },
+      });
+
+      defaults.packaged = ['replacement'];
+      expect(runtime.agents(defaults).packaged.skills).toEqual([
+        'replacement',
+        'local',
+      ]);
+      expect(runtime.agents()).toBe(ordinary);
+    },
+  );
 
   test('runtimeChains derives from array models, alias-aware', () => {
     resetRegistry();

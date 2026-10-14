@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, jest, mock, spyOn, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { OhMyOpenCodeLite } from '../../index';
+import { withTmpDir } from '../../test-utils';
 import { createCancelTaskTool } from '../../tools/cancel-task';
 import { createTaskMessageTool } from '../../tools/task-message';
 import { createTaskReplyTool } from '../../tools/task-reply';
@@ -185,45 +183,45 @@ describe('alias numbering', () => {
       after?: (hooks: PluginHooks) => unknown;
     } = {},
   ): Promise<(string | undefined)[]> {
-    const projectDir = await mkdtemp(join(tmpdir(), 'omo-alias-numbering-'));
-    // Another file's mock.module of opencode-client outlives mock.restore().
-    spyOn(opencodeClient, 'getClient').mockImplementation(
-      (value) => (value as { client: unknown }).client as never,
-    );
-    const hooks = await OhMyOpenCodeLite({
-      client: {
-        app: { log: async () => ({}) },
-        session: {
-          status: async () => ({ data: {} }),
-          get: async () => ({ data: {} }),
-          messages: options.messages ?? (async () => ({ data: [] })),
+    return withTmpDir(async (projectDir) => {
+      // Another file's mock.module of opencode-client outlives mock.restore().
+      spyOn(opencodeClient, 'getClient').mockImplementation(
+        (value) => (value as { client: unknown }).client as never,
+      );
+      const hooks = await OhMyOpenCodeLite({
+        client: {
+          app: { log: async () => ({}) },
+          session: {
+            status: async () => ({ data: {} }),
+            get: async () => ({ data: {} }),
+            messages: options.messages ?? (async () => ({ data: [] })),
+          },
         },
-      },
-      directory: projectDir,
-      worktree: projectDir,
-      serverUrl: new URL('http://127.0.0.1:4096'),
-      hostFlavor: options.hostFlavor,
-    } as never);
-    try {
-      for (const event of options.events?.() ?? []) {
-        await hooks.event?.({ event } as never);
+        directory: projectDir,
+        worktree: projectDir,
+        serverUrl: new URL('http://127.0.0.1:4096'),
+        hostFlavor: options.hostFlavor,
+      } as never);
+      try {
+        for (const event of options.events?.() ?? []) {
+          await hooks.event?.({ event } as never);
+        }
+        for (const sessionID of new Set(launches.map(([parent]) => parent))) {
+          await hooks['chat.message']?.(
+            { sessionID, agent: 'orchestrator' } as never,
+            {} as never,
+          );
+        }
+        const aliases: (string | undefined)[] = [];
+        for (const [parent, child] of launches) {
+          aliases.push(await launchAlias(hooks, parent, child));
+        }
+        await options.after?.(hooks);
+        return aliases;
+      } finally {
+        await hooks.dispose?.();
       }
-      for (const sessionID of new Set(launches.map(([parent]) => parent))) {
-        await hooks['chat.message']?.(
-          { sessionID, agent: 'orchestrator' } as never,
-          {} as never,
-        );
-      }
-      const aliases: (string | undefined)[] = [];
-      for (const [parent, child] of launches) {
-        aliases.push(await launchAlias(hooks, parent, child));
-      }
-      await options.after?.(hooks);
-      return aliases;
-    } finally {
-      await hooks.dispose?.();
-      await rm(projectDir, { recursive: true, force: true }).catch(() => {});
-    }
+    });
   }
 
   // G2 after a restart: history pairs fix-1 with a live child this board does
@@ -735,8 +733,7 @@ describe('recorded host alias interleave', () => {
 
 describe('oracle audit fences', () => {
   test('root dispose before a launch does not create pending work or abort', async () => {
-    const projectDir = await mkdtemp(join(tmpdir(), 'omo-alias-dispose-'));
-    try {
+    await withTmpDir(async (projectDir) => {
       const abort = mock(async () => ({}));
       const prompt = mock(async () => ({}));
       const client = {
@@ -793,9 +790,7 @@ describe('oracle audit fences', () => {
           agent: 'orchestrator',
         } as never),
       ).rejects.toThrow(/disposed|Unknown task/);
-    } finally {
-      await rm(projectDir, { recursive: true, force: true }).catch(() => {});
-    }
+    });
   });
 });
 

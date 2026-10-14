@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { PluginConfig } from '../config';
 import {
   AgentOverrideConfigSchema,
@@ -10,8 +12,11 @@ import {
   SUBAGENT_NAMES,
 } from '../config';
 import { RuntimeConfig } from '../config/runtime';
+import { withTmpDirSync } from '../test-utils';
 import {
+  type AgentDefinition,
   applyModelInheritanceToConfig,
+  applyOverrides,
   createAgents,
   getAgentConfigs,
   getAgentConfigsFromDefinitions,
@@ -19,6 +24,8 @@ import {
   mergeHostAgentConfigs,
   projectAgentRuntimeState,
 } from './index';
+import { BASE_AGENT_PROMPT } from './prompt-layers';
+import { PROMPT_TEMPLATE_MARKER } from './prompt-template';
 import { TASK_REJECTION_INSTRUCTION } from './task-rejection';
 
 const TEST_DIRECTORY = 'runtime-test-agents-index';
@@ -142,6 +149,110 @@ describe('hot-refreshed runtime profiles', () => {
       temperature: 0.8,
       providerOptions: { visible: true },
     });
+  });
+});
+
+describe('agent prompt templates', () => {
+  test('renders deterministic sections in a project-local orchestrator prompt', () => {
+    withTmpDirSync((projectDirectory) => {
+      const promptsDirectory = join(
+        projectDirectory,
+        '.opencode',
+        'oh-my-opencode-slim',
+      );
+      mkdirSync(promptsDirectory, { recursive: true });
+      writeFileSync(
+        join(promptsDirectory, 'orchestrator.md'),
+        [
+          PROMPT_TEMPLATE_MARKER,
+          '{{slim.section.intent_gate}}',
+          '{{slim.section.agents}}',
+        ].join('\n'),
+      );
+
+      const orchestrator = createAgents(runtimeFor(), {
+        projectDirectory,
+      }).find((agent) => agent.name === 'orchestrator');
+
+      expect(orchestrator?.config.prompt).toContain('<Intent_Gate>');
+      expect(orchestrator?.config.prompt).toContain('@explorer');
+      expect(orchestrator?.config.prompt).not.toContain(
+        '{{slim.section.intent_gate}}',
+      );
+    });
+  });
+
+  test('keeps inline prompt precedence while rendering a marked append prompt', () => {
+    withTmpDirSync((projectDirectory) => {
+      const promptsDirectory = join(
+        projectDirectory,
+        '.opencode',
+        'oh-my-opencode-slim',
+      );
+      mkdirSync(promptsDirectory, { recursive: true });
+      writeFileSync(
+        join(promptsDirectory, 'orchestrator.md'),
+        [PROMPT_TEMPLATE_MARKER, '{{slim.section.intent_gate}}'].join('\n'),
+      );
+      writeFileSync(
+        join(promptsDirectory, 'orchestrator_append.md'),
+        [PROMPT_TEMPLATE_MARKER, '{{slim.section.agents}}'].join('\n'),
+      );
+
+      const orchestrator = createAgents(
+        runtimeFor({
+          agents: {
+            orchestrator: { prompt: 'inline orchestrator prompt' },
+          },
+        }),
+        { projectDirectory },
+      ).find((agent) => agent.name === 'orchestrator');
+
+      expect(orchestrator?.config.prompt).toStartWith(
+        `${BASE_AGENT_PROMPT}\n\ninline orchestrator prompt`,
+      );
+      expect(orchestrator?.config.prompt).not.toContain('<Intent_Gate>');
+      expect(orchestrator?.config.prompt).toContain('<Available_Agents>');
+      expect(orchestrator?.config.prompt).not.toContain(
+        '{{slim.section.agents}}',
+      );
+    });
+  });
+
+  test('leaves an unmarked project prompt body unchanged beneath the base', () => {
+    withTmpDirSync((projectDirectory) => {
+      const promptsDirectory = join(
+        projectDirectory,
+        '.opencode',
+        'oh-my-opencode-slim',
+      );
+      mkdirSync(promptsDirectory, { recursive: true });
+      const literalPrompt =
+        'literal {{slim.section.intent_gate}} content without the opt-in marker';
+      writeFileSync(join(promptsDirectory, 'orchestrator.md'), literalPrompt);
+
+      const orchestrator = createAgents(runtimeFor(), {
+        projectDirectory,
+      }).find((agent) => agent.name === 'orchestrator');
+
+      expect(orchestrator?.config.prompt).toBe(
+        `${BASE_AGENT_PROMPT}\n\n${literalPrompt}`,
+      );
+    });
+  });
+
+  test('adds the shared base prompt exactly once to every constructed agent', () => {
+    const agents = createAgents(runtimeFor());
+
+    expect(agents.length).toBeGreaterThan(0);
+    for (const agent of agents) {
+      expect(agent.config.prompt?.startsWith(`${BASE_AGENT_PROMPT}\n\n`)).toBe(
+        true,
+      );
+      expect(agent.config.prompt?.indexOf(BASE_AGENT_PROMPT)).toBe(
+        agent.config.prompt?.lastIndexOf(BASE_AGENT_PROMPT),
+      );
+    }
   });
 });
 
@@ -1117,6 +1228,108 @@ describe('spaced model ID registrations', () => {
 });
 
 describe('skill permissions', () => {
+  test('S2: factory skill denial survives automatic defaults for ACP', () => {
+    const configs = getAgentConfigs(
+      runtimeFor({
+        acpAgents: {
+          bridge: {
+            command: 'echo',
+            args: [],
+            env: {},
+            timeoutMs: 0,
+            permissionMode: 'ask',
+          },
+        },
+      }),
+    );
+    expect(configs.bridge.permission).toMatchObject({ skill: { '*': 'deny' } });
+  });
+
+  test.each(['allow', 'ask', 'deny'] as const)(
+    'S2: top-level scalar %s is untouched',
+    (permission) => {
+      const configs = getAgentConfigs(
+        runtimeFor({
+          agents: {
+            oracle: {
+              permission,
+              skills: ['deliberate'],
+              skills_include_local: true,
+            },
+          },
+        }),
+      );
+      expect(configs.oracle.permission).toBe(permission);
+    },
+  );
+
+  test.each(['ask', 'deny'] as const)(
+    'S2: scalar skill %s bounds automatic and default grants in agent configs',
+    (effect) => {
+      const runtime = runtimeFor({
+        agents: {
+          oracle: { permission: { skill: effect }, skills_include_local: true },
+          specialist: {
+            model: 'provider/model',
+            permission: { skill: effect },
+            skills_include_local: true,
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['discovered']);
+      const configs = getAgentConfigs(runtime);
+      for (const name of ['oracle', 'specialist']) {
+        const permission = configs[name].permission as {
+          skill: Record<string, 'allow' | 'ask' | 'deny'>;
+        };
+        const skill = permission.skill;
+        expect(skill.discovered ?? skill['*']).toBe(effect);
+        expect(skill['requesting-code-review'] ?? skill['*']).toBe(effect);
+      }
+      expect(runtime.agents()).toBe(runtime.agents());
+    },
+  );
+
+  test.each(['ask', 'deny'] as const)(
+    'S2: an explicit skill list remains authoritative over scalar %s',
+    (effect) => {
+      const runtime = runtimeFor({
+        agents: {
+          oracle: {
+            permission: { skill: effect },
+            skills: ['deliberate'],
+            skills_add: ['added'],
+            skills_include_local: true,
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['automatic']);
+      const skill = (
+        getAgentConfigs(runtime).oracle.permission as {
+          skill: Record<string, string>;
+        }
+      ).skill;
+      expect(skill.deliberate).toBe('allow');
+      expect(skill.added).toBe('allow');
+      expect(skill.automatic).not.toBe('allow');
+    },
+  );
+
+  test.each(['ask', 'deny'] as const)(
+    'S2: default grants do not override object wildcard %s',
+    (effect) => {
+      const runtime = runtimeFor({
+        agents: { oracle: { permission: { skill: { '*': effect } } } },
+      });
+      const skill = (
+        getAgentConfigs(runtime).oracle.permission as {
+          skill: Record<string, string>;
+        }
+      ).skill;
+      expect(skill['requesting-code-review'] ?? skill['*']).toBe(effect);
+    },
+  );
+
   test('orchestrator gets command-style bundled skills allowed by default', () => {
     const agents = createAgents(runtimeFor());
     const orchestrator = agents.find((a) => a.name === 'orchestrator');
@@ -1489,7 +1702,9 @@ describe('createAgents', () => {
     const orchestrator = agents.find((agent) => agent.name === 'orchestrator');
     const explorer = agents.find((agent) => agent.name === 'explorer');
 
-    expect(explorer?.config.prompt).toBe('Replacement explorer prompt.');
+    expect(explorer?.config.prompt).toBe(
+      `${BASE_AGENT_PROMPT}\n\nReplacement explorer prompt.`,
+    );
     expect(orchestrator?.config.prompt).not.toContain(
       TASK_REJECTION_INSTRUCTION,
     );
@@ -1513,6 +1728,9 @@ describe('createAgents', () => {
         'bridge',
       ].includes(agent.name),
     )) {
+      expect(agent.config.prompt?.startsWith(`${BASE_AGENT_PROMPT}\n\n`)).toBe(
+        true,
+      );
       expect(agent.config.prompt).toContain(TASK_REJECTION_INSTRUCTION);
     }
   });
@@ -2467,5 +2685,24 @@ describe('observer dispatch instruction injection', () => {
     // Non-advisory roles never gain the line.
     const fixer = disabledSet.find((a) => a.name === 'fixer');
     expect(fixer?.config.prompt).not.toContain('dispatch @observer');
+  });
+});
+
+describe('applyOverrides with dynamic model ref', () => {
+  function baseAgent(): AgentDefinition {
+    return { name: 'explorer', config: {} };
+  }
+
+  test('leaves config.model undefined for dynamic ref', () => {
+    const agent = baseAgent();
+    applyOverrides(agent, { model: { dynamic: 'selected' } });
+    expect(agent.config.model).toBeUndefined();
+    expect(agent._modelArray).toBeUndefined();
+  });
+
+  test('still sets a concrete model normally', () => {
+    const agent = baseAgent();
+    applyOverrides(agent, { model: 'openai/gpt-5.6-luna' });
+    expect(agent.config.model).toBe('openai/gpt-5.6-luna');
   });
 });

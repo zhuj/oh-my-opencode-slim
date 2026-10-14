@@ -1,16 +1,14 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir } from '../test-utils';
 import {
   buildBundledSkillInfos,
   removeLegacySkillSyncState,
 } from './custom-skills';
 
 function tmpDir(): string {
-  return fs.realpathSync(
-    fs.mkdtempSync(path.join(os.tmpdir(), 'omos-skills-')),
-  );
+  return fs.realpathSync(createTmpDir());
 }
 
 function writeSkill(root: string, name: string, skillMd: string): void {

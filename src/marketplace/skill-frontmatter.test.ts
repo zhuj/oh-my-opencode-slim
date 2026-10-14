@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { InvalidSkillPolicyError } from '../utils/skill-policy-validation';
 import { parseSkillFrontmatterName } from './skill-frontmatter';
 
 describe('parseSkillFrontmatterName', () => {
@@ -87,11 +88,19 @@ description: Test skill.
   test('rejects non-string names', () => {
     expect(
       parseSkillFrontmatterName(`---
-name: 123
+name: true
 description: Test skill.
 ---
 `),
     ).toBeUndefined();
+  });
+
+  test('R1: integer-index scalar names raise a typed policy error, not absence', () => {
+    expect(() =>
+      parseSkillFrontmatterName(
+        '---\nname: 123\ndescription: Test skill.\n---\n',
+      ),
+    ).toThrow(InvalidSkillPolicyError);
   });
 
   test('rejects non-string descriptions', () => {

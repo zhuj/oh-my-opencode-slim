@@ -3,6 +3,7 @@ import type {
   BackgroundJobBoard,
   BackgroundJobLaunchInput,
   BackgroundJobLease,
+  BackgroundJobMutation,
   BackgroundJobRecord,
   BackgroundJobStatusInput,
   BackgroundJobTerminalInput,
@@ -58,6 +59,20 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     this.board.addTerminalStateListener((taskID) => {
       this.handleTerminalState(taskID);
     });
+  }
+
+  restore(records: readonly BackgroundJobRecord[], now?: number): void {
+    this.board.restore(records, now);
+  }
+
+  addMutationListener(listener: (change: BackgroundJobMutation) => void): void {
+    this.board.addMutationListener(listener);
+  }
+
+  removeMutationListener(
+    listener: (change: BackgroundJobMutation) => void,
+  ): void {
+    this.board.removeMutationListener(listener);
   }
 
   // ── Launch identity projection (best-effort, sidebar details) ─────
@@ -199,9 +214,21 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
 
   abandonLaunch(
     launched: BackgroundJobRecord,
-    replaced: BackgroundJobRecord,
+    lease: BackgroundJobLease,
   ): boolean {
-    return this.board.abandonLaunch(launched, replaced);
+    return this.board.abandonLaunch(launched, lease);
+  }
+
+  confirmPromptAdmission(
+    taskID: string,
+    generation: number,
+    promptMessageID: string,
+  ): boolean {
+    return this.board.confirmPromptAdmission(
+      taskID,
+      generation,
+      promptMessageID,
+    );
   }
 
   correctStartupRecoveredTerminal(input: {

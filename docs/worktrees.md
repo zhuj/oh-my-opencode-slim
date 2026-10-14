@@ -1,7 +1,7 @@
 # Worktrees
 
 `worktrees` is a bundled Orchestrator skill that manages Git worktrees as safe,
-isolated coding lanes under `.slim/worktrees/<slug>/`. It lets agents work on
+isolated coding lanes under `.local/.slim/worktrees/<slug>/`. It lets agents work on
 parallel, complex, or high-risk tasks in separate checkouts without polluting
 your current workspace.
 
@@ -17,7 +17,7 @@ When managing worktree coding lanes, the Orchestrator:
 
 1. **Checks workspace state:** confirms the repo, branch, dirty state, and
    existing `git worktree list` output.
-2. **Registers metadata:** maintains `.slim/worktrees.json` to track active
+2. **Registers metadata:** maintains `.local/.slim/worktrees.json` to track active
    lanes, branches, base refs, purposes, owners, areas, and statuses.
 3. **Applies confirmation gates:** asks before creating/removing worktrees,
    creating/deleting branches, merging, rebasing, cherry-picking, pruning, or
@@ -49,15 +49,15 @@ The Orchestrator will analyze the work, present a lane plan (with slug, path, ba
 
 ## Files It Creates
 
-### `.slim/worktrees/<slug>/`
+### `.local/.slim/worktrees/<slug>/`
 
 Local Git worktrees are placed here, separated from your main checkout while
 sharing the same underlying Git database. Specialists such as `@fixer` or
 `@designer` are directed to write and run tests strictly within this path.
 
-For example, `.slim/worktrees/refactor-auth/` contains a copy of the repository files on the `omo/refactor-auth` branch.
+For example, `.local/.slim/worktrees/refactor-auth/` contains a copy of the repository files on the `omo/refactor-auth` branch.
 
-### `.slim/worktrees.json`
+### `.local/.slim/worktrees.json`
 
 A local metadata registry mapping active worktree lanes.
 
@@ -69,7 +69,7 @@ A local metadata registry mapping active worktree lanes.
     {
       "slug": "refactor-auth",
       "branch": "omo/refactor-auth",
-      "path": ".slim/worktrees/refactor-auth",
+      "path": ".local/.slim/worktrees/refactor-auth",
       "base": "main",
       "purpose": "Refactor token parsing module",
       "owner": "orchestrator",
@@ -91,16 +91,16 @@ A local metadata registry mapping active worktree lanes.
 - **Strict Confirmations:** No git mutating commands (e.g. `worktree add`, `worktree remove`, `branch`, `merge`, `rebase`, `cherry-pick`, `prune`) are run without manual prompt agreement.
 - **No force operations:** Destructive git operations such as `reset --hard`,
   `clean`, force-push, or branch deletion must not be executed automatically.
-- **Git exclusions:** `.slim/worktrees/` is git-ignored. `.ignore` is updated so
-  OpenCode can still read lane contents. `.slim/worktrees.json` is git-ignored
+- **Git exclusions:** `.local/.slim/worktrees/` is git-ignored. `.ignore` is updated so
+  OpenCode can still read lane contents. `.local/.slim/worktrees.json` is git-ignored
   by default because it is local workflow metadata.
 
 Managed `.gitignore` block:
 
 ```gitignore
 # BEGIN oh-my-opencode-slim worktrees
-.slim/worktrees/
-.slim/worktrees.json
+.local/.slim/worktrees/
+.local/.slim/worktrees.json
 # END oh-my-opencode-slim worktrees
 ```
 
@@ -108,10 +108,10 @@ Managed `.ignore` block:
 
 ```ignore
 # BEGIN oh-my-opencode-slim worktrees
-!.slim/
-!.slim/worktrees.json
-!.slim/worktrees/
-!.slim/worktrees/**
+!.local/.slim/
+!.local/.slim/worktrees.json
+!.local/.slim/worktrees/
+!.local/.slim/worktrees/**
 # END oh-my-opencode-slim worktrees
 ```
 

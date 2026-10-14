@@ -1,10 +1,14 @@
 # src/tools/
 
+**Last Updated:** 2026-10-20
+
 ## Responsibility
 
 Centralized tool factory and registry for the OpenCode plugin system. This directory defines all executable tools exposed to OpenCode agents, including:
 
-- **Task lifecycle tools**: Background task communication, cancellation, status (with live-status policy), results, revival, and HITL continuation control
+- **Native-session lifecycle tools**: Retained background task listing, communication, request replies, cancellation, status (with live-status policy), results, and revival
+- **Logical scheduler tools**: Admission queue inspection/management, dependency inspection, and completion waits; separate from native child-session lifecycle controls
+- **HITL continuation control**: Explicit external user waits through `wait_for_user` on v1; v2 uses the host's native `question` boundary
 - **Code intelligence tools**: AST-grep pattern matching and transformation across languages
 - **Web capabilities**: Smart web fetching with caching and content extraction
 - **ACP integration**: External agent protocol execution
@@ -29,7 +33,9 @@ Each tool is implemented as a factory function that returns a `ToolDefinition` r
 
 | Tool Family | Purpose | Key Components |
 |------------|---------|----------------|
-| **Task Management** | Background task communication, cancellation, status, results, revival, and HITL continuation control | `task-message.ts`, `cancel-task.ts`, `task-status.ts`, `task-revive.ts`, `wait-for-user.ts` |
+| **Native-Session Lifecycle** | Retained task listing (stored state), communication, request replies, cancellation, live status, results via `task_status({ result: true })`, and revival | `task-list.ts`, `task-message.ts`, `task-reply.ts`, `cancel-task.ts`, `task-status.ts`, `task-revive.ts` |
+| **Logical Scheduler** | Parent-owned admissions, queue controls, prerequisite inspection, and completion waits | `task-queue-list.ts`, `task-queue-manage.ts`, `task-queue-dependencies.ts`, `task-dependency-tree.ts`, `task-wait.ts` |
+| **User Wait** | Suspend automatic continuation until external user action (registered on v1 only) | `wait-for-user.ts` |
 | **Task Policy & Activity** | Shared live-status policy and activity tracking consumed by `task_status` and event wiring | `task-policy.ts` (`summarizeTaskStatus`), `task-activity.ts` (`TaskActivityTracker`) |
 | **Retained Adoption** | Shared resolve-or-adopt seam for untracked host sessions, consumed by `task_revive` and the v2 subagent continuation bridge | `retained-adoption.ts` (`resolveOrAdoptUntrackedTask`) |
 | **ACP Integration** | External agent protocol execution with live progress streaming to the parent TUI (`ctx.metadata`) | `acp-run.ts`, ACP client implementation |
@@ -48,6 +54,13 @@ Each tool is implemented as a factory function that returns a `ToolDefinition` r
 
 - **Runtime Presets**: Preset switching (`preset-switch.ts`) persists the preset name (or edits) to the user config file. The agent registry is never hot-swapped mid-session; on v2 hosts the shared `src/preset-editor-domain.ts` helpers back both the v1 JSX editor and the v2 promise-dialog editor, and only the inference fields (`model`, `variant`, `temperature`, `options`) hot-apply to NEW child sessions (frozen before the child's first request via the awaited `session.prompt` hook — the `session.created` event consumer is only a prewarm) plus the sidebar (via `src/v2/config-watch.ts` + `src/v2/runtime-profiles.ts`); a malformed refresh (`invalid-json`/`invalid-schema`/`read-error`) is rejected before any swap so the last-known-good profiles/sidebar stay — hot-swapping the full agent tree during an active conversation risks context truncation, drifted prior turns, and stale subagent references
 - **Background Jobs**: Task communication, cancellation, status, results, and revival use a centralized job board for tracking and lifecycle coordination; `task_status` reports live-confirmed host status with explicit uncertainty when the live read is unavailable
+- **Scheduler Admissions**: `task_queue_list`, `task_queue_manage`,
+  `task_dependency_tree`, and `task_wait` use `BackgroundTaskConcurrencyController`.
+  Logical task/admission IDs are distinct from native session IDs and job-board
+  aliases: `task_wait` accepts only parent-owned logical task or admission IDs.
+  Queue/dependency controls do not abort running sessions; concurrency-limit
+  changes are directory-wide and require `confirm_global: true`. `task_list`
+  reads retained job-board states, not queue admissions or live status.
 
 ## Flow
 

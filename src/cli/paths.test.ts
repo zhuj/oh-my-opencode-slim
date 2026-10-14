@@ -1,9 +1,10 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { existsSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir, withTmpDirSync } from '../test-utils';
 import {
   ensureConfigDir,
   getConfigDir,
@@ -109,12 +110,12 @@ describe('paths', () => {
 
     afterEach(() => {
       if (tmpDir && existsSync(tmpDir)) {
-        rmSync(tmpDir, { recursive: true, force: true });
+        removeTmpDir(tmpDir);
       }
     });
 
     test('returns .json if it exists', () => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'opencode-test-'));
+      tmpDir = createTmpDir();
       process.env.XDG_CONFIG_HOME = tmpDir;
 
       const configDir = join(tmpDir, 'opencode');
@@ -127,7 +128,7 @@ describe('paths', () => {
     });
 
     test("returns .jsonc if .json doesn't exist but .jsonc does", () => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'opencode-test-'));
+      tmpDir = createTmpDir();
       process.env.XDG_CONFIG_HOME = tmpDir;
 
       const configDir = join(tmpDir, 'opencode');
@@ -140,7 +141,7 @@ describe('paths', () => {
     });
 
     test('returns default .json if neither exists', () => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'opencode-test-'));
+      tmpDir = createTmpDir();
       process.env.XDG_CONFIG_HOME = tmpDir;
 
       const jsonPath = join(tmpDir, 'opencode', 'opencode.json');
@@ -149,14 +150,13 @@ describe('paths', () => {
   });
 
   test("ensureConfigDir() creates directory if it doesn't exist", () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), 'opencode-test-'));
-    process.env.XDG_CONFIG_HOME = tmpDir;
-    const configDir = join(tmpDir, 'opencode');
+    withTmpDirSync((tmpDir) => {
+      process.env.XDG_CONFIG_HOME = tmpDir;
+      const configDir = join(tmpDir, 'opencode');
 
-    expect(existsSync(configDir)).toBe(false);
-    ensureConfigDir();
-    expect(existsSync(configDir)).toBe(true);
-
-    rmSync(tmpDir, { recursive: true, force: true });
+      expect(existsSync(configDir)).toBe(false);
+      ensureConfigDir();
+      expect(existsSync(configDir)).toBe(true);
+    });
   });
 });

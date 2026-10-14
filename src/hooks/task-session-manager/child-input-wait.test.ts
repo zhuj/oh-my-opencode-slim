@@ -7,6 +7,7 @@ import {
   resetChildInputWaitForTests,
 } from './child-input-wait';
 import { createTaskSessionManagerHook } from './index';
+import { testSnapshotStore } from './test-snapshot-store';
 import { resetUserWaitGateForTests } from './user-wait-gate';
 
 // Route getClient back to _ctx.client so _ctx.client.session mocks work.
@@ -31,10 +32,11 @@ function createHook(options?: {
           status: mock(async () => ({ data: {} })),
         },
       },
-      directory: '/tmp',
-      worktree: '/tmp',
+      directory: process.cwd(),
+      worktree: process.cwd(),
     } as never,
     {
+      backgroundJobSnapshotStore: testSnapshotStore,
       maxSessionsPerAgent: 2,
       backgroundJobBoard: options?.backgroundJobBoard,
       shouldManageSession:

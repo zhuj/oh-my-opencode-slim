@@ -1,7 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import {
   createPendingCallTracker,
   type PendingCallTracker,
 } from './hooks/task-session-manager/pending-call-tracker';
+import {
+  createQueueMirrorPublisher,
+  type QueueMirrorPublisher,
+} from './queue-mirror-publisher';
 import {
   BackgroundTaskConcurrency,
   type BackgroundTaskConcurrencyConfig,
@@ -10,6 +15,7 @@ import {
 export interface AdmissionRuntime {
   readonly backgroundTaskConcurrency: BackgroundTaskConcurrency;
   readonly pendingCallTracker: PendingCallTracker;
+  readonly queueMirrorPublisher: QueueMirrorPublisher;
 }
 
 export interface AdmissionRuntimeLease extends AdmissionRuntime {
@@ -33,6 +39,7 @@ function disposeEntry(key: string, entry: RuntimeEntry): void {
   if (runtimesByDirectory.get(key) !== entry || entry.owners !== 0) {
     return;
   }
+  entry.runtime.queueMirrorPublisher.dispose();
   entry.runtime.pendingCallTracker.clearAll();
   entry.runtime.backgroundTaskConcurrency.dispose();
   runtimesByDirectory.delete(key);
@@ -57,20 +64,39 @@ export function acquireAdmissionRuntime(
     if (entry.teardownTimer !== undefined) {
       clearTimeout(entry.teardownTimer);
     }
+    entry.runtime.queueMirrorPublisher.dispose();
     entry.runtime.pendingCallTracker.clearAll();
     runtimesByDirectory.delete(key);
     entry = undefined;
   }
 
   if (!entry) {
-    entry = {
+    let notifyQueueChange: (() => void) | undefined;
+    const backgroundTaskConcurrency = new BackgroundTaskConcurrency(config, {
+      onQueueChange: () => notifyQueueChange?.(),
+    });
+    let createdEntry: RuntimeEntry | undefined;
+    const queueMirrorPublisher = createQueueMirrorPublisher({
+      projectDirectory: directory,
+      publisherID: `process-${process.pid}`,
+      runtimeID: randomUUID(),
+      source: backgroundTaskConcurrency,
+      isCurrent: () =>
+        createdEntry !== undefined &&
+        runtimesByDirectory.get(key) === createdEntry,
+    });
+    notifyQueueChange = queueMirrorPublisher.notify;
+    createdEntry = {
       runtime: {
-        backgroundTaskConcurrency: new BackgroundTaskConcurrency(config),
+        backgroundTaskConcurrency,
         pendingCallTracker: createPendingCallTracker(),
+        queueMirrorPublisher,
       },
       owners: 0,
     };
+    entry = createdEntry;
     runtimesByDirectory.set(key, entry);
+    queueMirrorPublisher.notify();
   } else {
     entry.runtime.backgroundTaskConcurrency.updateConfig(config);
   }

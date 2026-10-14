@@ -14,17 +14,15 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as marketplaceLease from '../marketplace/lease';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   addPluginToOpenCodeConfig,
   addPluginToOpenCodeTuiConfig,
@@ -50,7 +48,7 @@ describe('config-io', () => {
   const originalArgv = [...process.argv];
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'opencode-io-test-'));
+    tmpDir = createTmpDir();
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OPENCODE_TUI_CONFIG;
     process.env.XDG_CONFIG_HOME = tmpDir;
@@ -63,7 +61,7 @@ describe('config-io', () => {
     Object.assign(process.env, originalEnv);
     process.argv = [...originalArgv];
     if (tmpDir && existsSync(tmpDir)) {
-      rmSync(tmpDir, { recursive: true, force: true });
+      removeTmpDir(tmpDir);
     }
     mock.restore();
   });

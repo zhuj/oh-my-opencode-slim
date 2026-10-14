@@ -41,6 +41,16 @@ const SHELL_ARGS = [
   `${BASH_PREAMBLE}${MARKER}${ATTACH_COMMAND}`,
 ];
 
+/** The last `pane run` argv recorded, without binary and control plane. */
+function runArgs(calls: string[][]): string[] {
+  return (
+    calls
+      .filter((argv) => argv.includes('run'))
+      .at(-1)
+      ?.slice(4) ?? []
+  );
+}
+
 const BASE_ENV: CmuxEnvironment = {
   CMUX_TUI_SOCKET: '/tmp/cmux-tui.sock',
   CMUX_TUI_TERMINAL_ID: 'term_anchor',
@@ -371,6 +381,137 @@ describe('CmuxMultiplexer', () => {
         configurable: true,
       });
     }
+  });
+
+  test('viewerSurface mini renders the minimal viewer with no directory argument', async () => {
+    const { runner, calls } = recorder();
+    const instance = mux({ runner });
+
+    expect(
+      await instance.spawnPane(
+        CHILD_ID,
+        DESCRIPTION,
+        'http://127.0.0.1:7777',
+        '/repo',
+        { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+      ),
+    ).toEqual({ success: true, paneId: 'term_child' });
+
+    const script = runArgs(calls).at(-1) ?? '';
+    // `mini` takes no directory argument, so the shell selects the project.
+    expect(script).toContain(`'/opt/opencode' mini --session '${CHILD_ID}'`);
+    expect(script).not.toContain('--dir');
+
+    // Both the pane cwd and shell wrapper select the project, while the
+    // command itself has no positional directory argument.
+    expect(script).toBe(
+      `${BASH_PREAMBLE}${MARKER}cd '/repo' && ` +
+        `'/opt/opencode' mini --session '${CHILD_ID}'`,
+    );
+    expect(runArgs(calls)).toContain('--cwd');
+    expect(runArgs(calls)).toContain('/repo');
+  });
+
+  test('viewerSurface mini keeps the v2-remote server flag and never the secret', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'linux',
+      configurable: true,
+    });
+    try {
+      const { runner, calls } = recorder();
+      const instance = mux({ runner });
+
+      expect(
+        await instance.spawnPane(
+          CHILD_ID,
+          DESCRIPTION,
+          'http://127.0.0.1:7777',
+          '/repo',
+          {
+            viewerFlavor: 'v2-remote',
+            viewerSurface: 'mini',
+            viewerPassword: 'pw-9-secret',
+          },
+        ),
+      ).toEqual({ success: true, paneId: 'term_child' });
+
+      const script = runArgs(calls).at(-1) ?? '';
+      expect(script).toContain(
+        `'/opt/opencode' mini --server 'http://127.0.0.1:7777' ` +
+          `--session '${CHILD_ID}'`,
+      );
+      // The secret is read from the parent /proc environ by the launch script,
+      // so no literal value appears anywhere in the argv.
+      expect(script).not.toContain('pw-9-secret');
+      expect(calls.flat().join('\n')).not.toContain('pw-9-secret');
+
+      // The FR-8 marker stays the first script line; the extraction runs
+      // between it and the viewer command.
+      expect(script.indexOf(MARKER.trimEnd())).toBeLessThan(
+        script.indexOf('/proc/'),
+      );
+      expect(script.indexOf('/proc/')).toBeLessThan(script.indexOf('mini'));
+      expect(script).toContain(
+        `cd '/repo' && '/opt/opencode' mini --server ` +
+          `'http://127.0.0.1:7777' --session '${CHILD_ID}'`,
+      );
+      expect(runArgs(calls)).toContain('--cwd');
+      expect(runArgs(calls)).toContain('/repo');
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: originalPlatform,
+        configurable: true,
+      });
+    }
+  });
+
+  test('viewerSurface mini keeps the v1 attach form and gains no cwd flag', async () => {
+    const { runner, calls } = recorder();
+    const instance = mux({ runner });
+
+    expect(
+      await instance.spawnPane(
+        CHILD_ID,
+        DESCRIPTION,
+        'http://127.0.0.1:7777',
+        '/repo',
+        {
+          viewerFlavor: 'v1',
+          viewerSurface: 'mini',
+        },
+      ),
+    ).toEqual({ success: true, paneId: 'term_child' });
+
+    // v1 carries `--dir` on the command line, so it needs no pane cwd.
+    expect(runArgs(calls).at(-1)).toBe(
+      `${BASH_PREAMBLE}${MARKER}${ATTACH_COMMAND} --mini`,
+    );
+    expect(runArgs(calls)).not.toContain('--cwd');
+  });
+
+  test('viewerSurface tui is byte-identical to omitting it', async () => {
+    const first = recorder();
+    await mux({ runner: first.runner }).spawnPane(
+      CHILD_ID,
+      DESCRIPTION,
+      'http://127.0.0.1:7777',
+      '/repo',
+      { viewerFlavor: 'v2-shared' },
+    );
+    const second = recorder();
+    await mux({ runner: second.runner }).spawnPane(
+      CHILD_ID,
+      DESCRIPTION,
+      'http://127.0.0.1:7777',
+      '/repo',
+      { viewerFlavor: 'v2-shared', viewerSurface: 'tui' },
+    );
+
+    // Same inputs, so any difference is attributable to `viewerSurface` alone.
+    expect(second.calls).toEqual(first.calls);
+    // Every `tui` spawn keeps `pane run` free of a cwd flag.
+    expect(runArgs(first.calls)).not.toContain('--cwd');
   });
 
   test('keeps the child view when the focus restore fails (diagnostic only)', async () => {

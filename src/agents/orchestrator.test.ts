@@ -29,7 +29,35 @@ describe('orchestrator prompt: host vocabulary', () => {
 
   test('result reads go through task_status, not a task_result tool', () => {
     for (const prompt of [v1(), v2()]) {
+      expect(prompt).toContain('`task_status` with `result: true`');
       expect(prompt).not.toContain('task_result');
+    }
+  });
+
+  test('v2 permits the new-session placeholder when the optional argument is unusable', () => {
+    const prompt = v2();
+
+    expect(prompt).toMatch(/omit `sessionID` when optional/i);
+    expect(prompt).toMatch(
+      /host requires a value\s*,?\s*use `sessionID: "ses:new"`/i,
+    );
+  });
+
+  test('v2 follows model selections from the user or delegation instructions', () => {
+    expect(v2()).toContain('user or delegation instructions select');
+    expect(v2()).toContain('look up IDs with the models tool');
+    expect(v1()).not.toContain('models tool');
+  });
+
+  test('requires an explicit mode instead of promising an implicit default', () => {
+    for (const prompt of [v1(), v2()]) {
+      expect(prompt).toMatch(
+        /use explicit `background: true` or `background: false` whenever\s+the execution mode matters/i,
+      );
+      expect(prompt).toContain('do not rely on an implicit default');
+      expect(prompt).not.toContain(
+        'defaults to background execution in top-level sessions',
+      );
     }
   });
 

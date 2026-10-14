@@ -80,12 +80,17 @@ The task API and background-control tools are:
 
 | Tool | Purpose |
 |------|---------|
-| `task(..., background: true)` | Start a specialist in the background and immediately return a task ID |
+| `task(..., background?: boolean)` | Start a specialist; on v1, top-level calls default to background and managed subsessions to foreground. On v2, the verified plugin tool-schema flip defaults omitted `background` to true for managed sessions; explicit values override the defaults |
 | hook-driven completion | OpenCode injects terminal background task results automatically |
 | `task_status` | Check a tracked task (read-only fallback for owned untracked sessions after a restart); `result: true` retrieves its result |
-| `task_message` | Send a non-interrupting message and return `queued` (queue-only: no wake, no steer channel) |
+| `task_list` | List parent-owned retained tasks by stored state without a live-status read |
+| `task_queue_list` | Inspect parent-owned admission lifecycle, ordering, and session associations |
+| `task_queue_manage` | Postpone, resume, cancel, clear, pause, or tune admission safely |
+| `task_wait` | Orchestrator-only notification-based wait for successful task completion |
+| `task_dependency_tree` | Inspect bounded prerequisite trees and blockers for parent-owned admissions |
+| `task_message` | Send a non-interrupting message and return `queued` (queue-only; on v2 it does not wake or steer the child) |
 | `task_cancel` | Stop a generation while retaining its session |
-| `task_revive` | Resume a retained session with a new instruction |
+| `task_revive` | Resume a retained session with a new instruction (v1 only; v2 uses native `subagent(sessionID, prompt)`) |
 | `wait_for_user` | Plugin-provided orchestrator tool (v1 only) that pauses automatic orchestrator wakes while the user performs external manual work; not registered on v2, where the native `question` tool is the blocking boundary |
 
 The delegation tool named `task()` here is `subagent()` on v2, with
@@ -95,6 +100,144 @@ page refer to that host-specific delegation tool.
 If these are not available, the scheduler cannot use the default background
 workflow. Configure the environment variable through the installer or use the
 one-shot export above before starting OpenCode.
+
+On v1, native `task(...)` calls default to background execution in top-level
+sessions and foreground in managed subsessions; explicit values override those
+defaults. On v2, once the plugin verifies its native tool-description/schema
+rewrite, omitted `background` defaults to `true` for managed sessions; explicit
+`false` remains foreground.
+
+Queue management is distinct from retained-session cancellation.
+`task_queue_manage` can cancel only queued or postponed admissions and never
+aborts a starting or running child. List, per-admission actions, clear, and
+pause/resume are scoped to the calling orchestrator's parent session. Runtime
+concurrency limits are shared by the directory scheduler, so changing one
+requires `confirm_global: true`; lowering a limit does not preempt active work.
+
+### Scheduler-enforced dependencies
+
+Operational cleanup releases settled admission callbacks, terminal queue entries,
+and active session bindings. Terminal scheduler history has soft retention limits:
+one hour after completion, 1,024 terminal records per parent, and 4,096 across the
+directory runtime. Cleanup evicts the oldest eligible records synchronously after
+state publication, waiter/lifecycle cleanup, and scheduler disposal; there is no
+retention timer. Live admissions, active `task_wait` calls, pending native-call
+lifecycle owners, and operational entries pin records and their prerequisite
+chains, even above these limits. Plugin reinitialization continues to share the
+same directory runtime while ownership overlaps.
+
+Eviction removes the record and its logical/admission aliases atomically. An
+evicted ID fails as unknown/not found, never as successful completion. Logical
+IDs may be reused only after eviction; generated admission IDs are monotonic
+within the process and are never reused, including across scheduler recreation.
+Use admission IDs when distinguishing successive uses of a logical ID. Retained
+terminal-only history may refer to an evicted ancestor; live dependency chains
+and active waiters never lose their prerequisites.
+
+`task_wait` and `task_queue_manage` are lifecycle operations exempt from the
+repeated-tool guard. Read-only `task_queue_list` and `task_dependency_tree`
+observations remain warn-only guarded when arguments and results repeat;
+changed results or an intervening lifecycle action restart the observation run.
+Task-session logs retain identifiers, states, and content lengths rather than
+task descriptions, prompts, output previews, or arbitrary error text.
+
+Native `task` calls accept plugin-consumed `id` and `depends_on` fields. On v2,
+use the same fields with native `subagent` (`agent` replaces `subagent_type`).
+The execute-before hook consumes these fields even though the native host
+schema does not advertise them.
+
+```jsonc
+// Submit the prerequisite first.
+{ "subagent_type": "explorer", "description": "Inspect API", "prompt": "Inspect the API contract", "id": "inspect-api", "background": true }
+// This admission stays queued until inspect-api completes successfully.
+{ "subagent_type": "fixer", "description": "Implement API", "prompt": "Implement the approved API", "id": "implement-api", "depends_on": ["inspect-api"], "background": true }
+```
+
+IDs are scoped to the calling parent session and must already exist: forward
+references are rejected. Identifiers contain 1–128 ASCII letters, digits,
+periods, underscores, colons, or hyphens, starting with a letter or digit.
+The `admission-N` namespace is reserved for generated identifiers. Omitted
+`id` uses the generated admission ID. Empty/malformed identifiers, duplicate
+IDs or edges, unknown/cross-parent references, self references and cycles fail
+before native execution. An empty `depends_on` array means no prerequisites.
+Dependency arrays accept at most 256 entries (including queue replacements and
+the resulting edge set after additions). Oversized inputs fail before mutation.
+
+Dependency-blocked background admissions consume no capacity; independent work
+can proceed. A prerequisite error or cancellation immediately fails queued or
+postponed descendants without launching a child. With `background: false`,
+every prerequisite must **already be completed**: otherwise the call fails
+immediately with per-dependency states. Foreground calls never implicitly wait
+for dependencies or capacity. Existing top-level/nested background defaults
+remain unchanged.
+
+Task output adds `id` (logical ID) and `admission_id` (scheduler ID). Native
+`task_id`, v2 `sessionID`, and `<task id="…">` remain host-owned and unchanged.
+Use native IDs for task result/session operations. Dependency references and
+`task_wait` accept logical IDs or admission IDs, not native child IDs.
+`task_queue_list` includes both identities, canonical admission-ID edges in
+`depends_on`, `dependency_error` when a prerequisite failed, and bounded
+unresolved-prerequisite samples (`waiting_on`, `waiting_on_count`,
+`waiting_on_truncated`) showing each direct dependency's logical `id`,
+`admission_id`, and `lifecycle_state` (`unknown` when the same-parent
+record is missing); completed prerequisites are omitted.
+
+Only the owning orchestrator can modify queued/postponed edges:
+
+```jsonc
+// task_queue_manage
+{ "action": "set_dependencies", "admission_id": "admission-2", "depends_on": ["inspect-api"] }
+{ "action": "add_dependency", "admission_id": "admission-2", "dependency_id": "another-existing-task" }
+{ "action": "remove_dependency", "admission_id": "admission-2", "dependency_id": "inspect-api" }
+{ "action": "clear_dependencies", "admission_id": "admission-2" }
+// task_wait: explicitly block the current orchestrator session
+{ "ids": ["inspect-api", "implement-api"] }
+// task_dependency_tree: answer what blocks a task from starting now
+{ "ids": ["implement-api"], "max_depth": 3 }
+```
+
+Mutations validate atomically and immediately reconsider queue admission.
+`task_wait` succeeds only when every task completes; unknown IDs fail before
+waiting, and errors/cancellations fail immediately with task states. It uses
+scheduler notifications, not polling. Aborting the wait does not cancel tasks.
+`task_wait` accepts 1–128 identifiers. `task_dependency_tree` accepts 1–32 roots
+and integer `max_depth` from 0–64, inclusive. Inspection admits at most 128 nodes,
+examines/emits at most 512 dependency edges, and returns at most 65,536 UTF-8
+bytes of valid JSON. These limits also apply to direct execution paths.
+Multi-source breadth-first traversal deduplicates admissions and retains the
+minimum discovered root distance; root input order does not affect output or
+truncation. Roots are sorted by admission ID. Adjacency is sorted within the
+remaining edge budget (legacy oversized adjacency is sampled before sorting).
+`truncation_reasons` distinguishes `depth`, `nodes`, `edges`, `bytes`, and
+`missing`. `missing_dependency_ids` identifies absent authoritative records,
+not merely hidden nodes. `truncated_dependency_ids` includes known omitted or
+missing IDs; an exhausted edge budget cannot enumerate unexamined IDs.
+`limits`, `examined_edges`, and `expanded_nodes` describe traversal budgets.
+Byte pressure removes trailing task objects, then diagnostic entries, never
+JSON fragments; `omitted_tasks` and `diagnostics_truncated` report that loss.
+If host metadata alone exceeds the budget, parent/root metadata is cleared.
+Each visible task reports `dependency_count` and `dependencies_truncated`;
+`depends_on` and `blocked_by` are display samples, not readiness decisions.
+Cycle witnesses cover the admitted, examined graph only. Hidden prerequisites
+still block or fail admissions: scheduler readiness never uses display budgets.
+Dependencies are process-local and are not restored after a process restart.
+
+### Live queue view
+
+Use the local TUI command `/queue` to inspect the selected parent session
+without sending a message or starting an LLM turn. The view shows no more than
+five queued or postponed admissions plus total queued, postponed, and pause
+state. It never persists prompts, results, or tool arguments.
+
+- On OpenCode v1, `/queue` opens one reactive dialog and refreshes it on the
+  existing one-second TUI cadence. Changing the selected session closes it.
+- On OpenCode v2, `/queue` toggles an appended sidebar section. This is the
+  source-proven compatibility path because v2 exposes keymap commands and
+  sidebar slots, but no supported live custom-dialog renderer.
+
+The server-owned scheduler remains authoritative. A project-scoped atomic file
+contains only a bounded display projection; TUI entry points never import or
+mutate scheduler state.
 
 Use an OpenCode release that includes native background subagents and hook-driven completion; run `opencode --version` and update if background tasks are missing.
 
@@ -138,11 +281,13 @@ Attribution through the existing task launch path promotes it to an ordinary
 listed task, including recovery and publication wakes.
 This distinction uses explicit provenance, not agent names or description text.
 
-Aliases and reusable-session history are process-local and do not survive process
-restarts as a reusable board. Post-restart recovery is partial and best-effort;
-it does not guarantee restoration of those aliases or the complete history. Two
-read-only channels work after a restart: a background launch's marker in the
-parent's history still resolves its alias when it is the final non-empty line of
+The Background Job Board persists retained task/session mappings and their
+aliases on a best-effort basis in this project checkout. Recovery may be partial
+if snapshots are missing, invalid, or could not be written; it does not
+guarantee a complete reusable-session history after a restart. For sessions not
+restored from a valid snapshot, two read-only channels work after a restart:
+a background launch's marker in the parent's history still resolves its alias
+when it is the final non-empty line of
 that tool result (tail-anchored only), and `task_status` reports a read-only
 observed state for an owned session the board no longer tracks — completed or
 uncertain running-or-incomplete from transcript evidence (unknown when the
@@ -168,9 +313,10 @@ ID as alias, and task creation still succeeds. This is deliberate: no cheap host
 read bounds the numbers issued before a restart. The live child count misses
 deleted children and a persisted high-water mark can miss a failed write, so
 either floor could hand an old `fix-2` to a new child while history still pairs
-`fix-2` with another session. Adopted and rehydrated host children keep their
-session ID as alias; a restored child keeps its historical alias only when
-history pairs that alias with it alone and no row of that parent holds it
+`fix-2` with another session. Adopted and transcript-rehydrated host children keep
+their session ID as alias; a child recovered from host history keeps its
+historical alias only when history pairs that alias with it alone and no row
+of that parent holds it
 (never once the parent's readable history is cut: a v2 compaction or,
 on v1, more than 1,000 messages).
 None of them consumes a new number. A forked session counts as new, but the
@@ -346,13 +492,29 @@ agent and an exactly matching objective. The refusal names the existing task ID
 and directs the caller to `task_status` with `result: true`; once that result has been retrieved,
 the same objective may be dispatched again for follow-up work.
 
-Separately, the default-on orchestrator wake scheduler may prompt an
+Separately, the default-on v1 orchestrator wake scheduler may prompt an
 idle parent with incomplete todos after continuous idle time; it does not depend
 on the local job board.
 
-After a full OpenCode or plugin restart, persisted background-task history is
-recovered into the local job board in two complementary ways. At plugin
-startup, the scan unions plugin-owned child identities recorded at background
+Best-effort board snapshots restore retained
+task/session mappings before task-board operations. Previously `running` records
+restore as `stopped` with uncertain status, **not** as running or as a proven
+terminal result. Historical running task output can also be rehydrated when no
+board record exists; normal runtime reconciliation applies to that path. A
+valid live `busy`/`retry` observation can establish activity; missing or idle
+status starts a 5s stop-confirmation grace for jobs still marked running, not a
+success verdict. An unavailable/malformed status map or inconclusive probe
+leaves the mapping intact and its status uncertain. A positive `session.get`
+result establishes existence only, not that the child is running. Only a typed
+V2 `Session.NotFoundError`, checked against the current task generation,
+confirms deletion and removes the mapping; V1 errors do not prove deletion.
+Optional V2 `ctx.storage` also retains separate deletion tombstones and deletion
+epochs (see the [v2 compatibility doc](opencode-v2-compatibility.md#background-job-state-rehydrate-probe-and-persistence)).
+A session that already reached a terminal host outcome is settled through the
+existing evidence-gated reconciliation path; a positive existence probe alone
+does not prove completion.
+
+A separate startup scan unions plugin-owned child identities recorded at background
 launch with host child sessions when `session.list` is available. The persisted
 identity is minimal: task ID, parent session ID, original agent, description,
 objective, launch time, and a terminal-delivery marker. On stock v2 hosts
@@ -376,21 +538,21 @@ execution: the host's background launch sentence, or an explicit
 `background: true` on the call or result. Default-background calls are therefore
 recoverable while running (the launch sentence is present); a completed
 default-background result without either signal is left alone rather than
-guessed. Recovery preserves the original agent and parent ownership. Startup
-adoption restores a running child even when its idle parent never sends another
-message, and the plugin owns the eventual completion wake for that adopted run
-because the host's native notifier did not survive the restart. A child that
-reached a terminal outcome while the plugin was down is restored and its parent
-is woken once only when a persisted identity proves the child was plugin-owned;
-the delivery marker prevents replay on later restarts. The marker is written
+guessed. Recovery preserves the original agent and parent ownership. Startup adoption
+restores a running child even when its idle parent never sends a message. The v1
+plugin scheduler owns the eventual wake for an adopted run; v2 has no plugin
+wake scheduler and relies on native delivery plus `task_status` pull. A child
+that reached a terminal outcome while the plugin was down is restored; v1 wakes
+its parent once only when a persisted identity proves the child was plugin-owned,
+while v2 uses the host notification/pull path. The delivery marker prevents
+replay on later restarts. The marker is written
 only after an accepted parent-visible wake, or when a trusted delivery for the
 current run is found in the parent history; native notification ownership
 alone is not delivery evidence, and a restored terminal row alone does not
 acknowledge delivery. A busy, throttled, or failed publication keeps its
-execution pending. Publication retries survive a parent busy-to-idle transition
-even when periodic wakes are disabled. A startup correction from running to
-terminal also releases the recovered child's concurrency slot. The wake body
-names the task IDs it covers, and the
+execution pending. On v1, publication retries survive a parent busy-to-idle transition even
+when periodic wakes are disabled. A startup correction from running to
+terminal also releases the recovered child's concurrency slot. A v1 wake body names the task IDs it covers, and the
 eventual accepted retry acknowledges exactly that captured batch; a child
 finishing while the send is in flight stays pending for its own wake. At most
 256 executions are named by one wake; any remainder stays pending and is
@@ -600,9 +762,11 @@ multiplexer panes attached while the parent orchestrator continues scheduling.
 
 ### Orchestrator wake scheduler
 
-When an orchestrator parent stays continuously idle, the plugin may send a
-periodic internal wake prompt so incomplete TODOs are not abandoned. This is
-**enabled by default** with a **5-minute** interval:
+On v1, when an orchestrator parent stays continuously idle, the plugin may send
+a periodic internal wake prompt so incomplete TODOs are not abandoned. This is
+**enabled by default** with a **5-minute** interval. On v2, no plugin wake
+scheduler is created; native notifications own terminal delivery and
+`task_status` is the pull channel.
 
 ```jsonc
 {
@@ -617,18 +781,12 @@ periodic internal wake prompt so incomplete TODOs are not abandoned. This is
 ```
 
 `intervalMs` must be an integer from `60000` to `2147483647`. `0` is invalid.
-`mode` selects the wake condition: `"auto"` (default) uses todo-gating on v1
-hosts and children-driven mode on v2 hosts; `"todo"` and `"children"` pin one
-mode (an explicit `"todo"` degrades to children on hosts without the todo
-API). Set `enabled: false` to disable wakes while keeping idle reconciliation
-and background-job orchestration.
+`mode` selects the wake condition for the v1 scheduler: `"auto"` (default)
+uses todo-gating, while `"todo"` and `"children"` pin one mode. The entire
+`orchestratorWake` section is ignored on v2. Set `enabled: false` to disable
+v1 wakes while keeping idle reconciliation and background-job orchestration.
 
-This whole section is **v1-only**: on OpenCode v2 hosts the plugin creates no
-wake scheduler at all — the native background notifier owns terminal delivery
-(council 2026-10-23) — and every `backgroundJobs.orchestratorWake` key warns
-as ignored there.
-
-Behavior:
+This section describes the v1 plugin wake scheduler and its periodic behavior; the following safety gates also apply to its event-driven wakes. On v2, no plugin wake scheduler is created, and the entire `backgroundJobs.orchestratorWake` section is ignored.
 
 - Per-session recursive `setTimeout(...).unref()` after continuous parent-idle
   time (never a global interval).
@@ -645,7 +803,8 @@ Behavior:
 - `session.time.archived` is authoritative when available. Archived sessions do
   not receive periodic or stopped-job-recovery wakes; archive updates cancel
   timers and stale evaluations, while an unarchive permits future lifecycle
-  activity. v2 hosts without `session.get()` use observed session updates.
+  activity. When `session.get()` is unavailable, observed session updates
+  provide the archive-state signal.
 - One in-flight evaluation/wake per session. Status/waits/generation are
   rechecked immediately before `promptAsync`. Cooldown/reservation is recorded
   before the call so a failed `promptAsync` cannot storm retries.
@@ -658,8 +817,7 @@ Behavior:
   prompt text is static and does **not** include a fingerprint or snapshot.
   The no-progress caps live in a process-global wake gate that the plugin's
   dispose hook clears on instance teardown, so a recreated plugin generation
-  (for example after `opencode reload` on v2 hosts) starts with fresh caps
-  instead of inheriting the previous generation's.
+  starts with fresh caps instead of inheriting the previous generation's.
 - Static wake text (internal initiator part via `promptAsync` only — no message
   transform injection or history rewrite):
 
@@ -679,10 +837,7 @@ The scheduler does **not** perform automatic cancellation and does not rely on
 the local job board. When no incomplete TODOs remain, it ends the current idle
 spell and stops polling until new activity.
 
-**v2 hosts: no scheduler.** On OpenCode v2 the plugin creates no wake
-scheduler at all (council 2026-10-23): the native background notifier owns
-terminal delivery, restart recovery re-delivers anything lost, and the
-parent discovers open child asks via `task_status` pull.
+**v2 hosts: no plugin wake scheduler.** Native background notifications deliver first terminal outcomes, and restart recovery re-delivers if needed. The parent uses `task_status` as the pull channel for unresolved or untracked task state; no plugin periodic or event-driven wake path runs on v2.
 
 #### v2 structural defaults
 
@@ -715,16 +870,6 @@ messages, frozen prompts, and tool definitions are not rewritten. The shared
 input-wait, parent-busy, and no-progress gates still apply. This does not add
 restart persistence; v1's throttle behavior is unchanged.
 
-On v2 hosts the plugin runs none of this (council 2026-10-23): no wake
-scheduler is created. The host's native background notifier delivers terminal
-results — to busy parents via steer at the next step boundary, to idle parents
-by starting a successor turn — restart recovery re-delivers anything lost,
-and the durable inbox dedupes by message ID. Later runs of the same child
-(rev>1) are covered when relaunched through the `subagent` tool, which re-arms
-the native notifier; child permission/question asks are a host-UI boundary the
-host does not route to the parent agent, and the parent discovers open asks
-via `task_status` pull. The whole `backgroundJobs.orchestratorWake` config
-section is v1-only and warns as ignored on v2.
 On both hosts, terminal retirement is observation-based: the plugin watches
 the parent's transcript for a delivery it can attribute — the host's native
 `<subagent>` delivery on v2, the plugin's own tagged `<completed-job>` push on
@@ -764,21 +909,20 @@ summaries and option labels; full option descriptions stay in the host UI. A pen
 suppresses the generic “await completion” status guidance. Shorter notices do not skip the host's
 normal model step after a tool result or guarantee that a model emits no filler.
 
-The plugin retires a terminal run when it observes the delivery that reported
-it: the host's native completion part, the plugin's own tagged
-`<completed-job>` push, or the revived-run notification. The observation is
-fenced to the exact run (generation and terminal revision), so a reopened or
-re-published run is never consumed by an older delivery. A completed, error, or
-cancelled record also retires once the parent demonstrably moved past the
-terminal report (a later parent turn). Stopped jobs are **not** retired that
-way, because a stop has no native notification. They stay stopped and
-unreconciled, so the stopped-job recovery wake still reports them, and
-`task_revive` acknowledges them when the parent resumes the work. The
-recovery wake and overflow notices point at `task_status`. Reopen corrections
-point at `task_status` as well: if a reconciled job reopens to running, the
-parent is told once not to rely on its earlier result.
+The plugin retires a terminal run only when it observes a delivery attributable
+to it: the host-native completion on v2, the tagged `<completed-job>` push on
+v1, or a revived-run notification. V2 uses native-delivery observation with a
+timestamp fallback; v1 uses prompt-shape consumption on parent turns. Retirement
+is fenced to the exact generation and terminal revision, so an older delivery
+cannot consume a reopened or re-published run. Completed, error, and cancelled
+records also retire once the parent demonstrably moves past the terminal report.
+Stopped jobs have no native notification and remain unreconciled: v1 recovery
+wakes and v2 `task_status` pulls report them; v1 `task_revive` acknowledges a
+resumed session, while v2 uses native `subagent(sessionID, prompt)`. Reopen
+corrections point at `task_status` as well, so the parent is told not to rely on
+an earlier result.
 
-For external manual work, the orchestrator first gives the user concrete steps,
+On v1, for external manual work, the orchestrator first gives the user concrete steps,
 then calls `wait_for_user` as its final tool action. This explicit signal covers
 text-only HITL turns without attempting to infer intent from assistant prose. The
 wait remains armed across hook/plugin recreation in the same process and is
@@ -799,6 +943,24 @@ machine-side projection: dedupe by objective, alias authority, stall tracking,
 the terminal gate, session adoption, and generations keep working, but no
 prompt surface lists them. There is no switch to turn the render back on; the
 `backgroundJobs.boardInjection` key was removed with the render.
+
+The authoritative retained task/session records live in the Background Job
+Board, with best-effort project-local snapshots at
+`<project>/.local/.slim/background-jobs/<sha256(root-session-id)>.json`.
+There is one versioned JSON file per top-level root session; nested tasks stay
+in that root's file while retaining their immediate parent session ID. V1 and
+V2 use the same plugin-owned filesystem store. This is local to the checkout:
+it is not a cross-checkout, cross-host, or host-independent liveness service.
+Read/validation and write/lock failures do not block in-memory task operations;
+a failed whole-store load suppresses writes so prior snapshots are not
+overwritten. Invalid individual snapshots are skipped and protected against
+replacement by a mutation. Files may be
+removed when the board's retention or deletion policy leaves no records for a
+root. A successful write does not guarantee durability across machine loss.
+
+These filesystem snapshots are distinct from optional V2 `ctx.storage`
+lifecycle metadata and TUI display projections; neither replaces the live
+in-memory board.
 
 Terminal facts travel as one-shot pushes instead:
 
@@ -1004,12 +1166,13 @@ child sessions. It is disabled by default:
 }
 ```
 
-This supervisor recognizes only an explicit `task(..., background: true)` call.
-Foreground tasks and calls where `background` is omitted or `false` are not
-supervised. The deadline begins at the first launch observation for the current
-run. Duplicate `session.created`/tool-hook observations, busy activity, tool
-activity, and liveness timestamps do not renew it. An explicit relaunch or reuse
-starts a new run generation.
+This supervisor recognizes native task calls whose effective mode is background.
+Omitted `background` defaults to `true` in top-level sessions and `false` in
+managed subsessions; explicit values override those defaults. The deadline
+begins at the first launch observation for the current run. Duplicate
+`session.created`/tool-hook observations, busy activity, tool activity, and
+liveness timestamps do not renew it. An explicit relaunch or reuse starts a
+new run generation.
 
 When the deadline wins a race with a real terminal transition, the board records
 a persistent hard-deadline marker, marks cancellation as requested, starts the

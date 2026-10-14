@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { withTmpDir } from '../../test-utils';
 import { fitUtf8, saveBinary } from './binary';
 import {
   decodeBody,
@@ -387,9 +386,8 @@ describe('smartfetch/network', () => {
     expect(latinName).toEndWith('.pdf');
   });
 
-  test('keeps byte-limited multibyte names unique across binary saves', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'smartfetch-r3-'));
-    try {
+  test('keeps byte-limited multibyte names unique across binary saves', () =>
+    withTmpDir(async (dir) => {
       for (const name of [latinName ?? '', fitUtf8('界'.repeat(100), 255)]) {
         const save = () =>
           saveBinary(dir, Uint8Array.of(0), 'application/pdf', name);
@@ -401,8 +399,5 @@ describe('smartfetch/network', () => {
         );
         expect([new Set(files).size, withinLimit]).toEqual([3, true]);
       }
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
+    }));
 });

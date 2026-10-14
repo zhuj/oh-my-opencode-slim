@@ -18,14 +18,14 @@ delegation, diff validation, integration, and cleanup.
 All worktrees reside under the default path:
 
 ```text
-.slim/worktrees/<slug>/
+.local/.slim/worktrees/<slug>/
 ```
 
 Do not create worktrees as sibling directories of the main repository.
 
-### State Tracking (`.slim/worktrees.json`)
+### State Tracking (`.local/.slim/worktrees.json`)
 
-Use the optional local metadata manifest `.slim/worktrees.json` to maintain
+Use the optional local metadata manifest `.local/.slim/worktrees.json` to maintain
 structural tracking:
 
 ```json
@@ -36,7 +36,7 @@ structural tracking:
     {
       "slug": "feature-auth-v2",
       "branch": "omos/feature-auth-v2",
-      "path": ".slim/worktrees/feature-auth-v2",
+      "path": ".local/.slim/worktrees/feature-auth-v2",
       "base": "main",
       "purpose": "refactor authentication flow to use OAuth2",
       "owner": "orchestrator",
@@ -48,7 +48,7 @@ structural tracking:
 }
 ```
 
-If `.slim/worktrees.json` does not exist, create it when initializing a lane,
+If `.local/.slim/worktrees.json` does not exist, create it when initializing a lane,
 and keep it updated as lanes are transitioned, integrated, or pruned. Treat it
 as local workflow metadata by default; ask before making it part of a committed
 project convention.
@@ -65,7 +65,7 @@ following guards:
 - Check the current branch, base branch, and dirty/uncommitted state.
 - Inspect the output of `git worktree list` to avoid path or branch conflicts.
 - Ensure the branch name (e.g. `omos/<slug>` or custom project convention) does not already exist locally or on remote.
-- Ensure `.slim/worktrees/` is ignored by Git before creating nested worktrees.
+- Ensure `.local/.slim/worktrees/` is ignored by Git before creating nested worktrees.
 
 ### 2. Mandatory User Confirmation
 You must seek explicit user confirmation before executing:
@@ -91,8 +91,8 @@ keeps them readable to OpenCode.
 
 ```gitignore
 # BEGIN oh-my-opencode-slim worktrees
-.slim/worktrees/
-.slim/worktrees.json
+.local/.slim/worktrees/
+.local/.slim/worktrees.json
 # END oh-my-opencode-slim worktrees
 ```
 
@@ -100,10 +100,10 @@ keeps them readable to OpenCode.
 
 ```ignore
 # BEGIN oh-my-opencode-slim worktrees
-!.slim/
-!.slim/worktrees.json
-!.slim/worktrees/
-!.slim/worktrees/**
+!.local/.slim/
+!.local/.slim/worktrees.json
+!.local/.slim/worktrees/
+!.local/.slim/worktrees/**
 # END oh-my-opencode-slim worktrees
 ```
 
@@ -119,13 +119,13 @@ keeps them readable to OpenCode.
    the Ignore File Setup rules above.
 5. Run:
    ```bash
-   git worktree add -b <branch-name> .slim/worktrees/<slug> <base-commit/branch>
+   git worktree add -b <branch-name> .local/.slim/worktrees/<slug> <base-commit/branch>
    ```
-6. Register the metadata in `.slim/worktrees.json`.
+6. Register the metadata in `.local/.slim/worktrees.json`.
 
 ### Phase 2: Execution & Delegation
 1. Run all sub-agents with their working directory set strictly to the worktree
-   path, such as `.slim/worktrees/<slug>`.
+   path, such as `.local/.slim/worktrees/<slug>`.
 2. Do not modify the main checkout for lane work. Keep build, test, and edit
    operations isolated inside the lane.
 3. Track file or folder ownership per lane to avoid merge conflicts between
@@ -152,9 +152,9 @@ Before merging or integrating the worktree branch:
 4. Request user approval to remove the worktree.
 5. Safely remove the worktree using:
    ```bash
-   git worktree remove .slim/worktrees/<slug>
+   git worktree remove .local/.slim/worktrees/<slug>
    ```
-6. Update `.slim/worktrees.json` to mark the lane as `archived` or remove it.
+6. Update `.local/.slim/worktrees.json` to mark the lane as `archived` or remove it.
 
 ---
 

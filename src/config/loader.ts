@@ -2,6 +2,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { stripJsonComments } from '../cli/config-io';
 import { getConfigSearchDirs } from '../cli/paths';
+import {
+  assertSkillPolicyConfig,
+  InvalidSkillPolicyError,
+} from '../utils/skill-policy-validation';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
 import type { ResolvedPresetMap } from './presets';
 import {
@@ -426,6 +430,7 @@ export function loadRawPluginConfigFromPath(
       }
       return null;
     }
+    assertSkillPolicyConfig(rawConfig, configPath);
     // Drop keys removed in this version before schema validation: a stale
     // removed key must not invalidate the whole file (and silently discard
     // every other user setting). Reported per key, not migrated.
@@ -513,6 +518,7 @@ export function loadRawPluginConfigFromPath(
 
     return layerConfig;
   } catch (error) {
+    if (error instanceof InvalidSkillPolicyError) throw error;
     // File doesn't exist or isn't readable - this is expected and fine
     if (
       error instanceof Error &&

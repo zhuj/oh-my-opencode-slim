@@ -1527,7 +1527,7 @@ describe('startup subagent recovery', () => {
       state: 'completed',
       resultSummary: 'Done',
     });
-    expect(release).toHaveBeenCalledWith(RUNNING);
+    expect(release).toHaveBeenCalledWith(RUNNING, 'completed');
     expect(wakes).toEqual([`${PARENT}:${RUNNING}`]);
     expect(
       persistedBackgroundChildren().get(RUNNING)?.deliveredAt,
@@ -1908,7 +1908,7 @@ describe('startup subagent recovery', () => {
 
     expect(corrected).toEqual([RUNNING]);
     expect(board.get(RUNNING)).toMatchObject({ state: 'completed' });
-    expect(release).toHaveBeenCalledWith(RUNNING);
+    expect(release).toHaveBeenCalledWith(RUNNING, 'completed');
     expect(concurrency.snapshot()).toEqual({ active: 0, queued: 0 });
 
     // The freed slot admits the next background launch.

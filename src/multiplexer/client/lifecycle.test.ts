@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { MultiplexerLayout } from '../../config/schema';
-import type { Multiplexer, PaneResult } from '../types';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 import {
   DIAGNOSTIC_EVENT_NO_PANE,
   DIAGNOSTIC_EVENT_PANE_CREATED,
@@ -134,6 +134,8 @@ interface SpawnCall {
   directory: string;
   parentSessionId?: string;
   subagentType?: string;
+  viewerFlavor?: string;
+  viewerSurface?: PaneSpawnOptions['viewerSurface'];
 }
 
 class FakeAdapter implements Multiplexer {
@@ -167,7 +169,7 @@ class FakeAdapter implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
-    options?: { parentSessionId?: string; subagentType?: string },
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     this.spawnCalls.push({
       sessionId,
@@ -176,6 +178,8 @@ class FakeAdapter implements Multiplexer {
       directory,
       parentSessionId: options?.parentSessionId,
       subagentType: options?.subagentType,
+      viewerFlavor: options?.viewerFlavor,
+      viewerSurface: options?.viewerSurface,
     });
     if (this.spawnBarrier) await this.spawnBarrier;
     if (this.spawnError) throw this.spawnError;
@@ -447,6 +451,32 @@ describe('event filtering and readiness (2.2)', () => {
 
     expect(h.adapter.spawnCalls[0]?.subagentType).toBeUndefined();
     expect(h.lifecycle.getPane(CHILD)?.subagentType).toBeUndefined();
+  });
+
+  // The seam between the wiring (which reads `multiplexer.viewer`) and the
+  // adapters (which build the command): the surface must survive both hops.
+  test('forwards the configured viewer flavor and surface to spawnPane', async () => {
+    const h = createHarness({
+      config: {
+        viewer: { viewerFlavor: 'v2-remote', viewerSurface: 'mini' },
+      },
+    });
+    h.reader.statuses.set(CHILD, 'busy');
+
+    await h.lifecycle.handleEvent(createdEvent());
+
+    expect(h.adapter.spawnCalls[0]?.viewerFlavor).toBe('v2-remote');
+    expect(h.adapter.spawnCalls[0]?.viewerSurface).toBe('mini');
+  });
+
+  test('omits viewerSurface entirely when no viewer block is configured', async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'busy');
+
+    await h.lifecycle.handleEvent(createdEvent());
+
+    expect(h.adapter.spawnCalls[0]?.viewerFlavor).toBeUndefined();
+    expect(h.adapter.spawnCalls[0]?.viewerSurface).toBeUndefined();
   });
 
   test('falls back to the unknown anchor without blocking creation', async () => {

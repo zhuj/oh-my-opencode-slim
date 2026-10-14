@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MarketplacePackageIdSchema } from '../marketplace/schemas';
+import { SkillCommandModeSchema } from '../skill-command-mode';
 import {
   AGENT_THEME_COLORS,
   DEFAULT_CHILD_INPUT_WAKE_KINDS,
@@ -8,7 +9,7 @@ import {
 import { CouncilConfigSchema } from './council-schema';
 import { ProviderModelIdSchema } from './model-id-schema';
 
-export { ProviderModelIdSchema } from './model-id-schema';
+export { ProviderModelIdSchema };
 
 // Permission schemas — mirror the SDK's PermissionConfig type with shallow
 // validation. Action values are validated; unknown tool keys pass through.
@@ -58,22 +59,28 @@ export const AgentColorSchema = z.union([
 // Agent override configuration (distinct from SDK's AgentConfig)
 export const ModelInheritanceSourceSchema = z.enum(['session', 'orchestrator']);
 
+// Agent configs also accept bare IDs and the legacy dynamic sentinel.
+const AgentModelIdSchema = z
+  .string()
+  .refine((value) => !value.includes('$'), 'Use provider/model[#variant]');
+
 export const AgentOverrideConfigSchema = z
   .object({
     model: z
       .union([
-        z.string(),
+        AgentModelIdSchema,
         z
           .array(
             z.union([
-              z.string(),
+              AgentModelIdSchema,
               z.object({
-                id: z.string(),
+                id: AgentModelIdSchema,
                 variant: z.string().optional(),
               }),
             ]),
           )
           .min(1),
+        z.object({ dynamic: z.enum(['selected']) }),
       ])
       .optional(),
     inheritModelFrom: ModelInheritanceSourceSchema.optional(),
@@ -334,6 +341,10 @@ export const PresetAgentsSchema = z.record(
   AgentOverrideConfigSchema,
 );
 
+/** Dynamic model reference resolved at runtime (e.g. the UI-selected model).
+ *  `dynamic` is an enum so additional strategies can be added later. */
+export type DynamicModelRef = { dynamic: 'selected' };
+
 export type Preset = z.infer<typeof PresetAgentsSchema>;
 
 const MarketplacePackageIdsSchema = z
@@ -434,6 +445,13 @@ export const InterviewOutputFolderSchema = z
   .regex(
     /^(?![\\/])(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/,
     'outputFolder must be a relative path without parent-directory traversal',
+  );
+
+const ResourcePrefixSchema = z
+  .string()
+  .regex(
+    /^(?![\\/])(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/,
+    'resource prefixes must be relative paths without parent-directory traversal',
   );
 
 export const InterviewConfigSchema = z.object({
@@ -592,7 +610,7 @@ export const BackgroundJobsConfigStrictSchema = z.object({
     .union([z.literal(0), z.number().int().min(60_000).max(2_147_483_647)])
     .default(0)
     .describe(
-      'Explicit opt-in wall-clock deadline for native task(..., background: true) child sessions. 0 disables supervision; finite values are 60,000–2,147,483,647ms.',
+      'Explicit opt-in wall-clock deadline for native background task child sessions. Top-level task calls default to background execution; managed subsessions default to foreground execution. Use background: true or background: false to override. 0 disables supervision; finite values are 60,000–2,147,483,647ms.',
     ),
   abortGraceMs: z
     .number()
@@ -953,6 +971,9 @@ export const RawPluginConfigSchema = z
   .object({
     preset: z.string().optional(),
     setDefaultAgent: z.boolean().optional(),
+    skillCommandMode: SkillCommandModeSchema.optional().describe(
+      'Mode for plugin-generated skill slash commands: "full" (default) inlines the skill body, "reference" asks the skill tool to load the exact skill ID, and "none" omits the generated command. SKILL.md slim.command overrides this value, including when it is "none". Does not disable skills or explicit commands. Reload required for global changes.',
+    ),
     compactSidebar: z
       .boolean()
       .optional()
@@ -1004,7 +1025,7 @@ export const RawPluginConfigSchema = z
       .optional()
       .describe(
         'Deepwork guard mode. "shadow" (default) records receipts and claim ' +
-          'markers under .slim/deepwork/.runtime/ but never blocks; ' +
+          'markers under .local/.slim/deepwork/.runtime/ but never blocks; ' +
           '"enforce" additionally blocks completion writes whose tombstone ' +
           'references artifacts with no recorded receipt. The guard itself ' +
           'is disabled by listing "deepwork-guard" in disabled_hooks.',
@@ -1056,6 +1077,12 @@ export const RawPluginConfigSchema = z
     tmux: z
       .never({ error: 'tmux config was removed; use multiplexer.*' })
       .optional(),
+    resource_prefixes: z
+      .array(ResourcePrefixSchema)
+      .optional()
+      .describe(
+        'Ordered project-local resource roots. Defaults to .local, .local/.slim, and .opencode; [] disables discovery.',
+      ),
   })
   .superRefine((value, ctx) => {
     if (value.agents) {

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { withTmpDir } from '../../test-utils';
 
 type SpawnResult = {
   exited: Promise<number>;
@@ -178,21 +180,18 @@ describe('WeztermMultiplexer', () => {
   });
 
   test('prefers the wezterm CLI next to WEZTERM_EXECUTABLE', async () => {
-    const dir = `/tmp/opencode/omo-wezterm-test-${process.pid}`;
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(`${dir}/wezterm`, '');
-    process.env.WEZTERM_EXECUTABLE = `${dir}/wezterm-gui`;
-    try {
+    await withTmpDir(async (dir) => {
+      const executable = join(dir, 'wezterm');
+      writeFileSync(executable, '');
+      process.env.WEZTERM_EXECUTABLE = join(dir, 'wezterm-gui');
       const { WeztermMultiplexer } = await importFreshWezterm();
       const wezterm = new WeztermMultiplexer();
       await spawnWith(wezterm);
-      expect(splits()[0][0]).toBe(`${dir}/wezterm`);
+      expect(splits()[0][0]).toBe(executable);
       expect(
         crossSpawnMock.mock.calls.some((call) => call[0][0] === 'which'),
       ).toBe(false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test('isInsideSession follows WEZTERM_PANE', async () => {

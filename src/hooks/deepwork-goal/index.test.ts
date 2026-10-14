@@ -1,11 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  utimesSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { withTmpDirSync } from '../../test-utils';
 import { stripTaggedContent } from '../cache-safe-injection';
 import { routerHeadAnnouncement } from '../deepwork';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../task-session-manager/board-injection';
@@ -567,11 +562,8 @@ describe('createDeepworkGoalHook', () => {
 });
 
 describe('createDeepworkHeadGate', () => {
-  let dir: string;
-
   test('gate follows the head file lifecycle (fail open on doubt)', () => {
-    dir = mkdtempSync('deepwork-goal-gate-');
-    try {
+    withTmpDirSync((dir) => {
       const gate = createDeepworkHeadGate(dir);
       const head = `${dir}/.slim/deepwork/${SESSION}.md`;
       mkdirSync(`${dir}/.slim/deepwork`, { recursive: true });
@@ -606,8 +598,6 @@ describe('createDeepworkHeadGate', () => {
       // Deleted → closed.
       rmSync(head);
       expect(gate(SESSION)).toBe(false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 });

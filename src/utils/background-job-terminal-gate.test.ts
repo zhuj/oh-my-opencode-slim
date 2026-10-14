@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createTaskSessionManagerHook } from '../hooks/task-session-manager';
 import { createRevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
+import { testSnapshotStore } from '../hooks/task-session-manager/test-snapshot-store';
 import { createTaskStatusTool } from '../tools/task-status';
 import { buildPluginInput } from '../v2/client-shim';
 import { BackgroundJobBoard } from './background-job-board';
@@ -1151,6 +1152,7 @@ test('integration: historical replay + rehydration + busy host publishes nothing
   gates.push(gate);
   const hook = createTaskSessionManagerHook(input, {
     backgroundJobBoard: coordinator,
+    backgroundJobSnapshotStore: testSnapshotStore,
     terminalGate: gate,
     backgroundTaskConcurrency: capacity,
     shouldManageSession: () => true,
@@ -1289,6 +1291,7 @@ test('integration: late acknowledgement and transport success for A cannot consu
   tracker.register({ ...run, baselineMessageID: 'baseline' });
   const hook = createTaskSessionManagerHook(input, {
     backgroundJobBoard: board,
+    backgroundJobSnapshotStore: testSnapshotStore,
     terminalGate: gate,
     shouldManageSession: () => true,
     maxSessionsPerAgent: 10,
@@ -1453,7 +1456,7 @@ test.each(['transcript', 'outcome'])(
       }),
     );
     const input = buildPluginInput({
-      location: { directory: '/tmp' },
+      location: { directory: '/test/project' },
       session: {
         get,
         context,
@@ -1478,6 +1481,7 @@ test.each(['transcript', 'outcome'])(
     const hook = createTaskSessionManagerHook(input, {
       terminalGate: gate,
       backgroundJobBoard: board,
+      backgroundJobSnapshotStore: testSnapshotStore,
       shouldManageSession: () => true,
       maxSessionsPerAgent: 10,
       maxRetainedSnapshots: 10,

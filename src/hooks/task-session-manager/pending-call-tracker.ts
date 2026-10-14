@@ -15,6 +15,9 @@ export interface PendingTaskCall {
   parentSessionId: string;
   agentType: string;
   label: string;
+  /** Canonical provider/model used for concurrency admission. Variants do not
+   * participate because modelConcurrency keys are provider/model IDs. */
+  model?: string;
   /** Untruncated objective text the label was derived from; board comparison
    *  uses this so long exact duplicates are not missed. */
   fullObjective?: string;
@@ -39,6 +42,7 @@ const MAX_PENDING_TASK_CALLS = 100;
 
 export interface PendingCallTracker {
   add(call: PendingTaskCall): void;
+  remove(call: PendingTaskCall): void;
   take(
     callId?: string,
     parentSessionId?: string,
@@ -166,6 +170,10 @@ export function createPendingCallTracker(
   };
 
   const tracker: PendingCallTracker = {
+    remove(call) {
+      if (pendingCalls.get(call.callId) === call)
+        pendingCalls.delete(call.callId);
+    },
     add(call: PendingTaskCall) {
       const replaced = pendingCalls.get(call.callId);
       if (replaced) releaseCallLease(replaced);

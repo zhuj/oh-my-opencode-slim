@@ -8,6 +8,15 @@
     "setDefaultAgent": {
       "type": "boolean"
     },
+    "skillCommandMode": {
+      "description": "Mode for plugin-generated skill slash commands: \"full\" (default) inlines the skill body, \"reference\" asks the skill tool to load the exact skill ID, and \"none\" omits the generated command. SKILL.md slim.command overrides this value, including when it is \"none\". Does not disable skills or explicit commands. Reload required for global changes.",
+      "type": "string",
+      "enum": [
+        "none",
+        "full",
+        "reference"
+      ]
+    },
     "compactSidebar": {
       "description": "Use the compact TUI sidebar layout. Defaults to true; set false to use the expanded layout.",
       "type": "boolean"
@@ -75,6 +84,20 @@
                               }
                             ]
                           }
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "dynamic": {
+                              "type": "string",
+                              "enum": [
+                                "selected"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "dynamic"
+                          ]
                         }
                       ]
                     },
@@ -320,6 +343,20 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "dynamic": {
+                                "type": "string",
+                                "enum": [
+                                  "selected"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "dynamic"
+                            ]
                           }
                         ]
                       },
@@ -497,6 +534,20 @@
                           }
                         ]
                       }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "dynamic": {
+                          "type": "string",
+                          "enum": [
+                            "selected"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "dynamic"
+                      ]
                     }
                   ]
                 },
@@ -703,6 +754,20 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "dynamic": {
+                                "type": "string",
+                                "enum": [
+                                  "selected"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "dynamic"
+                            ]
                           }
                         ]
                       },
@@ -877,6 +942,20 @@
                           }
                         ]
                       }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "dynamic": {
+                          "type": "string",
+                          "enum": [
+                            "selected"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "dynamic"
+                      ]
                     }
                   ]
                 },
@@ -1057,6 +1136,20 @@
                     }
                   ]
                 }
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "dynamic": {
+                    "type": "string",
+                    "enum": [
+                      "selected"
+                    ]
+                  }
+                },
+                "required": [
+                  "dynamic"
+                ]
               }
             ]
           },
@@ -1213,7 +1306,7 @@
       ]
     },
     "deepworkGuardMode": {
-      "description": "Deepwork guard mode. \"shadow\" (default) records receipts and claim markers under .slim/deepwork/.runtime/ but never blocks; \"enforce\" additionally blocks completion writes whose tombstone references artifacts with no recorded receipt. The guard itself is disabled by listing \"deepwork-guard\" in disabled_hooks.",
+      "description": "Deepwork guard mode. \"shadow\" (default) records receipts and claim markers under .local/.slim/deepwork/.runtime/ but never blocks; \"enforce\" additionally blocks completion writes whose tombstone references artifacts with no recorded receipt. The guard itself is disabled by listing \"deepwork-guard\" in disabled_hooks.",
       "type": "string",
       "enum": [
         "shadow",
@@ -1447,7 +1540,7 @@
         },
         "wallClockTimeoutMs": {
           "default": 0,
-          "description": "Explicit opt-in wall-clock deadline for native task(..., background: true) child sessions. 0 disables supervision; finite values are 60,000–2,147,483,647ms.",
+          "description": "Explicit opt-in wall-clock deadline for native background task child sessions. Top-level task calls default to background execution; managed subsessions default to foreground execution. Use background: true or background: false to override. 0 disables supervision; finite values are 60,000–2,147,483,647ms.",
           "anyOf": [
             {
               "type": "number",
@@ -1776,7 +1869,7 @@
           },
           "wrapperModel": {
             "type": "string",
-            "pattern": "^[^/\\s]+\\/.+$"
+            "description": "Provider-qualified model reference: provider/model[#variant]. The first slash separates the provider; remaining slashes and all colons belong to the model ID. Only # separates the variant."
           },
           "timeoutMs": {
             "default": 0,
@@ -1803,6 +1896,14 @@
     },
     "tmux": {
       "not": {}
+    },
+    "resource_prefixes": {
+      "description": "Ordered project-local resource roots. Defaults to .local, .local/.slim, and .opencode; [] disables discovery.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+      }
     }
   },
   "title": "oh-my-opencode-slim",

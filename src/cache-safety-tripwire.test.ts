@@ -56,6 +56,10 @@ const ALLOWLIST = new Map<string, string>([
     'Date.now() records lastReadAt for internal recency ordering; formatted prompt output (background job board) is confined to the volatile trailing message.',
   ],
   [
+    'hooks/task-session-manager/index.ts',
+    'Date.now() supplies only the on-disk snapshot envelope updatedAt in applyMutation; the persisted envelope is never rendered into prompt content.',
+  ],
+  [
     'hooks/task-session-manager/event-router.ts',
     'Date.now() captures idleObservedAt to detect post-idle busy recovery from foreground-fallback re-prompts; never serialized into prompt content.',
   ],
@@ -93,7 +97,7 @@ const ALLOWLIST = new Map<string, string>([
   ],
   [
     'hooks/deepwork-guard/index.ts',
-    'Date.now() timestamps claim markers and receipts under .slim/deepwork/.runtime/ (machine-owned bookkeeping the workflow never reads); the completion gate deny message carries only slugs and paths, never timestamps.',
+    'Date.now() timestamps claim markers and receipts under .local/.slim/deepwork/.runtime/ (machine-owned bookkeeping the workflow never reads); the completion gate deny message carries only slugs and paths, never timestamps.',
   ],
 ]);
 

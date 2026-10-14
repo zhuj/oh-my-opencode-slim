@@ -2,9 +2,9 @@
 
 import { describe, expect, mock, spyOn, test } from 'bun:test';
 import type { SpawnSyncReturns } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { withTmpDirSync } from '../test-utils';
 import {
   fetchLatestVersion,
   getOpenCodeVersion,
@@ -15,9 +15,7 @@ import {
 
 describe('system', () => {
   test('resolves opencode in ~/.opencode/bin', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'opencode-system-test-'));
-
-    try {
+    withTmpDirSync((dir) => {
       const opencodePath = join(dir, '.opencode', 'bin', 'opencode');
       mkdirSync(join(dir, '.opencode', 'bin'), { recursive: true });
       writeFileSync(opencodePath, 'placeholder');
@@ -29,9 +27,7 @@ describe('system', () => {
           PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
         }),
       ).toBe(opencodePath);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test('isOpenCodeInstalled returns boolean', async () => {

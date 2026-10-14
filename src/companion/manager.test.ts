@@ -8,8 +8,8 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   CompanionManager,
   companionSessionIdForDirectory,
@@ -21,7 +21,7 @@ import {
 } from './manager';
 
 // Point writes at a temp dir so tests don't touch the real state file.
-const TEST_DIR = path.join(os.tmpdir(), `companion-test-${process.pid}`);
+const TEST_DIR = createTmpDir();
 const XDG_DIR = path.join(TEST_DIR, 'xdg');
 const managers: CompanionManager[] = [];
 
@@ -49,7 +49,7 @@ afterEach(() => {
   for (const manager of managers.splice(0)) {
     manager.onExit();
   }
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTmpDir(TEST_DIR);
   if (previousXdg === undefined) delete process.env.XDG_DATA_HOME;
   else process.env.XDG_DATA_HOME = previousXdg;
   if (previousXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME;

@@ -1,4 +1,9 @@
 import { AGENT_ALIASES } from '../config/constants';
+import {
+  assertSkillIdentifier,
+  assertSkillNames,
+  assertSkillPattern,
+} from '../utils/skill-policy-validation';
 import { CUSTOM_SKILLS } from './custom-skills';
 
 /**
@@ -38,6 +43,7 @@ export function getDefaultGrantedSkillNames(agentName: string): string[] {
   const canonicalAgentName = AGENT_ALIASES[agentName] ?? agentName;
   const names: string[] = [];
   for (const skill of [...CUSTOM_SKILLS, ...PERMISSION_ONLY_SKILLS]) {
+    assertSkillIdentifier(skill.name, 'bundled skill registry');
     if (
       skill.allowedAgents.includes('*') ||
       skill.allowedAgents.includes(canonicalAgentName)
@@ -48,57 +54,175 @@ export function getDefaultGrantedSkillNames(agentName: string): string[] {
   return names;
 }
 
-/**
- * Get permission presets for a specific agent based on bundled skills.
- * @param agentName - The name of the agent
- * @param skillList - Optional explicit list of skills to allow (overrides defaults)
- * @returns Permission rules for the skill permission type
- */
+/** Internal selections retain source identity after directive folding. */
+export type SkillSelectionEntry =
+  | {
+      readonly kind: 'literal';
+      readonly name: string;
+      readonly effect: 'allow';
+    }
+  | {
+      readonly kind: 'directive';
+      readonly name: string;
+      readonly effect: 'allow' | 'ask' | 'deny';
+      readonly token: string;
+    };
+export type SkillSelection = readonly SkillSelectionEntry[];
+
+function directiveSelection(
+  tokens: readonly string[],
+): Extract<SkillSelectionEntry, { kind: 'directive' }>[] {
+  assertSkillNames(tokens, 'skill directives', true);
+  return tokens.map((token) => ({
+    kind: 'directive',
+    token,
+    name: /^[!?]/.test(token) ? token.slice(1) : token,
+    effect: token.startsWith('!')
+      ? 'deny'
+      : token.startsWith('?')
+        ? 'ask'
+        : 'allow',
+  }));
+}
+
+function literalSelection(names: readonly string[]): SkillSelectionEntry[] {
+  assertSkillNames(names, 'literal skill IDs');
+  return names.map((name) => ({ kind: 'literal', name, effect: 'allow' }));
+}
+
+function defaultSkillSelection(
+  agentName: string,
+  includeNamedGrants = true,
+): SkillSelection {
+  const grants = literalSelection(getDefaultGrantedSkillNames(agentName));
+  return agentName === 'orchestrator'
+    ? [...directiveSelection(['*']), ...(includeNamedGrants ? grants : [])]
+    : grants;
+}
+
+/** Compatibility view only; never re-parse this lossy view as directives. */
+export function skillSelectionValues(selection: SkillSelection): string[] {
+  return selection.map((entry) =>
+    entry.kind === 'directive' ? entry.token : entry.name,
+  );
+}
+
+export function getSkillPermissionsForSelection(
+  selection: SkillSelection,
+  disabledSkillNames: readonly string[] = [],
+): Record<string, 'allow' | 'ask' | 'deny'> {
+  assertSkillNames(disabledSkillNames, 'disabled_skills');
+  const disabled = new Set(
+    Array.isArray(disabledSkillNames) ? disabledSkillNames : [],
+  );
+  const permissions: Record<string, 'allow' | 'ask' | 'deny'> = { '*': 'deny' };
+  for (const entry of selection) {
+    switch (entry.kind) {
+      case 'literal':
+        assertSkillIdentifier(entry.name, 'resolved skill ID');
+        break;
+      case 'directive':
+        assertSkillPattern(entry.name, 'resolved skill directive');
+        break;
+    }
+    if (
+      entry.effect !== 'allow' ||
+      entry.name === '*' ||
+      !disabled.has(entry.name)
+    )
+      Object.defineProperty(permissions, entry.name, {
+        value: entry.effect,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+  }
+  for (const name of disabled)
+    Object.defineProperty(permissions, name, {
+      value: 'deny',
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  return permissions;
+}
+
+/** Explicit lists are config directives; registry defaults are literal IDs. */
 export function getSkillPermissionsForAgent(
   agentName: string,
   skillList?: readonly string[],
   disabledSkillNames?: readonly string[],
 ): Record<string, 'allow' | 'ask' | 'deny'> {
-  const disabledSkills = new Set(
-    Array.isArray(disabledSkillNames) ? disabledSkillNames : [],
+  const selection =
+    skillList === undefined
+      ? defaultSkillSelection(agentName)
+      : directiveSelection(skillList);
+  return getSkillPermissionsForSelection(selection, disabledSkillNames);
+}
+
+export function resolveSkillSelection(input: {
+  readonly agentName: string;
+  readonly base?: readonly string[];
+  readonly add?: readonly string[];
+  readonly remove?: readonly string[];
+  readonly defaults?: readonly string[];
+  readonly localNames?: readonly string[];
+}): SkillSelection {
+  const base = directiveSelection(input.base ?? []);
+  const add = directiveSelection(input.add ?? []);
+  directiveSelection(input.remove ?? []);
+  const defaults =
+    input.defaults === undefined
+      ? defaultSkillSelection(
+          input.agentName,
+          !input.add?.length &&
+            !input.remove?.length &&
+            !input.localNames?.length,
+        )
+      : literalSelection(input.defaults);
+  const locals = literalSelection(input.localNames ?? []);
+  const remove = new Set(input.remove ?? []);
+  const removedNames = new Set(
+    [...remove].filter((token) => !/^[!?]/.test(token)),
   );
-
-  // Orchestrator gets all skills by default, others are restricted
-  const permissions: Record<string, 'allow' | 'ask' | 'deny'> = {
-    '*': agentName === 'orchestrator' ? 'allow' : 'deny',
-  };
-
-  // If the user provided an explicit skill list (even empty), honor it
-  if (skillList) {
-    permissions['*'] = 'deny';
-    for (const name of skillList) {
-      if (name === '*') {
-        permissions['*'] = 'allow';
-      } else if (name.startsWith('!')) {
-        permissions[name.slice(1)] = 'deny';
-      } else if (!disabledSkills.has(name)) {
-        permissions[name] = 'allow';
-      }
-    }
-    for (const name of disabledSkills) {
-      permissions[name] = 'deny';
-    }
-    return permissions;
+  const remaining = (input.base === undefined ? defaults : base).filter(
+    (entry) =>
+      entry.kind === 'directive'
+        ? !remove.has(entry.token)
+        : !removedNames.has(entry.name),
+  );
+  const excluded = new Set(
+    remaining
+      .filter((entry) => entry.kind === 'directive' && entry.effect === 'deny')
+      .map((entry) => entry.name),
+  );
+  const selected = new Map<string, SkillSelectionEntry>();
+  for (const entry of [
+    ...remaining,
+    ...add.filter(
+      (entry) => !excluded.has(entry.token) && !remove.has(entry.token),
+    ),
+    ...locals.filter(
+      (entry) => !excluded.has(entry.name) && !removedNames.has(entry.name),
+    ),
+  ]) {
+    const key = JSON.stringify([entry.name, entry.effect]);
+    if (selected.get(key)?.kind !== 'directive') selected.set(key, entry);
   }
-
-  // Apply permissions for the skills the agent is granted by default
-  // (bundled custom skills + externally-managed skills)
-  for (const name of getDefaultGrantedSkillNames(agentName)) {
-    if (!disabledSkills.has(name)) {
-      permissions[name] = 'allow';
+  const list = [...selected.values()];
+  if (list.some((entry) => entry.name === '*' && entry.effect === 'allow')) {
+    for (const token of remove) {
+      if (token.startsWith('!')) continue;
+      const exclusion = `!${token}`;
+      if (
+        !list.some(
+          (entry) => entry.kind === 'directive' && entry.token === exclusion,
+        )
+      )
+        list.push(...directiveSelection([exclusion]));
     }
   }
-
-  for (const name of disabledSkills) {
-    permissions[name] = 'deny';
-  }
-
-  return permissions;
+  return list;
 }
 
 /**
@@ -118,9 +242,8 @@ export function getSkillPermissionsForAgent(
  *    implicitly by the wildcard, so it is made explicit by appending the
  *    existing `'!name'` exclusion token - unless already present.
  *
- * The returned token list is consumed by the existing skill permission
- * resolver (`getSkillPermissionsForAgent`), which continues to interpret
- * `'*'` and `'!name'` as before.
+ * This string view cannot encode literal/directive provenance. Policy
+ * compilation must consume `resolveSkillSelection` instead of re-parsing it.
  *
  * Returns `undefined` when nothing is configured to resolve (no base, no
  * additions, no removals) so the agent keeps its default skill behavior.
@@ -132,55 +255,13 @@ export function resolveEffectiveSkills(
   remove: readonly string[] | undefined,
   defaultSkills?: readonly string[],
 ): string[] | undefined {
-  const addList = Array.isArray(add) ? add : [];
-  const removeList = Array.isArray(remove) ? remove : [];
-  if (base === undefined && addList.length === 0 && removeList.length === 0) {
-    return undefined;
-  }
-
-  // Without a base list the working base is the agent's default grants
-  // (orchestrator defaults to allow-all), so additions build on top of
-  // what the agent already gets and removals prune from it.
-  const workingBase =
-    base ??
-    defaultSkills ??
-    (agentName === 'orchestrator'
-      ? ['*']
-      : getDefaultGrantedSkillNames(agentName));
-
-  // Apply explicit token removals before deriving active exclusions. This
-  // is what makes removing '!foo' genuinely lift that inherited exclusion.
-  const removeSet = new Set(removeList);
-  const baseAfterRemoval = workingBase.filter((token) => !removeSet.has(token));
-
-  // Additions must not override exclusions that remain after removals.
-  const excluded = new Set(
-    baseAfterRemoval
-      .filter((token) => token.startsWith('!'))
-      .map((token) => token.slice(1)),
-  );
-
-  const list = [
-    ...new Set([
-      ...baseAfterRemoval,
-      ...addList.filter((name) => !excluded.has(name) && !removeSet.has(name)),
-    ]),
-  ];
-
-  // A plain-name removal that the list grants implicitly via '*' must be
-  // made explicit with the existing '!name' exclusion token, unless the
-  // exclusion is already present.
-  if (list.includes('*')) {
-    for (const name of new Set(removeList)) {
-      if (name.startsWith('!')) {
-        continue;
-      }
-      const exclusion = `!${name}`;
-      if (!list.includes(exclusion)) {
-        list.push(exclusion);
-      }
-    }
-  }
-
-  return list;
+  const selection = resolveSkillSelection({
+    agentName,
+    base,
+    add,
+    remove,
+    defaults: defaultSkills,
+  });
+  if (base === undefined && !add?.length && !remove?.length) return undefined;
+  return skillSelectionValues(selection);
 }

@@ -58,6 +58,11 @@ function commands(): string[][] {
   return crossSpawnMock.mock.calls.map((call) => call[0] as string[]);
 }
 
+/** Every `pane run` argv recorded so far; its last element is the command. */
+function paneRunCommands(): string[][] {
+  return commands().filter((command) => command.includes('run'));
+}
+
 describe('HerdrMultiplexer', () => {
   const originalHerdrEnv = process.env.HERDR_ENV;
   const originalHerdrPaneId = process.env.HERDR_PANE_ID;
@@ -968,6 +973,104 @@ describe('HerdrMultiplexer', () => {
       { paneId: 'w1:p1', title: '' },
       { paneId: 'w1:p2', title: 'omosc:123:ses_abc' },
     ]);
+  });
+
+  test('viewerSurface mini renders the minimal viewer with no directory argument', async () => {
+    const { HerdrMultiplexer } = await importFreshHerdr();
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+
+    await herdr.spawnPane(
+      'session-1',
+      'Mini worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+    );
+
+    // `mini` takes no directory argument: the pane cwd (which herdr already
+    // sets) is the only way the project is selected.
+    expect(paneRunCommands().at(-1)?.at(-1)).toBe(
+      "opencode mini --session 'session-1'",
+    );
+  });
+
+  test('viewerSurface mini keeps the v2-remote server flag and never the secret', async () => {
+    const { HerdrMultiplexer } = await importFreshHerdr();
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+
+    await herdr.spawnPane(
+      'session-1',
+      'Mini remote worker',
+      'http://localhost:4096',
+      '/repo',
+      {
+        viewerFlavor: 'v2-remote',
+        viewerSurface: 'mini',
+        viewerPassword: 'pw',
+      },
+    );
+
+    expect(paneRunCommands().at(-1)?.at(-1)).toBe(
+      "opencode mini --server 'http://localhost:4096' --session 'session-1'",
+    );
+
+    // The secret still travels only as the split-time `--env` entry.
+    const split = commands().find((command) => command.includes('split'));
+    expect(split?.indexOf('--env')).toBeGreaterThan(-1);
+    expect(split?.filter((arg) => arg.includes('pw'))).toEqual([
+      'OPENCODE_PASSWORD=pw',
+    ]);
+  });
+
+  test('viewerSurface mini keeps the v1 attach form and gains no cwd flag', async () => {
+    const { HerdrMultiplexer } = await importFreshHerdr();
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+
+    await herdr.spawnPane(
+      'session-1',
+      'Mini attach worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v1', viewerSurface: 'mini' },
+    );
+
+    // v1 carries `--dir` on the command line, so the pane cwd is not needed.
+    expect(paneRunCommands().at(-1)?.at(-1)).toBe(
+      "opencode attach 'http://localhost:4096' --session 'session-1' " +
+        "--dir '/repo' --mini",
+    );
+    // herdr's pre-existing `--cwd` is untouched: exactly one, unchanged.
+    expect(commands().find((command) => command.includes('split'))).toEqual([
+      '/usr/bin/herdr',
+      'pane',
+      'split',
+      'w1:p1',
+      '--direction',
+      'right',
+      '--cwd',
+      '/repo',
+      '--no-focus',
+    ]);
+  });
+
+  test('viewerSurface tui is byte-identical to omitting it', async () => {
+    const { HerdrMultiplexer } = await importFreshHerdr();
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+
+    await herdr.spawnPane('session-1', 'A', 'http://localhost:4096', '/repo', {
+      viewerFlavor: 'v2-shared',
+    });
+    const omitted = paneRunCommands().at(-1)?.at(-1);
+
+    // Same inputs, so any difference is attributable to `viewerSurface` alone.
+    await herdr.spawnPane('session-1', 'A', 'http://localhost:4096', '/repo', {
+      viewerFlavor: 'v2-shared',
+      viewerSurface: 'tui',
+    });
+    const explicit = paneRunCommands().at(-1)?.at(-1);
+
+    expect(omitted).toBe("opencode --session 'session-1' '/repo'");
+    expect(explicit).toBe(omitted);
   });
 
   test('sweep closes only the dead-owner terminal pane (FR-8)', async () => {

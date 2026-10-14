@@ -236,7 +236,8 @@ export function createRevivedRunTracker(options: {
       !current ||
       current.generation !== record.generation ||
       current.terminalRevision !== record.terminalRevision ||
-      current.state === 'running'
+      current.state === 'running' ||
+      current.pendingPromptAdmissionID !== undefined
     )
       return;
     if (record.state === 'cancelled') {

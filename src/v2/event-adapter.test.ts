@@ -12,6 +12,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { createCacheMonitorHook } from '../hooks/cache-monitor';
+import { testSnapshotStore } from '../hooks/task-session-manager/test-snapshot-store';
 import { mapV2EventToV1 } from './event-adapter';
 
 /**
@@ -550,6 +551,7 @@ describe('mapV2EventToV1 session.execution.* lifecycle synthesis', () => {
     const hook = createTaskSessionManagerHook(createHookCtx(), {
       maxSessionsPerAgent: 2,
       backgroundJobBoard: board,
+      backgroundJobSnapshotStore: testSnapshotStore,
       shouldManageSession: (id: string) => id === 'parent-1',
     });
     board.registerLaunch({
@@ -1139,6 +1141,7 @@ describe('mapV2EventToV1 form → question bridge', () => {
     );
     const hook = createTaskSessionManagerHook(createHookCtx(), {
       maxSessionsPerAgent: 2,
+      backgroundJobSnapshotStore: testSnapshotStore,
       shouldManageSession: (id: string) => id === 'parent-1',
     });
     const asked = mapV2EventToV1({
@@ -1314,6 +1317,7 @@ describe('mapV2EventToV1 permission field mapping', () => {
     );
     const hook = createTaskSessionManagerHook(createHookCtx(), {
       maxSessionsPerAgent: 2,
+      backgroundJobSnapshotStore: testSnapshotStore,
       shouldManageSession: (id: string) => id === 'parent-1',
     });
     const asked = mapV2EventToV1({
@@ -1409,6 +1413,7 @@ describe('mapV2EventToV1 session.deleted synthesis', () => {
     const hook = createTaskSessionManagerHook(createHookCtx(), {
       maxSessionsPerAgent: 2,
       backgroundJobBoard: board,
+      backgroundJobSnapshotStore: testSnapshotStore,
       shouldManageSession: (id: string) => id === 'parent-1',
     });
     board.registerLaunch({

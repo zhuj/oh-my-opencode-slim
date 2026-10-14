@@ -1,14 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import {
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RuntimeConfig } from '../config/runtime';
+import { createTmpDir, removeTmpDir, withTmpDir } from '../test-utils';
 import {
   discoverDesiredV2Mcps,
   discoverOnDiskOpenCodeMcps,
@@ -56,8 +50,34 @@ function writeSkill(path: string, name: string): void {
 }
 
 describe('marketplace host preflight', () => {
+  test('joins registered skill inventory with disk skills and filters disabled names', async () => {
+    await withTmpDir(async (root) => {
+      // Given
+      setConfigHome(root);
+      const skills = join(root, 'skills');
+      writeSkill(join(skills, 'shared', 'SKILL.md'), 'shared');
+      const runtime = RuntimeConfig.createDetached(root, {
+        disabled_skills: ['disabled-project'],
+      });
+      runtime.setProjectSkillPermissionNames(['discovered-only']);
+
+      // When
+      const names = discoverPreflightSkills(runtime, root, {
+        extraDirectories: [skills],
+        registeredSkillNames: [
+          'shared',
+          'registered-project',
+          'disabled-project',
+        ],
+      });
+
+      // Then
+      expect(names).toEqual(['shared', 'registered-project']);
+    });
+  });
+
   test('merges user and project config with JSONC precedence within each layer', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     const project = join(root, 'project');
     const userDir = join(root, 'xdg', 'opencode');
     try {
@@ -89,12 +109,12 @@ describe('marketplace host preflight', () => {
       expect(mcp.inherited).toBeDefined();
       expect(mcp.winner.url).toBe('https://jsonc');
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('current project MCP settings override ancestor settings', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     const project = join(root, 'project');
     try {
       setConfigHome(root);
@@ -149,12 +169,12 @@ describe('marketplace host preflight', () => {
       expect(names).toContain('projectEnables');
     } finally {
       RuntimeConfig.reset(project);
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('parses JSONC environment content and ignores malformed content', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     try {
       setConfigHome(root);
       process.env.OPENCODE_CONFIG_CONTENT =
@@ -166,12 +186,12 @@ describe('marketplace host preflight', () => {
       expect(loadMergedOpenCodeConfig(root).mcp).toBeUndefined();
     } finally {
       RuntimeConfig.reset(root);
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('rejects malformed host MCP definitions and disabled entries', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     try {
       setConfigHome(root);
       process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
@@ -187,12 +207,12 @@ describe('marketplace host preflight', () => {
       expect(names).not.toContain('disabled');
     } finally {
       RuntimeConfig.reset(root);
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('discovers block-scalar skills and confines symlinks to each root', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     const skillRoot = join(root, 'skills');
     const outside = join(root, 'outside');
     try {
@@ -204,12 +224,12 @@ describe('marketplace host preflight', () => {
         'block-skill',
       ]);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('filters disabled runtime skills and MCPs', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     const skills = join(root, 'skills');
     try {
       setConfigHome(root);
@@ -222,16 +242,20 @@ describe('marketplace host preflight', () => {
         disabled_skills: ['one'],
         disabled_mcps: ['custom'],
       });
-      expect(discoverPreflightSkills(runtime, root, [skills])).toEqual(['two']);
+      expect(
+        discoverPreflightSkills(runtime, root, {
+          extraDirectories: [skills],
+        }),
+      ).toEqual(['two']);
       expect(discoverPreflightMcps(runtime, root)).not.toContain('custom');
     } finally {
       RuntimeConfig.reset(root);
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('extracts direct v2 MCP entries and classifies manifest requirements', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     const project = join(root, 'project');
     const userConfig = join(root, 'xdg', 'opencode');
     try {
@@ -311,7 +335,7 @@ describe('marketplace host preflight', () => {
       });
     } finally {
       RuntimeConfig.reset(project);
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 });

@@ -18,7 +18,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 | Path | Role |
 |---|---|
 | `package.json` | Package manifest, dependency graph, release scripts, published file list. |
-| `src/index.ts` | Main plugin bootstrap: wires agents (incl. dynamic councillors), tools, MCPs, hooks, shared background job board + supervisor, interview support, cache monitor, orchestrator-wake scheduler, TUI preset switching, and health checks. Does not touch multiplexer pane lifecycle (client-only). Exports the dual `default.server`/`default.setup` so v1 and v2 hosts share one build. |
+| `src/index.ts` | Main plugin bootstrap: wires agents (incl. dynamic councillors), tools, MCPs, hooks, shared background job board + supervisor, interview support, cache monitor, the v1 orchestrator-wake scheduler, TUI preset switching, and health checks. V2 uses native terminal notifications and has no plugin wake scheduler. Does not touch multiplexer pane lifecycle (client-only). Exports the dual `default.server`/`default.setup` so v1 and v2 hosts share one build. |
 | `src/cli/index.ts` | CLI entrypoint for installation/bootstrap workflows. |
 | `src/config/schema.ts` | Source-of-truth runtime config schema used by validation and schema generation. |
 | `src/config/runtime.ts` | Per-directory `RuntimeConfig` singleton: derived getters over the frozen plugin config, pre-mutation host-config snapshot, and preset/model overrides. |
@@ -44,7 +44,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 | `src/hooks/task-session-manager/` | Resumable `task` session tracking: machine-side job board (never rendered), terminal-delivery observation, short alias resolution, live runtime-status reads, HITL wait gating, fallback-observation handoff, same-provider background conversion, and revived-run tracking. | [View Map](src/hooks/task-session-manager/codemap.md) |
 | `src/hooks/tool-loop-guard/` | Detects byte-identical repeated tool calls per session; corrective warning at 3, hard block at 5, with task-lifecycle exemptions and per-turn wait-tool counting. | [View Map](src/hooks/tool-loop-guard/codemap.md) |
 | `src/hooks/cache-monitor/` | Observation-only runtime watchdog over provider cache telemetry (`tokens.cache.read/write`) that warns on prompt-cache busts and frozen-prefix plateaus. | [View Map](src/hooks/cache-monitor/codemap.md) |
-| `src/hooks/orchestrator-wake/` | Periodic orchestrator wake scheduler: after continuous parent idle, sends a static internal wake prompt when incomplete TODOs remain (v1) or when background children lack a terminal outcome (v2 children-driven degraded mode); process-global one-flight/no-progress gate. | [View Map](src/hooks/orchestrator-wake/codemap.md) |
+| `src/hooks/orchestrator-wake/` | V1-only orchestrator wake scheduler: after continuous parent idle, sends static internal wakes for incomplete TODOs and event-driven terminal/child-input updates; process-global one-flight/no-progress gate. V2 creates no plugin wake scheduler and uses native notifications plus `task_status` pull. | [View Map](src/hooks/orchestrator-wake/codemap.md) |
 | `src/hooks/loop-command/` | `/loop` runtime command: extracts goal/successCriteria/maxAttempts and drives an iterative retry loop with a per-run history directory. | [View Map](src/hooks/loop-command/codemap.md) |
 | `src/interview/` | `/interview` feature: per-session and dashboard prompt/state orchestration, persistence, local UI, and cross-process coordination. | [View Map](src/interview/codemap.md) |
 | `src/mcp/` | Built-in MCP registry and per-provider MCP definitions. | [View Map](src/mcp/codemap.md) |
@@ -58,9 +58,9 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 | `src/skills/codemap/` | Repository-mapping skill package and codemap state-management script. | [View Map](src/skills/codemap/codemap.md) |
 | `src/skills/clonedeps/` | Workflow-only dependency source mirroring skill that routes discovery/ref resolution through explorer and direct orchestrator git operations. | [View Map](src/skills/clonedeps/codemap.md) |
 | `src/skills/simplify/` | Behavior-preserving simplification skill package. | [View Map](src/skills/simplify/codemap.md) |
-| `src/tools/` | Tool factory surface for AST-grep, smartfetch, ACP, and task lifecycle controls (cancel/message/status/result/revive/wait-for-user), plus shared task-status policy and activity trackers and on-disk preset-switching helpers. | [View Map](src/tools/codemap.md) |
+| `src/tools/` | Tool factory surface for AST-grep, webfetch, model discovery, ACP, task lifecycle and admission-queue controls, plus preset switching. Results and diagnostics use `task_status`; `task_revive` and `wait_for_user` are v1-only. | [View Map](src/tools/codemap.md) |
 | `src/tools/ast-grep/` | AST-grep binary management and AST-aware search/replace tool flow. | [View Map](src/tools/ast-grep/codemap.md) |
-| `src/tools/smartfetch/` | Fetch/extract/cache pipeline for web content and secondary-model summarization. | [View Map](src/tools/smartfetch/codemap.md) |
+| `src/tools/smartfetch/` | Fetch/extract/cache pipeline for web content and binary saving; v3.0.6 removed secondary-model orchestration and inline-image routing. | [View Map](src/tools/smartfetch/codemap.md) |
 | `src/utils/` | Cross-cutting helpers: logging, session metadata, background job board/store/coordinator/supervisor, live session-status reads, in-process opencode client access, task parsing, env, compat/zip, and client call-shape contracts. | [View Map](src/utils/codemap.md) |
 | `src/v2/` | OpenCode v2 (`opencode2`) adapter: bridges the v1 plugin factory into v2's promise-plugin transform/runtime-hook API. Loaded via `default.setup`; v1 uses `default.server` unchanged. | [View Map](src/v2/codemap.md) |
 | `scripts/` | Build/release validation and generated-artifact maintenance scripts. | [View Map](scripts/codemap.md) |
@@ -75,7 +75,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
    - Agent definitions (incl. dynamic councillors) are produced by `src/agents/`.
    - Tool factories from `src/tools/` and MCP definitions from `src/mcp/` are registered.
    - Hooks from `src/hooks/` are attached; the observation-only cache monitor is created before config loads and sees every event.
-   - Delegation orchestration, interview support, task-session aliasing, orchestrator-wake scheduling, TUI preset switching, and the init health check are initialized. (Multiplexer pane lifecycle is initialized by the TUI client in `src/tui.ts`, never by the server entry.)
+   - Delegation orchestration, interview support, task-session aliasing, the v1 orchestrator-wake scheduler, TUI preset switching, and the init health check are initialized. (Multiplexer pane lifecycle is initialized by the TUI client in `src/tui.ts`, never by the server entry.)
 
 2. **Interactive request handling**
    - The orchestrator prompt drives routing decisions.
@@ -86,7 +86,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 3. **Delegated execution**
    - Native OpenCode background tasks are parsed from `task` output and tracked in the shared background job board (board + store + coordinator + supervisor in `src/utils/`).
    - `src/hooks/task-session-manager/` updates job-board state, resolves short aliases, and observes terminal deliveries in the parent's history (the board itself is never rendered); runtime-status reconciliation and the shared terminal-publication gate (`background-job-terminal-gate.ts`) keep board state honest against live session status.
-   - `src/hooks/orchestrator-wake/` periodically nudges an idle parent orchestrator when incomplete TODOs remain, pushes later terminal results as one-shot deltas, and reacts to jobs that stop without a terminal result.
+    - `src/hooks/orchestrator-wake/` is v1-only: it periodically nudges an idle parent when incomplete TODOs remain, pushes later terminal results as one-shot deltas, and reacts to jobs that stop without a terminal result. V2 has no plugin wake scheduler; the host notifier handles terminal delivery and `task_status` is the pull channel.
    - The TUI client (`src/tui.ts` → `src/multiplexer/client/`) optionally mirrors those sessions into tmux, Zellij, Herdr, cmux, kitty, or WezTerm panes/surfaces; each client anchors new panes to its own pane resolved from the client environment at spawn time (never a shared registry).
    - Results flow back into the parent session through notifications/output polling.
 
@@ -106,10 +106,10 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 - `src/tools/preset-switch.ts` + `src/tui-preset.ts` + `src/preset-editor-domain.ts` implement `/preset` switching: the preset name (or preset edits) is persisted to the user config file. Agent definitions are never hot-swapped mid-session; on v2 hosts the write requests the live refresh and only the inference fields (`model`, `variant`, `temperature`, `options`) apply to NEW child sessions (frozen for each child before its first request via the awaited `session.prompt` hook) plus the sidebar, while prompts/tools/permissions/skills/MCPs stay frozen for existing sessions; a malformed config is rejected before any swap (last-known-good state kept). v1 hosts apply on the next reload. The `preset-editor-domain` module holds the pure domain helpers (name validation, sentinel-safe choices, descriptions, inheritance, immutable edits, parsing) shared by the v1 JSX editor and the v2 promise-dialog editor.
 - `src/hooks/task-session-manager/` depends on `src/utils/background-job-board.ts`, `background-job-store.ts`, `background-job-coordinator.ts`, `background-job-supervisor.ts`, `session-runtime-status.ts`, and `task.ts`, and injects prompt content only through `src/hooks/cache-safe-injection.ts`.
 - `src/hooks/cache-monitor/` watches `message.updated` cache telemetry across all sessions and logs prompt-cache-bust/plateau warnings; it is observation-only and never mutates messages.
-- `src/hooks/orchestrator-wake/` reads host todo/children/status APIs (v1)
-  or `session.list({parentID})` + event tracking (v2 degraded mode), gates on
-  the task-session-manager's `hasInputWait` and continuation-model seams, and
-  shares one-flight/no-progress state via a process-global wake gate.
+- `src/hooks/orchestrator-wake/` reads host todo/children/status APIs and gates
+  on the task-session-manager's `hasInputWait` and continuation-model seams on
+  v1. V2 creates no plugin wake scheduler; native notifications handle terminal
+  delivery and `task_status` remains the pull channel.
 - `src/v2/` wraps the v1 factory for the v2 host: `setup(ctx)` shims a v1 `PluginInput`, runs the v1 `config()` hook, and adapts agent/tool/command/hook registrations into v2 domains.
 - Skill permissions are projected into agent/session configuration; native v1/v2 hosts discover and filter skills from those finalized permissions, denying hidden skills and asking for discoverable ones. The plugin does not rewrite `<available_skills>` in conversation text.
 - `src/interview/` hooks into plugin command/event surfaces exposed by `src/index.ts`.
@@ -124,7 +124,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 - `AGENTS.md`: agent operating conventions for this repository.
 - `biome.json`: formatting/lint policy.
 - `tsconfig.json`: TypeScript compiler settings.
-- `.slim/codemap.json`: codemap change-detection state for this repository.
+- `.local/.slim/codemap.json`: codemap change-detection state for this repository.
 - `scripts/verify-release-artifact.ts`: release artifact validation script.
 - `src/health-check.ts`: plugin init health-check thresholds (`HEALTH_CHECK`) and `minimumExpectedToolCount` (accounts for disabled baseline tools); kept internal — never re-exported from the package root — so the legacy plugin loader cannot mis-invoke helpers as plugin factories (issue #894).
 - `src/plugin-entry.ts`: `INSTALLER_MANAGED_PLUGIN_OPTION` marker and `PluginEntry` type for installer-managed config entries.

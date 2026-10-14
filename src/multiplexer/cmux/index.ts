@@ -6,9 +6,11 @@
  * - explicit control plane: `--socket <path>` / `--session <name>`;
  * - anchor: `CMUX_TUI_TERMINAL_ID` → `terminal <id> show` (tab) →
  *   `tab <id> show` (pane, tab name, active flag);
- * - spawn: `pane <sel> run --on-exit keep --name <parent/child> -- <argv>`,
- *   which appends a sibling tab inside the parent pane and names it at
- *   creation, then a best-effort `tab <pre-spawn active tab> focus`;
+ * - spawn: `pane <sel> run --on-exit keep --name <parent/child> [--cwd <dir>]
+ *   -- <argv>`, which appends a sibling tab inside the parent pane and names
+ *   it at creation, then a best-effort `tab <pre-spawn active tab> focus`;
+ *   `--cwd` appears only for the viewer modes that carry no directory
+ *   argument (`viewerNeedsPaneCwd`), never for `tui`;
  * - close: `terminal <sel> close` — the only primitive that ends the PTY;
  * - sweep: `terminal list` → `terminal <sel> process show` → scan the launch
  *   argv for the `# omosc:<pid>:<childSessionId>` data marker.
@@ -134,12 +136,17 @@ export interface CmuxClient {
   ): Promise<CmuxResult<CmuxAnchor>>;
   /** `tab list` (used only to locate the pane's active sibling tab). */
   listTabs(target: CmuxTarget): Promise<CmuxResult<CmuxTab[]>>;
-  /** `pane <sel> run --on-exit keep --name <name> -- <argv>`. */
+  /**
+   * `pane <sel> run --on-exit keep --name <name> [--cwd <dir>] -- <argv>`.
+   * `cwd` is set only when the viewer command carries no directory argument
+   * (`viewerNeedsPaneCwd`), so no existing `tui` spawn gains a pane cwd.
+   */
   runInPane(
     target: CmuxTarget,
     paneId: string,
     argv: string[],
     name: string,
+    cwd?: string,
   ): Promise<CmuxResult<CmuxRunResult>>;
   /** `tab <sel> focus` (restores the pre-spawn active tab). */
   focusTab(target: CmuxTarget, tabId: string): Promise<CmuxResult<true>>;
@@ -310,11 +317,17 @@ export class CmuxMultiplexer implements Multiplexer {
       // the structured diagnostic was already emitted (once per process).
       return { success: false, error: 'unavailable' };
     }
+    // `opencode mini` takes no directory argument, so the v2 flavors select the
+    // project through the pane cwd instead. The flag is added only for that
+    // case: a missing directory silently degrades to $HOME, which would move
+    // every existing `tui` view.
+    const viewerCwd = viewerNeedsPaneCwd(options) ? directory : undefined;
     const created = await this.client.runInPane(
       target,
       anchor.value.paneId,
       attachArgv,
       name,
+      viewerCwd,
     );
     if (!created.ok) {
       log('[cmux-tui] spawnPane: run failed', {
@@ -752,6 +765,7 @@ export class CliCmuxClient implements CmuxClient {
     paneId: string,
     argv: string[],
     name: string,
+    cwd?: string,
   ): Promise<CmuxResult<CmuxRunResult>> {
     const result = await this.exec(target, [
       'pane',
@@ -761,6 +775,7 @@ export class CliCmuxClient implements CmuxClient {
       'keep',
       '--name',
       name,
+      ...(cwd ? ['--cwd', cwd] : []),
       '--',
       ...argv,
     ]);

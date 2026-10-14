@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
-import * as fsp from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { withTmpDir } from '../../test-utils';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
 import { createBackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from '../../utils/background-task-concurrency';
 import { createTaskSessionManagerHook } from './index';
 import { createPendingCallTracker } from './pending-call-tracker';
+import { testSnapshotStore } from './test-snapshot-store';
 
 const PARENT = 'parent-1';
 const activeHooks: Array<{
@@ -61,10 +61,11 @@ function createHook(
   const hook = createTaskSessionManagerHook(
     {
       client: { session: { status: mock(async () => ({ data: {} })) } },
-      directory: '/tmp',
-      worktree: '/tmp',
+      directory: process.cwd(),
+      worktree: process.cwd(),
     } as never,
     {
+      backgroundJobSnapshotStore: testSnapshotStore,
       maxSessionsPerAgent: 2,
       backgroundJobBoard: board,
       shouldManageSession: () => true,
@@ -499,10 +500,8 @@ describe('parallel same-agent pairing (incident 2026-09-12)', () => {
     // mock.module('../../utils/logger') globally in shared-process
     // runs, so the real logger is only observable with a pristine
     // module registry (same pattern as runtime-status-reconciliation).
-    const logDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'omos-b1-drain-log-'),
-    );
-    const workerSource = `
+    await withTmpDir(async (logDir) => {
+      const workerSource = `
       const { createTaskSessionManagerHook } = await import(
         process.env.HOOK_MODULE_URL
       );
@@ -526,14 +525,14 @@ describe('parallel same-agent pairing (incident 2026-09-12)', () => {
       const hook = createTaskSessionManagerHook(
         {
           client: { session: { status: async () => ({ data: {} }) } },
-          directory: '/tmp',
-          worktree: '/tmp',
+          directory: process.env.OPENCODE_LOG_DIR,
+          worktree: process.cwd(),
         },
         {
           maxSessionsPerAgent: 2,
-          backgroundJobBoard: board,
-          backgroundTaskConcurrency: concurrency,
-          shouldManageSession: () => true,
+      backgroundJobBoard: board,
+      backgroundTaskConcurrency: concurrency,
+      shouldManageSession: () => true,
         },
       );
       const PARENT = 'parent-1';
@@ -603,50 +602,50 @@ describe('parallel same-agent pairing (incident 2026-09-12)', () => {
         }),
       );
     `;
-    const proc = Bun.spawn([process.execPath, '-e', workerSource], {
-      cwd: import.meta.dir,
-      env: {
-        ...process.env,
-        OPENCODE_LOG_DIR: logDir,
-        HOOK_MODULE_URL: pathToFileURL(path.join(import.meta.dir, 'index.ts'))
-          .href,
-        BOARD_MODULE_URL: pathToFileURL(
-          path.join(import.meta.dir, '../../utils/background-job-board.ts'),
-        ).href,
-        CONCURRENCY_MODULE_URL: pathToFileURL(
-          path.join(
-            import.meta.dir,
-            '../../utils/background-task-concurrency.ts',
+      const proc = Bun.spawn([process.execPath, '-e', workerSource], {
+        cwd: import.meta.dir,
+        env: {
+          ...process.env,
+          OPENCODE_LOG_DIR: logDir,
+          HOOK_MODULE_URL: pathToFileURL(path.join(import.meta.dir, 'index.ts'))
+            .href,
+          BOARD_MODULE_URL: pathToFileURL(
+            path.join(import.meta.dir, '../../utils/background-job-board.ts'),
+          ).href,
+          CONCURRENCY_MODULE_URL: pathToFileURL(
+            path.join(
+              import.meta.dir,
+              '../../utils/background-task-concurrency.ts',
+            ),
+          ).href,
+          LOGGER_MODULE_URL: pathToFileURL(
+            path.join(import.meta.dir, '../../utils/logger.ts'),
+          ).href,
+          LOG_FILE_PATH: path.join(
+            logDir,
+            'oh-my-opencode-slim.drain-fallback-b1.log',
           ),
-        ).href,
-        LOGGER_MODULE_URL: pathToFileURL(
-          path.join(import.meta.dir, '../../utils/logger.ts'),
-        ).href,
-        LOG_FILE_PATH: path.join(
-          logDir,
-          'oh-my-opencode-slim.drain-fallback-b1.log',
-        ),
-      },
-      stdout: 'pipe',
-      stderr: 'pipe',
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      if (exitCode !== 0) {
+        console.error(stderr);
+        expect(exitCode).toBe(0);
+      }
+      const counts = JSON.parse(stdout.trim()) as {
+        drainWarnings: number;
+        identityResolutions: number;
+      };
+      // Only after A hits the fallback; after B resolves via the normal
+      // sole-survivor take.
+      expect(counts.drainWarnings).toBe(1);
+      expect(counts.identityResolutions).toBe(0);
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    await fsp.rm(logDir, { recursive: true, force: true });
-    if (exitCode !== 0) {
-      console.error(stderr);
-      expect(exitCode).toBe(0);
-    }
-    const counts = JSON.parse(stdout.trim()) as {
-      drainWarnings: number;
-      identityResolutions: number;
-    };
-    // Only after A hits the fallback; after B resolves via the normal
-    // sole-survivor take.
-    expect(counts.drainWarnings).toBe(1);
-    expect(counts.identityResolutions).toBe(0);
   });
 });

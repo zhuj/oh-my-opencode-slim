@@ -1,16 +1,16 @@
 import {
-  afterAll,
   afterEach,
   beforeEach,
   describe,
   expect,
   mock,
+  spyOn,
   test,
 } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import * as packageManagerModule from '../../utils/package-manager';
+import { createTmpDir, removeTmpDir } from '../../test-utils';
+import * as packageManager from '../../utils/package-manager';
 
 const logMock = mock(() => {});
 
@@ -84,20 +84,7 @@ mock.module('../../utils/compat', () => ({
   isBun: false,
 }));
 
-// bun's mock.module registry is process-global and test files run in
-// filesystem readdir order, so this file's package-manager mock would
-// otherwise leak into src/utils/package-manager.test.ts. Capture the real
-// exports (before mocking) and restore them once this file's tests are done.
-const realPackageExports = { ...packageManagerModule };
-
-mock.module('../../utils/package-manager', () => ({
-  resolvePackageInstallCommand: () => resolvedInstall,
-}));
-
-afterAll(() => {
-  mock.module('../../utils/package-manager', () => realPackageExports);
-});
-
+let resolveInstallSpy: ReturnType<typeof spyOn>;
 let importCounter = 0;
 
 function createCtx() {
@@ -214,6 +201,10 @@ describe('auto-update-checker/index', () => {
     }));
 
     resolvedInstall = BUN_INSTALL;
+    resolveInstallSpy = spyOn(
+      packageManager,
+      'resolvePackageInstallCommand',
+    ).mockImplementation(() => resolvedInstall);
 
     companionUpdaterMocks.ensureCompanionVersion.mockReset();
     companionUpdaterMocks.ensureCompanionVersion.mockImplementation(
@@ -230,7 +221,7 @@ describe('auto-update-checker/index', () => {
   });
 
   afterEach(() => {
-    // Mocks are automatically cleared by Bun's test runner between tests
+    resolveInstallSpy.mockRestore();
   });
 
   test('uses resolved install root for auto-update installs', async () => {
@@ -531,7 +522,7 @@ describe('auto-update-checker/index', () => {
     // Real lock dir on disk, so the release assertion is filesystem state
     // rather than a mock call count. The redirect-error branch returns from
     // inside the try, so only the finally can release this.
-    const lockRoot = mkdtempSync(join(tmpdir(), 'omo-idxlock-'));
+    const lockRoot = createTmpDir();
     const lockDir = join(lockRoot, 'install.lock');
     cacheMocks.acquirePackageUpdateLock.mockImplementation(
       async (): Promise<(() => void) | null> => {
@@ -563,7 +554,7 @@ describe('auto-update-checker/index', () => {
         },
       });
     } finally {
-      rmSync(lockRoot, { recursive: true, force: true });
+      removeTmpDir(lockRoot);
     }
   });
 

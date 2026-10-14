@@ -106,12 +106,12 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
 /** v2.0.5+ model-param guidance, appended at the two `vocab.tool` prompt
  * sites (orchestrator base prompt + council block) when the host's
  * subagent tool supports the optional `model` parameter. */
-const MODEL_PARAM_SENTENCE = ` The subagent tool also accepts an optional \`model\` argument ("providerID/modelID"). Only set it when the user explicitly asks for a specific model or variant; never guess the ID — look it up with the models tool first, filtering to your own provider.`;
+const MODEL_PARAM_SENTENCE = ` The subagent tool also accepts an optional \`model\` argument ("providerID/modelID"). Set it when the user or delegation instructions select a model or variant; never guess the ID — look it up with the models tool first.`;
 
 /** Slim v2 model-param guidance (buildOrchestratorPrompt on v2): the optional
  * `model` parameter note compressed to one routing line. */
 const SLIM_MODEL_PARAM_SENTENCE =
-  'Set `model` only when the user asks; look up IDs with the models tool';
+  'Set `model` when the user or delegation instructions select a model or\n  variant; look up IDs with the models tool first.';
 
 describe('createAgents council seat pointer vocabulary', () => {
   test('v2 hostFlavor emits a roster-only seat pointer, not the full procedure', () => {

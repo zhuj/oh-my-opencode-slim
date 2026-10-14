@@ -40,19 +40,15 @@ export interface V2ToolDefinition {
 }
 export interface V2ToolDraft {
   add(tool: V2ToolDefinition): void;
-  /** Update a registered tool by id; missing ids are ignored (host
-   * `tool.transform` editor semantics). The callback receives the
-   * model-visible fields it may rewrite (description). */
-  update(
+  /** Legacy callbacks may expose description only; newer hosts accept patches. */
+  update?(
     id: string,
-    update: (tool: {
-      description: string;
-      execute?: V2ToolDefinition['execute'];
-    }) => void,
+    update:
+      | ((tool: Partial<V2ToolDefinition>) => void)
+      | Partial<V2ToolDefinition>,
   ): void;
-  /** Read back a registered tool's model-visible fields by id;
-   * undefined when absent. */
-  get(id: string): { description?: string } | undefined;
+  /** Read a registered tool when the host supports draft inspection. */
+  get?(id: string): Partial<V2ToolDefinition> | undefined;
 }
 /** A v2 command definition passed to `command.transform` drafts. The command
  * body runs `execute` directly (no template field). */
@@ -63,11 +59,11 @@ export interface V2CommandDefinition {
     sessionID: string;
     prompt: {
       text: string;
-      files?: unknown[];
-      agents?: unknown[];
-      skills?: unknown[];
+      files?: ReadonlyArray<{ uri: string; name?: string }>;
+      agents?: readonly unknown[];
+      skills?: readonly unknown[];
     };
-    delivery?: unknown;
+    delivery?: 'steer' | 'queue';
   }) => Promise<void>;
 }
 /** Command transform draft. v2 command drafts are add-only;
@@ -210,6 +206,69 @@ export type V2SessionPresetRpcHandlers = {
   ) => Promise<z.input<(typeof sessionPresetRpc.methods)[Name]['output']>>;
 };
 
+/** v2.0.10+ model/provider domain record subset (fields this plugin
+ * consumes). Both `ctx.model.transform` (`ModelEditor.provider.list()`)
+ * and `ctx.provider.transform` (`ProviderEditor.list()`) deliver the same
+ * provider→model records: `Provider.Info` (id + `activation`, NOT a
+ * `disabled` boolean — providers are off when `activation === 'disabled'`)
+ * with models keyed by literal executable id (Model.Info; `enabled` is
+ * always present). Structural subset only — never imported from the
+ * package. */
+export interface V2ModelProviderRecord {
+  readonly provider: {
+    readonly id: string;
+    readonly activation?: 'auto' | 'enabled' | 'disabled' | string;
+  };
+  readonly models:
+    | ReadonlyMap<string, { readonly enabled?: boolean }>
+    | Record<string, unknown>;
+}
+/** `ModelEditor` draft delivered to `ctx.model.transform` callbacks; the
+ * immutable provider inputs (`ProviderRecord[]`) live under `provider`. */
+export interface V2ModelEditorDraft {
+  readonly provider: {
+    list(): readonly V2ModelProviderRecord[];
+  };
+}
+/** `ProviderEditor` draft delivered to `ctx.provider.transform` callbacks;
+ * same records, returned by the flat `list()`. */
+export interface V2ProviderEditorDraft {
+  list(): readonly V2ModelProviderRecord[];
+}
+export interface V2ModelDomain {
+  transform?(cb: (draft: V2ModelEditorDraft) => void): Promise<V2Registration>;
+  /** Live catalog and capability view; reduced hosts may omit it. */
+  list?(input?: unknown): Promise<unknown>;
+  reload?(): Promise<unknown>;
+}
+
+/** Skill.Info for supported 2.0.15-2.0.19 hosts; path is the directory. */
+export interface V2ProjectSkillInfo {
+  id: string;
+  name: string;
+  description?: string;
+  autoinvoke?: boolean;
+  path: string;
+  content: string;
+}
+export interface V2SkillDraft {
+  add(info: V2ProjectSkillInfo): void;
+  list(): readonly V2ProjectSkillInfo[];
+  get(id: string): V2ProjectSkillInfo | undefined;
+  update(id: string, update: (skill: V2ProjectSkillInfo) => void): void;
+  remove(id: string): void;
+}
+export interface V2SkillDomain {
+  transform(callback: (draft: V2SkillDraft) => void): Promise<V2Registration>;
+  list?(): Promise<{ location: unknown; data: readonly V2ProjectSkillInfo[] }>;
+}
+export interface V2ProviderDomain {
+  transform(
+    cb: (draft: V2ProviderEditorDraft) => void,
+  ): Promise<V2Registration>;
+  reload?(): Promise<unknown>;
+}
+
 export interface V2Context {
   readonly rpc?: {
     readonly register: (
@@ -217,13 +276,17 @@ export interface V2Context {
       handlers: V2SessionPresetRpcHandlers,
     ) => Promise<V2Registration>;
   };
+  /** Model catalog, capability probe, and optional transform snapshot. */
+  readonly model?: V2ModelDomain;
+  readonly skill?: V2SkillDomain;
+  readonly provider?: V2ProviderDomain;
   readonly app: { readonly name: string; readonly version: string };
   readonly options: Record<string, unknown>;
   /** Host location (probe before use; fall back to process.cwd()). */
   readonly location?: {
-    directory: string;
+    directory?: string;
     workspaceID?: string;
-    project: { id: string; directory: string; canonical: string };
+    project?: { id: string; directory?: string; canonical?: string };
   };
   agent: {
     transform(cb: (draft: V2AgentDraft) => void): Promise<V2Registration>;
@@ -241,24 +304,6 @@ export interface V2Context {
   command: {
     transform(cb: (draft: V2CommandDraft) => void): Promise<V2Registration>;
     list(): Promise<unknown>;
-  };
-  /** v2 model registry domain (`ctx.model`) — runtime-probed; older hosts
-   * expose no domain and callers must degrade. `list()` resolves the full
-   * catalog ⊕ config view with per-model capabilities. */
-  readonly model?: {
-    readonly list?: (input?: unknown) => Promise<unknown>;
-  };
-  skill?: {
-    transform(
-      cb: (draft: {
-        add(skill: unknown): void;
-        update(
-          id: string,
-          update: (skill: Record<string, unknown>) => void,
-        ): void;
-        remove(id: string): void;
-      }) => void,
-    ): Promise<V2Registration>;
   };
   session: {
     hook(
@@ -336,7 +381,9 @@ export interface V2Context {
       sessionID: string;
       id?: string;
       text: string;
-      files?: Array<{ uri: string; name?: string }>;
+      files?: ReadonlyArray<{ uri: string; name?: string }>;
+      agents?: readonly unknown[];
+      skills?: readonly unknown[];
       metadata?: Record<string, unknown>;
       delivery?: 'steer' | 'queue';
       resume?: boolean;

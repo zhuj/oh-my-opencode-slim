@@ -3,6 +3,7 @@ import type { PluginInput } from '@opencode-ai/plugin';
 import type { InterviewConfig, PluginConfig } from '../config';
 import { DEFAULT_DASHBOARD_PORT } from './dashboard';
 import { createDashboardManager } from './dashboard-manager';
+import { DEFAULT_OUTPUT_FOLDER, normalizeOutputFolder } from './document';
 import type { createInterviewService } from './service';
 import { createPerSessionInterviewServer } from './session-server';
 
@@ -20,7 +21,9 @@ export function computeInterviewMode(config: InterviewConfig | undefined): {
   const effectivePort = config?.port ?? 0;
   return {
     dashboardEnabled: config?.dashboard === true || effectivePort > 0,
-    outputFolder: config?.outputFolder ?? 'interview',
+    outputFolder: normalizeOutputFolder(
+      config?.outputFolder ?? DEFAULT_OUTPUT_FOLDER,
+    ),
     dashboardPort: effectivePort > 0 ? effectivePort : DEFAULT_DASHBOARD_PORT,
   };
 }

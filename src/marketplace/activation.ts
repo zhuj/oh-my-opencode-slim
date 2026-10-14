@@ -117,15 +117,16 @@ function loadErrorCode(error: unknown): MarketplaceDiagnosticCode {
 
 export function ambiguousMcpNamespaces(
   required: readonly string[],
-  available: ReadonlySet<string>,
+  namespaces: ReadonlyMap<string, string>,
 ): string[] {
-  const namespace = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, '_');
   const conflicts = new Set<string>();
-  const names = [...available].sort();
+  const names = [...namespaces.keys()].sort();
   for (const name of required) {
-    const own = namespace(name);
+    const own = namespaces.get(name);
+    if (own === undefined) continue;
     for (const other of names) {
-      const otherNamespace = namespace(other);
+      const otherNamespace = namespaces.get(other);
+      if (otherNamespace === undefined) continue;
       if (
         name !== other &&
         (own === otherNamespace ||
@@ -212,15 +213,16 @@ export function resolveMarketplaceActivation(
       );
     }
   }
+  const disabledSkills = new Set(options.disabledSkillNames);
+  const disabledMcps = new Set(options.disabledMcpNames);
   const skills = new Set(
-    options.availableSkillNames.filter(
-      (name) => !options.disabledSkillNames?.includes(name),
-    ),
+    options.availableSkillNames.filter((name) => !disabledSkills.has(name)),
   );
   const mcps = new Set(
-    options.availableMcpNames.filter(
-      (name) => !options.disabledMcpNames?.includes(name),
-    ),
+    options.availableMcpNames.filter((name) => !disabledMcps.has(name)),
+  );
+  const mcpNamespaces = new Map(
+    [...mcps].map((name) => [name, name.replace(/[^a-zA-Z0-9_-]/g, '_')]),
   );
   const claimed = new Set<string>();
   const reservedNames = new Set(
@@ -308,7 +310,7 @@ export function resolveMarketplaceActivation(
       continue;
     }
     const effectiveMcps = requiredMcps;
-    const ambiguous = ambiguousMcpNamespaces(effectiveMcps, mcps);
+    const ambiguous = ambiguousMcpNamespaces(effectiveMcps, mcpNamespaces);
     if (ambiguous.length) {
       diagnostics.push(
         diagnostic(

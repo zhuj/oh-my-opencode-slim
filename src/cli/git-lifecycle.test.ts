@@ -1,17 +1,16 @@
 import { expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { withTmpDirSync } from '../test-utils';
 import { restoreAfterEvals, stashChanges } from './git-lifecycle';
 
 function withRepo(
   run: (cwd: string, git: (...args: string[]) => string) => void,
 ) {
-  const cwd = mkdtempSync(join(tmpdir(), 'eval-git-'));
-  const git = (...args: string[]) =>
-    execFileSync('git', args, { cwd, encoding: 'utf-8' }).trim();
-  try {
+  withTmpDirSync((cwd) => {
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf-8' }).trim();
     git('init', '-q');
     git('config', 'user.email', 'eval@example.test');
     git('config', 'user.name', 'Eval Test');
@@ -20,9 +19,7 @@ function withRepo(
     git('add', '.');
     git('commit', '-qm', 'initial');
     run(cwd, git);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
+  });
 }
 
 test('eval cleanup restores tracked, staged and untracked work and preserves other stashes', () => {

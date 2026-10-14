@@ -42,7 +42,11 @@ oh-my-opencode-slim은 OpenCode에서 여러 전문 에이전트의 작업을 �
   Orchestrator가 전문 에이전트에게 백그라운드 작업을 배정하고 진행 상황을
   추적합니다. 결과를 검토하고 종합한 뒤 다음 작업을 진행하며, 기본적으로
   병렬로 작업합니다. 작업이 최종 결과를 내면 대기 중인 Orchestrator를 깨우고,
-  작업이 다시 열리면 상태를 갱신합니다.
+  작업이 다시 열리면 상태를 갱신합니다. 선택적 `id`/`depends_on`으로
+  의존 순서를 지정하고 `task_wait`로 작업 그룹의 성공적인 완료를 기다립니다.
+  `task_dependency_tree`는 크기가 제한된 의존 트리와 차단 원인을 보여 줍니다.
+  `task_queue_list`로 조회하고 `task_queue_manage`로 실행 중인 작업을 중단하지
+  않고 대기 작업을 관리하며, 로컬 `/queue`는 선택한 부모 세션의 큐를 표시합니다.
 - **[번들 스킬](#skills)** - `deepwork`, `codemap`,
   `verification-planning`, `reflect` 같은 프롬프트 기반 워크플로를 에이전트별로
   할당합니다.
@@ -627,7 +631,7 @@ bunx oh-my-opencode-slim@latest companion install
 | **[멀티플렉서 통합](docs/multiplexer-integration.md)** | Tmux, Zellij, Herdr, cmux, kitty 또는 WezTerm 분할 창에서 에이전트 작업을 실시간으로 확인 |
 | **[Codemap](docs/codemap.md)** | 계층형 코드맵을 생성하여 대규모 코드베이스를 빠르게 파악 |
 | **[Clonedeps](docs/clonedeps.md)** | 선택한 의존성 소스를 Git 추적에서 제외된 로컬 작업 공간에 복제해 내부 구현 확인 |
-| **[Worktrees](docs/worktrees.md)** | `.slim/worktrees/`의 독립된 작업 공간에서 병렬·고위험 코딩 작업 수행 |
+| **[Worktrees](docs/worktrees.md)** | `.local/.slim/worktrees/`의 격리된 작업 공간에서 병렬·고위험 코딩 작업 수행 |
 | **[프리셋 전환](docs/preset-switching.md)** | `/preset`으로 실행 중에 에이전트 모델 프리셋 전환 |
 | **[Interview](docs/interview.md)** | 브라우저 기반 질의응답으로 아직 구체화되지 않은 아이디어를 구조화된 마크다운 명세로 변환 |
 | **[Companion](docs/companion.md)** | 파싱, 도움말, 타입을 위한 플로팅 창 Companion |

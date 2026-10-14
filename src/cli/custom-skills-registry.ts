@@ -40,6 +40,12 @@ export const CUSTOM_SKILLS: CustomSkill[] = [
     sourcePath: 'src/skills/clonedeps',
   },
   {
+    name: 'delegation',
+    description: 'Lossless model reference selection for delegated host calls',
+    allowedAgents: ['orchestrator'],
+    sourcePath: 'src/skills/delegation',
+  },
+  {
     name: 'deepwork',
     description:
       'Heavy/complex coding sessions and large modifications workflow',

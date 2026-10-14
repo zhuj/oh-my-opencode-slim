@@ -10,6 +10,11 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseJsonc } from 'jsonc-parser';
 import { z } from 'zod';
 import type { RuntimeConfig } from '../config/runtime';
+import {
+  assertSkillNames,
+  assertSkillPolicyConfig,
+  InvalidSkillPolicyError,
+} from '../utils/skill-policy-validation';
 import type { MarketplacePackageManifest } from './schemas';
 import { parseSkillFrontmatterName } from './skill-frontmatter';
 
@@ -86,8 +91,10 @@ function readConfig(path: string): Record<string, unknown> | undefined {
     const value = parseJsonc(readFileSync(path, 'utf8'), errors, {
       allowTrailingComma: true,
     });
+    if (errors.length === 0) assertSkillPolicyConfig(value, path);
     return errors.length === 0 ? asObject(value) : undefined;
-  } catch {
+  } catch (error) {
+    if (error instanceof InvalidSkillPolicyError) throw error;
     return undefined;
   }
 }
@@ -196,7 +203,10 @@ export function loadMergedOpenCodeConfig(
     const parsed = asObject(
       parseJsonc(content, errors, { allowTrailingComma: true }),
     );
-    if (parsed && errors.length === 0) merged = mergeObjects(merged, parsed);
+    if (parsed && errors.length === 0) {
+      assertSkillPolicyConfig(parsed, 'OPENCODE_CONFIG_CONTENT');
+      merged = mergeObjects(merged, parsed);
+    }
   }
   return merged;
 }
@@ -256,10 +266,14 @@ function walkSkillTree(
           try {
             const name = parseSkillFrontmatterName(readFileSync(item, 'utf8'));
             if (name) names.add(name);
-          } catch {}
+          } catch (error) {
+            if (error instanceof InvalidSkillPolicyError) throw error;
+          }
         }
       }
-    } catch {}
+    } catch (error) {
+      if (error instanceof InvalidSkillPolicyError) throw error;
+    }
   };
   walk(root);
 }
@@ -319,12 +333,37 @@ export function discoverOnDiskSkillNames(
 export function discoverPreflightSkills(
   runtime: RuntimeConfig,
   projectDirectory?: string,
-  extraDirectories: readonly string[] = [],
+  inventory: {
+    readonly extraDirectories?: readonly string[];
+    /** Canonical, project-confined paths accepted by the V1 config hook. */
+    readonly projectSkillDirectories?: readonly string[];
+    readonly registeredSkillNames?: readonly string[];
+  } = {},
 ): string[] {
-  const disabled = new Set(runtime.disabledSkills);
-  return discoverOnDiskSkillNames(projectDirectory, extraDirectories).filter(
-    (name) => !disabled.has(name),
+  assertSkillNames(
+    inventory.registeredSkillNames,
+    'registered preflight skill names',
   );
+  const disabled = new Set(runtime.disabledSkills);
+  const projectDirectories = (inventory.projectSkillDirectories ?? []).filter(
+    (directory) => {
+      try {
+        // Do not follow a project path replaced by a symlink after discovery.
+        return realpathSync(directory) === resolve(directory);
+      } catch {
+        return false;
+      }
+    },
+  );
+  return [
+    ...new Set([
+      ...discoverOnDiskSkillNames(projectDirectory, [
+        ...(inventory.extraDirectories ?? []),
+        ...projectDirectories,
+      ]),
+      ...(inventory.registeredSkillNames ?? []),
+    ]),
+  ].filter((name) => !disabled.has(name));
 }
 
 export function discoverOnDiskOpenCodeMcps(
@@ -401,6 +440,8 @@ export function evaluateMarketplaceRequirements(
   availableSkills: readonly string[],
   availableMcps: readonly string[],
 ): MarketplaceRequirementReport {
+  assertSkillNames(manifest.skills, 'marketplace skill requirements');
+  assertSkillNames(availableSkills, 'available marketplace skill names');
   const classify = (
     required: readonly string[],
     available: readonly string[],

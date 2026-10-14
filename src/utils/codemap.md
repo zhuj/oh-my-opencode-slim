@@ -1,5 +1,7 @@
 # src/utils/
 
+**Last Updated:** 2026-10-20
+
 ## Responsibility
 
 Centralized utilities and shared abstractions used across the oh-my-opencode-slim plugin. This folder provides:
@@ -18,7 +20,9 @@ Centralized utilities and shared abstractions used across the oh-my-opencode-sli
 ### Core Abstractions
 
 - **BackgroundJobBoard** (`background-job-board.ts`): Singleton registry and lifecycle manager for background tasks with reusable session pool patterns, automatic cleanup, and reconciliation hooks. Machine-side only: it is never rendered into a prompt (issue #1647)
-- **BackgroundJobStore** (`background-job-store.ts`): Atomic state-store contract for terminal transitions, leases, and deadline claims implemented by the board
+- **BackgroundJobSnapshotStore** (`background-job-snapshot-store.ts`): Shared V1/V2 best-effort filesystem snapshots of retained board records, one versioned SHA-256-keyed file per top-level root session under `<project>/.local/.slim/background-jobs/`; nested tasks share that file and retain their immediate parent IDs. Per-root locks and temporary-file rename serialize updates; the task-session manager suppresses writes after a failed whole-store load.
+- **BackgroundJobStore** (`background-job-store.ts`): Atomic state-store contract for terminal transitions, leases, deadline claims, and exact queued-input admission confirmation implemented by the board. Opt-in pending input identity publishes uncertainty from the first launch notification; generic status observations preserve it until an attributable acknowledgement or result confirms that generation/input.
+  Pending identity also excludes new ownership/launch resets independently of tracker presence. Rollback uses the store-captured predecessor and exact lease/snapshots, with state restoration and lease retirement committed before reentrant callbacks; the terminal gate binds persisted input identity to sealed result evidence rather than historical outcomes.
 - **BackgroundJobCoordinator** (`background-job-coordinator.ts`): Lifecycle policy layer between board and consumers with terminal-state subscriptions, deferred-close policy, and metadata shaping
 - **BackgroundJobSupervisor** (`background-job-supervisor.ts`): One-shot wall-clock deadline supervision with timer/generation/abort mechanics
 - **BackgroundTaskConcurrency** (`background-task-concurrency.ts`): Process-local admission scheduler for native background task launches with model/provider capacity tracking
@@ -29,10 +33,11 @@ Centralized utilities and shared abstractions used across the oh-my-opencode-sli
 - **Child Transcript** (`child-transcript.ts`): Child session transcript evidence extraction and terminal evidence classification; the startup-only historical idle classifier complements on-demand host-outcome attribution. Shared latest-input/text helpers reject malformed history rather than skipping it.
 - **Host Transcript Attribution** (`child-transcript.ts`, `attributeHostRoundToTranscript`): Validates parsed host terminal evidence against assistant creation/completion after the latest delivered input; newer activity stays pending and unreadable timestamps stay unknown. Recovery and untracked reads retain the shared host-round parser/composer.
 - **BackgroundJobTerminalGate** (`background-job-terminal-gate.ts`): Terminal evidence verification with host outcome attribution, evidence deadlines, and reading leases
-- **BackgroundJobPersistence** (`background-job-persistence.ts`): Persistence layer for lifecycle state with tombstone and epoch tracking across host restarts
+- **BackgroundJobPersistence** (`background-job-persistence.ts`): Separate optional V2 `ctx.storage` lifecycle metadata (tombstones, deletion epochs, alias high-water marks), not an authoritative copy of board records
 - **BackgroundJobFixture** (`background-job-fixture.ts`): Test-only board fixtures for adapter/state-machine tests (not for production)
 - **TestTimers** (`test-timers.ts`): Test-only deterministic timer harness (manual clock, injected `setTimeout`/`clearTimeout` seams, zero-duration `tick` drain); wire into timer-seam components, see AGENTS.md "Test Time"
-- **TUI Reusable Projection** (`tui-reusable-projection.ts`): Board → tui-state projection for sidebar reusable dot display
+- **Test scratch policy**: Allocate test scratch roots through `src/test-utils.ts` (`withTmpDir`, `withTmpDirSync`, or `createTmpDir` with `removeTmpDir`), not repository-local or hardcoded paths; see AGENTS.md "Test Scratch Directories".
+- **TUI Reusable Projection** (`tui-reusable-projection.ts`): Board → tui-state sidebar display projection, not task/session mapping storage
 - **JSDOM Probe** (`jsdom.ts`): JSDOM runtime detection without making it a prerequisite
 - **Redact** (`redact.ts`): Shape-based secret redaction for logging and task output structure masking
 
@@ -75,6 +80,11 @@ Centralized utilities and shared abstractions used across the oh-my-opencode-sli
 4. Subsequent tasks reuse completed sessions via aliases
 5. Unused reusable sessions are automatically trimmed based on maxReusablePerAgent
 6. Deadline exceeded during execution → coordinator claims it, supervisor aborts, grace timer finalizes terminal state
+
+### Task/Session Snapshot Recovery
+1. The task-session manager loads valid root snapshots into the board before exposing task-board operations; load failure leaves the in-memory board usable but suppresses snapshot writes to avoid replacing prior data.
+2. Previously running records restore as non-running (`stopped`, status uncertain). A positive `session.get` proves existence, not activity; absent APIs, malformed/empty status, and ambiguous V1 errors preserve the mapping. Only a typed V2 `Session.NotFoundError` for the same generation proves deletion.
+3. Board mutations are queued per root and written through the shared filesystem store on a best-effort basis. Board retention and session deletion remove records; the root file disappears only when no records remain. Neither optional V2 lifecycle metadata nor TUI projections replace these board snapshots or prove cross-host liveness.
 
 ### Session Selection Flow
 1. resolveCurrentSelection() reads session.get() with bounded timeout
@@ -147,7 +157,9 @@ export { extractZip } from './zip-extractor';
 ```
 
 This allows consumers to import from `src/utils` rather than individual files.
-Session metadata, the opencode client accessor, and the type-only call-shape contract are intentionally imported directly from their modules (not re-exported).
+The snapshot store is imported directly by the task-session manager. Session
+metadata, the opencode client accessor, and the type-only call-shape contract
+are also imported directly from their modules (not re-exported).
 
 ## Files
 
@@ -161,6 +173,7 @@ Session metadata, the opencode client accessor, and the type-only call-shape con
 | `background-job-supervisor.ts` | Wall-clock deadline supervision and abort grace |
 | `background-task-concurrency.ts` | Process-local admission scheduler for background tasks |
 | `background-job-persistence.ts` | Persistence for lifecycle state (tombstones, deletion) |
+| `background-job-snapshot-store.ts` | Shared V1/V2 per-root filesystem snapshots of retained task/session board records |
 | `background-job-terminal-gate.ts` | Terminal evidence verification and attribution |
 | `background-job-fixture.ts` | Test-only board fixtures for adapter/state-machine tests |
 | `test-timers.ts` | Test-only deterministic timer harness for seam-wired timer code |

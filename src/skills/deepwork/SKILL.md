@@ -100,31 +100,34 @@ At the end of each pass:
 Keep state small and current. It exists to resume after compaction, not to
 log activity.
 
-- **Router head** `.slim/deepwork/<session-id>.md`, pinned by the activation
+- **Router head** `.local/.slim/deepwork/<session-id>.md`, pinned by the activation
   prompt and reused on re-run: `status: active` (or `status: completed`) and
   `slug:` — nothing else. Never modify another session's head.
-- **Progress file** `.slim/deepwork/<task-slug>/progress.md`, rewritten in
+- **Progress file** `.local/.slim/deepwork/<task-slug>/progress.md`, rewritten in
   place, at most about 40 lines of plain prose: status, pass and its goal,
   next step, constraints and decisions, running lanes (one line each), and the
   ranked known-issues list. No activity log — history lives in git commits and
   gate verdicts.
-- **Topic files** in `.slim/deepwork/<task-slug>/` only for what will be
+- **Topic files** in `.local/.slim/deepwork/<task-slug>/` only for what will be
   re-read: gate verdicts and research. One file per topic; a retry overwrites
   it. Plans, specs, and docs go to real project paths. Routine lane results
   stay in the task results.
 - Update state at pass transitions, decisions, and blockers — not after every
   lane.
+- Keep OpenCode todos synchronized with the current pass when the host provides
+  them; they do not replace the pinned head and progress file.
 
 Setup: before creating any deepwork file, ensure `.gitignore` contains
-`.slim/deepwork/` and `.ignore` contains `!.slim/deepwork/` plus
-`!.slim/deepwork/**`, adding only missing entries. Claim a new task with
-`mkdir -p .slim/deepwork` then a plain `mkdir .slim/deepwork/<task-slug>`;
+`.local/.slim/deepwork/` and `.ignore` contains `!.local/.slim/deepwork/` plus
+`!.local/.slim/deepwork/**`, adding only missing entries. Claim a new task with
+`mkdir -p .local/.slim/deepwork` then a plain `mkdir .local/.slim/deepwork/<task-slug>`;
 if it already exists and another session's `status: active` head names that
 slug, pick another slug, otherwise adopt it. Write the `slug:` into your head
 before working.
 
-Resume: read your head, then its progress file, then only the topic files the
-progress file points to. Nothing else.
+Resume, including after compaction: read your pinned head before acting, then
+its progress file, then only the topic files the progress file points to.
+Nothing else.
 
 ## Completion
 

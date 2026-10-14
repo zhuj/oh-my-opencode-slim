@@ -173,11 +173,11 @@ export function clearBackgroundJobSuppression(
 export interface BackgroundJobStore {
   // ── Mutation methods ──────────────────────────────────────────────
   registerLaunch(input: BackgroundJobLaunchInput): BackgroundJobRecord;
-  /** Restore the record a launch replaced after the host explicitly refused
-   * it. False once that launch's generation no longer owns the row. */
+  /** Atomically restore the store-captured predecessor and retire only this
+   * unchanged launch's lease before callbacks. False preserves exclusion. */
   abandonLaunch(
     launched: BackgroundJobRecord,
-    replaced: BackgroundJobRecord,
+    lease: BackgroundJobLease,
   ): boolean;
   /** Cache-only import of an absent verified host session. */
   restoreRetainedSession(
@@ -252,6 +252,12 @@ export interface BackgroundJobStore {
     expectedGeneration?: number,
     now?: number,
   ): BackgroundJobRecord | undefined;
+  /** Only an attributable ACK/result for this input may clear its uncertainty. */
+  confirmPromptAdmission(
+    taskID: string,
+    generation: number,
+    promptMessageID: string,
+  ): boolean;
   /**
    * Acknowledge the terminal notification delivered to the parent session.
    * This is a prompt-lifecycle acknowledgement, not filesystem reconciliation.

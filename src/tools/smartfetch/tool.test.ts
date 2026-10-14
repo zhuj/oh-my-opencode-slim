@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { readdir, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { withTmpDir } from '../../test-utils';
 import { buildCacheKey, CACHE } from './cache';
 import { createWebfetchTool } from './tool';
 
@@ -502,6 +505,62 @@ describe('smartfetch/tool', () => {
       ['https://docs.example.com/llms.txt', null],
       ['https://docs.example.com/reprobe', null],
     ]);
+  });
+
+  test('mislabeled PNG saved to disk uses the sniffed .png extension', async () => {
+    await withTmpDir(async (directory) => {
+      const png = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10, 42);
+      globalThis.fetch = mock(
+        async () =>
+          new Response(png, {
+            headers: { 'content-type': 'application/octet-stream' },
+          }),
+      ) as typeof fetch;
+      const result = await createWebfetchTool({ client: {} } as any, {
+        binaryDir: directory,
+      }).execute(
+        {
+          url: 'https://example.com/download',
+          save_binary: true,
+        },
+        createExecutionContext(),
+      );
+      expect(typeof result).toBe('string');
+      expect(result).toContain('IMAGE content saved to');
+      const files = await readdir(directory);
+      expect(files).toHaveLength(1);
+      const filename = files[0];
+      if (!filename) throw new Error('missing saved image');
+      expect(filename).toEndWith('.png');
+      expect(await readFile(path.join(directory, filename))).toEqual(
+        Buffer.from(png),
+      );
+    });
+  });
+
+  test('explicit save_binary keeps disk output as a plain string', async () => {
+    await withTmpDir(async (directory) => {
+      const image = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 42]);
+      globalThis.fetch = mock(
+        async () =>
+          new Response(image, { headers: { 'content-type': 'image/png' } }),
+      ) as typeof fetch;
+      const result = await createWebfetchTool({ client: {} } as any, {
+        binaryDir: directory,
+      }).execute(
+        {
+          url: 'https://example.com/image.png',
+          save_binary: true,
+        },
+        createExecutionContext(),
+      );
+      expect(typeof result).toBe('string');
+      expect(result).toContain('IMAGE content saved to');
+      expect(result).toContain(path.join(directory, 'image.png'));
+      expect(await readFile(path.join(directory, 'image.png'))).toEqual(
+        Buffer.from(image),
+      );
+    });
   });
 
   test('same document with different fragments issues a single request', async () => {

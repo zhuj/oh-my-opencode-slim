@@ -1,4 +1,8 @@
 import matter from 'gray-matter';
+import {
+  assertSkillIdentifier,
+  InvalidSkillPolicyError,
+} from '../utils/skill-policy-validation';
 
 /**
  * Quote malformed plain YAML values containing colons by converting them to
@@ -58,9 +62,18 @@ function isSkillFrontmatter(
 }
 
 function normalizedSkillName(data: unknown): string | undefined {
+  if (
+    data !== null &&
+    typeof data === 'object' &&
+    'name' in data &&
+    typeof data.name === 'number'
+  ) {
+    assertSkillIdentifier(String(data.name), 'marketplace skill frontmatter');
+  }
   if (!isSkillFrontmatter(data)) return undefined;
 
   const name = data.name.trim();
+  assertSkillIdentifier(name, 'marketplace skill frontmatter');
   return name === '' ? undefined : name;
 }
 
@@ -69,11 +82,13 @@ export function parseSkillFrontmatterName(content: string): string | undefined {
   try {
     const parsed = matter(content);
     return normalizedSkillName(parsed.data);
-  } catch {
+  } catch (error) {
+    if (error instanceof InvalidSkillPolicyError) throw error;
     try {
       const parsed = matter(fallbackSanitization(content));
       return normalizedSkillName(parsed.data);
-    } catch {
+    } catch (fallbackError) {
+      if (fallbackError instanceof InvalidSkillPolicyError) throw fallbackError;
       return undefined;
     }
   }

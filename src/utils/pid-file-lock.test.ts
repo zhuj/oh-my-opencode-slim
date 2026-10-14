@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir, withTmpDirSync } from '../test-utils';
 import {
   acquirePidFileLock,
   acquirePidFileLockWithRetryAsync,
@@ -51,13 +51,13 @@ function mockPeerLockSwap(
 afterEach(() => {
   while (roots.length > 0) {
     const root = roots.pop();
-    if (root) fs.rmSync(root, { recursive: true, force: true });
+    if (root) removeTmpDir(root);
   }
 });
 
 describe('pid-file-lock', () => {
   test('acquire, release, and re-acquire', () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    const root = createTmpDir();
     roots.push(root);
     const lockFile = join(root, 'resource');
 
@@ -74,7 +74,7 @@ describe('pid-file-lock', () => {
   });
 
   test('takes over a lock whose owner PID is dead', () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    const root = createTmpDir();
     roots.push(root);
     const lockFile = join(root, 'resource');
     const lockDir = `${lockFile}.lock`;
@@ -102,7 +102,7 @@ describe('pid-file-lock', () => {
   });
 
   test('release does not remove a lock whose owner token was replaced', () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    const root = createTmpDir();
     roots.push(root);
     const lockFile = join(root, 'resource');
     const lockDir = `${lockFile}.lock`;
@@ -123,23 +123,23 @@ describe('pid-file-lock', () => {
   });
 
   test('ownership fence detects a replaced owner token', () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
-    roots.push(root);
-    const lockFile = join(root, 'resource');
-    const lockDir = `${lockFile}.lock`;
+    withTmpDirSync((root) => {
+      const lockFile = join(root, 'resource');
+      const lockDir = `${lockFile}.lock`;
 
-    const release = acquirePidFileLock(lockFile);
-    expect(release?.isOwned()).toBe(true);
+      const release = acquirePidFileLock(lockFile);
+      expect(release?.isOwned()).toBe(true);
 
-    fs.writeFileSync(join(lockDir, 'owner'), `${process.pid}\nother-token`);
-    expect(release?.isOwned()).toBe(false);
+      fs.writeFileSync(join(lockDir, 'owner'), `${process.pid}\nother-token`);
+      expect(release?.isOwned()).toBe(false);
 
-    release?.();
-    expect(fs.existsSync(lockDir)).toBe(true);
+      release?.();
+      expect(fs.existsSync(lockDir)).toBe(true);
+    });
   });
 
   test('release removes the lock when the owner token still matches', () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    const root = createTmpDir();
     roots.push(root);
     const lockFile = join(root, 'resource');
     const lockDir = `${lockFile}.lock`;
@@ -154,7 +154,7 @@ describe('pid-file-lock', () => {
   });
 
   test('age cap takes over a live-owned lock older than maxAgeMs', async () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    const root = createTmpDir();
     roots.push(root);
     const lockFile = join(root, 'resource');
     const lockDir = `${lockFile}.lock`;
@@ -177,7 +177,7 @@ describe('pid-file-lock', () => {
   });
 
   test('owner-less young lock counts as live', async () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    const root = createTmpDir();
     roots.push(root);
     const lockFile = join(root, 'resource');
 
@@ -191,7 +191,7 @@ describe('pid-file-lock', () => {
   });
 
   test('stale takeover restores a lock replaced mid-claim', async () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    const root = createTmpDir();
     roots.push(root);
     const lockFile = join(root, 'resource');
     const lockDir = `${lockFile}.lock`;
@@ -224,7 +224,7 @@ describe('pid-file-lock', () => {
   });
 
   test('release restores a successor lock that replaced ours', async () => {
-    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    const root = createTmpDir();
     roots.push(root);
     const lockFile = join(root, 'resource');
     const lockDir = `${lockFile}.lock`;
