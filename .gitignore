@@ -41,6 +41,8 @@ reports/
 tmp/
 temp/
 local
+.tmp
+.depwire
 
 # Eval results (must survive git clean between suite runs)
 src/evals/results/
@@ -92,17 +94,24 @@ wheels/
 captures/
 
 # BEGIN oh-my-opencode-slim clonedeps
-.slim/clonedeps/repos/
+.local/.slim/clonedeps/repos/
 # END oh-my-opencode-slim clonedeps
 
-# BEGIN oh-my-opencode-slim worktrees
+# Rust companion build artifacts
+companion/target/
+
+.local/
+
+# Legacy plugin artifacts (preserved; no migration)
+.slim/clonedeps/repos/
 .slim/worktrees/
 .slim/worktrees.json
-# END oh-my-opencode-slim worktrees
-
-# Deepwork session artifacts
 .slim/deepwork/
+
+.codegraph
 .codegraph/
+
+.worktrees
 .worktrees/
 
 # Local agent runtime artifacts

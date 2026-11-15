@@ -22,8 +22,8 @@ For a specific dependency:
 Use clonedeps for the OpenCode SDK so you can inspect its plugin API internals.
 ```
 
-It reuses `.slim/clonedeps.json` when present, proposes a small clone plan for
-approval, clones each repository once, then updates the manifest, ignore files,
+It reuses `.local/.slim/clonedeps.json` when present, proposes a small clone plan
+for approval, clones each repository once, then updates the manifest, ignore files,
 and a short `## Cloned Dependency Source` section in the root `AGENTS.md`.
 There is no helper script: selection is agent judgment, cloning is plain git.
 
@@ -31,21 +31,21 @@ There is no helper script: selection is agent judgment, cloning is plain git.
 
 ## Files It Creates
 
-### `.slim/clonedeps/repos/`
+### `.local/.slim/clonedeps/repos/`
 
 Ignored, read-only clones, one folder per source repository:
 
 ```text
-.slim/clonedeps/repos/<owner>__<repo>/
+.local/.slim/clonedeps/repos/<owner>__<repo>/
 ```
 
 The safe name comes from the repository owner/name, not the package name:
 `https://github.com/anomalyco/opencode.git` →
-`.slim/clonedeps/repos/anomalyco__opencode/`. Do not add version or package
+`.local/.slim/clonedeps/repos/anomalyco__opencode/`. Do not add version or package
 suffixes; every manifest entry from one repository shares that path with a
 different `packagePath`. Do not edit these clones.
 
-### `.slim/clonedeps.json`
+### `.local/.slim/clonedeps.json`
 
 A small, committable manifest, read first on later runs:
 
@@ -59,7 +59,7 @@ A small, committable manifest, read first on later runs:
       "resolvedVersion": "1.18.13",
       "repoUrl": "https://github.com/anomalyco/opencode.git",
       "ref": "v1.18.13@a105350812f05f914c768e468559dbd6bd508d8e",
-      "path": ".slim/clonedeps/repos/anomalyco__opencode",
+      "path": ".local/.slim/clonedeps/repos/anomalyco__opencode",
       "packagePath": "packages/plugin",
       "reason": "Plugin API source used by the project"
     },
@@ -68,7 +68,7 @@ A small, committable manifest, read first on later runs:
       "resolvedVersion": "1.18.13",
       "repoUrl": "https://github.com/anomalyco/opencode.git",
       "ref": "v1.18.13@a105350812f05f914c768e468559dbd6bd508d8e",
-      "path": ".slim/clonedeps/repos/anomalyco__opencode",
+      "path": ".local/.slim/clonedeps/repos/anomalyco__opencode",
       "packagePath": "packages/sdk/js",
       "reason": "Core SDK source used to inspect runtime behavior"
     }
@@ -88,8 +88,8 @@ each is for, so agents do not need the manifest to know what exists.
 - Prefer 0-3 strong recommendations; clone at most 3-5 core dependencies.
 - Use HTTPS URLs and prefer pinned tags or commit SHAs.
 - Never run install, build, test, or lifecycle scripts from a clone.
-- Git ignores `.slim/clonedeps/repos/`, not `.slim/clonedeps.json`; ignore-file
-  edits stay inside the managed clonedeps marker blocks.
+- Git ignores `.local/.slim/clonedeps/repos/`, not `.local/.slim/clonedeps.json`;
+  ignore-file edits stay inside the managed clonedeps marker blocks.
 
 ## When To Use It
 

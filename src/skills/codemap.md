@@ -19,6 +19,7 @@
 |-------|------|-------|
 | `codemap/` | General-purpose | Repository mapping and codebase documentation skill |
 | `clonedeps/` | General-purpose | Workflow skill for dependency source mirroring and inspection |
+| `delegation/` | Orchestrator-only | Lossless model-reference parsing and selection for delegated host calls |
 | `simplify/` | General-purpose | Readability and maintainability guidance skill |
 | `deepwork/` | Orchestrator-only | Heavy coding sessions, multi-phase implementation, and risky refactors |
 | `verification-planning/` | Orchestrator-only | Project-specific evidence planning and verification affordances before non-trivial implementation |
@@ -56,6 +57,7 @@
   - `src/skills/simplify/SKILL.md`
   - `src/skills/codemap/SKILL.md`
   - `src/skills/clonedeps/SKILL.md`
+  - `src/skills/delegation/SKILL.md`
   - `src/skills/deepwork/SKILL.md`
   - `src/skills/verification-planning/SKILL.md`
   - `src/skills/reflect/SKILL.md`

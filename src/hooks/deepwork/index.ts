@@ -21,7 +21,7 @@ const instructions = stripFrontmatter(skillMarkdown).trim();
  * names the head path.
  */
 export function routerHeadAnnouncement(sessionID: string): string {
-  return `Your deepwork router head is \`.slim/deepwork/${sessionID}.md\`; the skill covers setup, planning, gates, and state rules.`;
+  return `Your deepwork router head is \`.local/.slim/deepwork/${sessionID}.md\`; the skill covers setup, planning, gates, and state rules.`;
 }
 
 function activationPrompt(task: string, sessionID: string): string {

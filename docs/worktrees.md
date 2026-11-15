@@ -1,8 +1,8 @@
 # Worktrees
 
 `worktrees` is a bundled Orchestrator skill that manages Git worktrees as
-isolated coding lanes under `.slim/worktrees/<slug>/`, so agents can work on
-parallel, complex, or high-risk tasks without polluting your checkout. It is
+isolated coding lanes under `.local/.slim/worktrees/<slug>/`, so agents can work
+on parallel, complex, or high-risk tasks without polluting your checkout. It is
 not a Git tutorial: it is the safety protocol for planning lanes, assigning
 agents, validating diffs, integrating, and cleaning up without losing work.
 
@@ -26,14 +26,14 @@ mutating Git command.
 
 ## Files It Creates
 
-### `.slim/worktrees/<slug>/`
+### `.local/.slim/worktrees/<slug>/`
 
 Local worktrees sharing the repository's Git database. Specialists such as
 `@fixer` or `@designer` write and run tests strictly inside the lane; for
-example, `.slim/worktrees/refactor-auth/` holds the files for the
+example, `.local/.slim/worktrees/refactor-auth/` holds the files for the
 `omos/refactor-auth` branch.
 
-### `.slim/worktrees.json`
+### `.local/.slim/worktrees.json`
 
 Local lane registry (git-ignored), e.g.:
 
@@ -45,7 +45,7 @@ Local lane registry (git-ignored), e.g.:
     {
       "slug": "refactor-auth",
       "branch": "omos/refactor-auth",
-      "path": ".slim/worktrees/refactor-auth",
+      "path": ".local/.slim/worktrees/refactor-auth",
       "base": "main",
       "purpose": "Refactor token parsing module",
       "owner": "orchestrator",
@@ -68,9 +68,9 @@ Local lane registry (git-ignored), e.g.:
   (`reset --hard`, `clean`, force-push, branch deletion) are never automatic.
 - Cleanup refuses dirty worktrees and unmerged branches without explicit
   approval.
-- `.slim/worktrees/` and `.slim/worktrees.json` are git-ignored; managed
-  `.ignore` entries keep them readable by OpenCode, and the skill only edits its
-  own marker blocks.
+- `.local/.slim/worktrees/` and `.local/.slim/worktrees.json` are git-ignored;
+  managed `.ignore` entries keep them readable by OpenCode, and the skill only
+  edits its own marker blocks.
 
 ## When To Use It
 

@@ -97,36 +97,38 @@ At the end of each pass:
 
 ## State
 
-`.slim/deepwork/` is the resume index for Deepwork-owned state, not a second
+`.local/.slim/deepwork/` is the resume index for Deepwork-owned state, not a second
 workspace for process documents. Keep it small and current; it exists to
 resume after compaction, not to log activity.
 
-- **Router head** `.slim/deepwork/<session-id>.md`, pinned by the activation
+- **Router head** `.local/.slim/deepwork/<session-id>.md`, pinned by the activation
   prompt and reused on re-run: `status: active` (or `status: completed`) and
   `slug:` — nothing else. Never modify another session's head.
-- **Progress file** `.slim/deepwork/<task-slug>/progress.md`, rewritten in
+- **Progress file** `.local/.slim/deepwork/<task-slug>/progress.md`, rewritten in
   place, at most about 40 lines of plain prose: status, pass and its goal,
   next step, constraints and decisions, running lanes (one line each), a concise
   References list of project files (with an optional `sha`), and the ranked
   known-issues list. No activity log; durable decisions live at referenced
   project paths.
-- Other Deepwork process files do not belong under `.slim/deepwork`. Durable
+- Other Deepwork process files do not belong under `.local/.slim/deepwork`. Durable
   verdicts, research, and decisions go to the project's existing tracked
   documentation paths. Generated assets stay where their producing script or
   path contract requires them.
 - Update state at pass transitions, decisions, and blockers — not after every
   lane.
+- Keep OpenCode todos synchronized with the current pass when the host provides
+  them; they do not replace the pinned head and progress file.
 
 Setup: before creating any deepwork file, ensure `.gitignore` contains
-`.slim/deepwork/` and `.ignore` contains `!.slim/deepwork/` plus
-`!.slim/deepwork/**`, adding only missing entries. Claim a new task with
-`mkdir -p .slim/deepwork` then a plain `mkdir .slim/deepwork/<task-slug>`;
+`.local/.slim/deepwork/` and `.ignore` contains `!.local/.slim/deepwork/` plus
+`!.local/.slim/deepwork/**`, adding only missing entries. Claim a new task with
+`mkdir -p .local/.slim/deepwork` then a plain `mkdir .local/.slim/deepwork/<task-slug>`;
 if it already exists and another session's `status: active` head names that
 slug, pick another slug, otherwise adopt it. Write the `slug:` into your head
 before working.
 
-Resume: read your head, then its progress file, then only the References it
-points to. Nothing else.
+Resume, including after compaction: read your pinned head before acting, then
+its progress file, then only the References it points to. Nothing else.
 
 ## Completion
 

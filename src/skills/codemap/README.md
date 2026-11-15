@@ -7,10 +7,17 @@ Repository understanding and hierarchical codemap generation.
 Codemap helps orchestrators map and understand codebases by:
 
 1. Selecting relevant code/config files using LLM judgment
-2. Creating `.slim/codemap.json` for change tracking
-3. Generating empty `codemap.md` templates for fixers to fill in
+2. Creating `.local/.slim/codemap.json` for change tracking
+3. Generating empty maps under `.local/.slim/codemaps/`
 
-Legacy `.slim/cartography.json` state is migrated to `.slim/codemap.json` automatically.
+When new-root state is absent, legacy state is read in this order:
+
+1. `.slim/codemap.json`
+2. `.slim/cartography.json`
+
+The first valid legacy state is copied to `.local/.slim/codemap.json`.
+Migration is non-destructive: legacy state and authored `codemap.md` files in
+the project root or source directories are left untouched.
 
 ## Commands
 
@@ -27,7 +34,7 @@ node codemap.mjs update --root /repo
 
 ## Outputs
 
-### .slim/codemap.json
+### `.local/.slim/codemap.json`
 
 ```json
 {
@@ -46,9 +53,14 @@ node codemap.mjs update --root /repo
 }
 ```
 
-### codemap.md (per folder)
+### `.local/.slim/codemaps/`
 
-Empty templates created in each folder for fixers to fill with:
+Generated maps mirror source paths without writing into source directories.
+For example, `src/agents/` maps to
+`.local/.slim/codemaps/src/agents/codemap.md`, while the generated repository
+atlas is `.local/.slim/codemaps/codemap.md`.
+
+Each empty template is ready for fixers to fill with:
 - Responsibility
 - Design patterns
 - Data/control flow

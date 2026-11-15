@@ -65,10 +65,10 @@ describe('deepwork command hook', () => {
     expect(output.parts[0].text).toContain('# Deepwork');
     expect(output.parts[0].text).toContain('## Completion');
     expect(output.parts[0].text).not.toContain('name: deepwork');
-    expect(output.parts[0].text).toContain('.slim/deepwork/');
+    expect(output.parts[0].text).toContain('.local/.slim/deepwork/');
     // Dynamic-input propagation seam: the pinned per-session path must carry
     // the caller's real session ID (a hardcoded path cannot contain it).
-    expect(output.parts[0].text).toContain('.slim/deepwork/s1.md');
+    expect(output.parts[0].text).toContain('.local/.slim/deepwork/s1.md');
     expect(output.parts[0].text).toContain('refactor scheduler state');
     expect(output.parts[0].text).not.toContain(SLIM_INTERNAL_INITIATOR_MARKER);
   });
@@ -101,8 +101,8 @@ describe('deepwork command hook', () => {
       b,
     );
 
-    expect(a.parts[0].text).toContain('.slim/deepwork/s1.md');
-    expect(b.parts[0].text).toContain('.slim/deepwork/s2.md');
+    expect(a.parts[0].text).toContain('.local/.slim/deepwork/s1.md');
+    expect(b.parts[0].text).toContain('.local/.slim/deepwork/s2.md');
     expect(a.parts[0].text).not.toContain('s2');
     expect(b.parts[0].text).not.toContain('s1');
   });
@@ -115,8 +115,8 @@ describe('deepwork command hook', () => {
       path.join(import.meta.dir, '../../skills/deepwork/SKILL.md'),
       'utf-8',
     );
-    expect(skill).toContain('.slim/deepwork/<session-id>.md');
-    expect(skill).toContain('!.slim/deepwork/**');
+    expect(skill).toContain('.local/.slim/deepwork/<session-id>.md');
+    expect(skill).toContain('!.local/.slim/deepwork/**');
     expect(skill).toContain('status: active');
   });
 });

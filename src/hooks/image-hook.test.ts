@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it, spyOn } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -13,11 +14,11 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveImageRouting } from '../config/constants';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { isImagePart, processImageAttachments } from './image-hook';
-import { createMessageTransformView } from './message-transform-view';
 import type { MessageWithParts } from './types';
 
-const TEST_DIR = path.join(os.tmpdir(), `image-hook-test-${process.pid}`);
+const TEST_DIR = createTmpDir();
 const IMG_BYTES = Buffer.from('89504e470d0a1a0a', 'hex');
 const IMG = {
   type: 'image',
@@ -42,13 +43,13 @@ const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024;
 
 function makeTestDir(name: string): { workDir: string; saveDir: string } {
   const workDir = path.join(TEST_DIR, name);
-  const saveDir = path.join(workDir, '.opencode', 'images');
+  const saveDir = path.join(workDir, '.local', 'images');
   mkdirSync(saveDir, { recursive: true });
   return { workDir, saveDir };
 }
 
 function gitignorePath(workDir: string): string {
-  return path.join(workDir, '.opencode', '.gitignore');
+  return path.join(workDir, '.local', '.gitignore');
 }
 
 function makeUserMsg(parts: MessageWithParts['parts']): MessageWithParts {
@@ -89,7 +90,7 @@ function processAuto(messages: MessageWithParts[], workDir: string): boolean {
 }
 
 afterAll(() => {
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTmpDir(TEST_DIR);
 });
 
 describe('processImageAttachments routing', () => {
@@ -126,7 +127,7 @@ describe('processImageAttachments routing', () => {
 
     expect(result).toBe(false);
     expect(imagePartCount(message)).toBe(1);
-    expect(existsSync(path.join(workDir, '.opencode'))).toBe(false);
+    expect(existsSync(path.join(workDir, '.local'))).toBe(false);
   });
 
   it('keeps image parts inline in auto mode when the model accepts image input', () => {
@@ -174,7 +175,7 @@ describe('processImageAttachments routing', () => {
     const message = makeUserMsg([{ type: 'text', text: 'hello' }]);
 
     expect(processAuto([message], workDir)).toBe(false);
-    expect(existsSync(path.join(workDir, '.opencode'))).toBe(false);
+    expect(existsSync(path.join(workDir, '.local'))).toBe(false);
   });
 
   it('does no filesystem work when every image part is remote', () => {
@@ -192,7 +193,7 @@ describe('processImageAttachments routing', () => {
     ]);
 
     expect(processAuto([message], workDir)).toBe(false);
-    expect(existsSync(path.join(workDir, '.opencode'))).toBe(false);
+    expect(existsSync(path.join(workDir, '.local'))).toBe(false);
     // All original parts stay inline; the host's capability replacement is
     // the backstop for remote images.
     expect(message.parts).toHaveLength(2);
@@ -206,17 +207,15 @@ describe('processImageAttachments routing', () => {
     expect(imagePartCount(message)).toBe(0);
     expect(nudgeText(message)).toContain('Image saved to:');
     expect(nudgeText(message)).toContain('@observer');
-    expect(nudgeText(message)).toContain(path.join('.opencode', 'images'));
+    expect(nudgeText(message)).toContain(path.join('.local', 'images'));
     expect(readFileSync(gitignorePath(workDir), 'utf8')).toBe(IMAGES_GITIGNORE);
-    expect(savedFiles(path.join(workDir, '.opencode', 'images'))).toHaveLength(
-      1,
-    );
+    expect(savedFiles(path.join(workDir, '.local', 'images'))).toHaveLength(1);
   });
 
   it('does not migrate the retired legacy wildcard gitignore', () => {
     const workDir = path.join(TEST_DIR, 'legacy-no-migration');
     mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
-    writeFileSync(gitignorePath(workDir), '*\n');
+    writeFileSync(path.join(workDir, '.opencode', '.gitignore'), '*\n');
     const message = makeUserMsg([{ type: 'text', text: 'hello' }]);
 
     processImageAttachments({
@@ -227,7 +226,9 @@ describe('processImageAttachments routing', () => {
       log: () => {},
     });
 
-    expect(readFileSync(gitignorePath(workDir), 'utf8')).toBe('*\n');
+    expect(
+      readFileSync(path.join(workDir, '.opencode', '.gitignore'), 'utf8'),
+    ).toBe('*\n');
     expect(
       existsSync(
         path.join(
@@ -241,7 +242,7 @@ describe('processImageAttachments routing', () => {
 
   it('appends images/ once when a new image is written', () => {
     const workDir = path.join(TEST_DIR, 'gitignore-custom');
-    mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
+    mkdirSync(path.join(workDir, '.local'), { recursive: true });
     writeFileSync(gitignorePath(workDir), '# local rules\n*.tmp');
 
     processAuto([makeUserMsg([IMG])], workDir);
@@ -255,7 +256,7 @@ describe('processImageAttachments routing', () => {
 
   it('preserves a binary gitignore prefix while appending images/', () => {
     const workDir = path.join(TEST_DIR, 'gitignore-binary');
-    mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
+    mkdirSync(path.join(workDir, '.local'), { recursive: true });
     const prefix = Buffer.from([0xff, 0xfe, 0x00, 0x23, 0x0a]);
     writeFileSync(gitignorePath(workDir), prefix);
 
@@ -269,7 +270,7 @@ describe('processImageAttachments routing', () => {
   it('does not mutate an external gitignore symlink', () => {
     const workDir = path.join(TEST_DIR, 'gitignore-symlink');
     const external = path.join(TEST_DIR, 'gitignore-symlink-external');
-    mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
+    mkdirSync(path.join(workDir, '.local'), { recursive: true });
     writeFileSync(external, '# external\n');
     symlinkSync(external, gitignorePath(workDir));
 
@@ -281,12 +282,12 @@ describe('processImageAttachments routing', () => {
     expect(nudgeText(message)).toBe('');
   });
 
-  it('refuses a symlinked .opencode directory without touching its target', () => {
-    const workDir = path.join(TEST_DIR, 'opencode-symlink');
-    const external = path.join(TEST_DIR, 'opencode-symlink-external');
+  it('refuses a symlinked .local directory without touching its target', () => {
+    const workDir = path.join(TEST_DIR, 'local-symlink');
+    const external = path.join(TEST_DIR, 'local-symlink-external');
     mkdirSync(workDir, { recursive: true });
     mkdirSync(external, { recursive: true });
-    symlinkSync(external, path.join(workDir, '.opencode'));
+    symlinkSync(external, path.join(workDir, '.local'));
 
     const message = makeUserMsg([IMG]);
     processAuto([message], workDir);
@@ -498,7 +499,7 @@ describe('processImageAttachments routing', () => {
     expect(text).toContain('compress or crop');
     expect(text).not.toContain('@observer');
     expect(
-      savedFiles(path.join(TEST_DIR, 'oversized', '.opencode', 'images')),
+      savedFiles(path.join(TEST_DIR, 'oversized', '.local', 'images')),
     ).toHaveLength(1);
   }, 30_000);
 
@@ -725,7 +726,7 @@ describe('v2.0.14+ Media.Asset parts (#1247)', () => {
     expect(text).not.toContain('@observer');
     expect(
       savedFiles(
-        path.join(TEST_DIR, 'asset-oversized', '.opencode', 'images', 's1'),
+        path.join(TEST_DIR, 'asset-oversized', '.local', 'images', 's1'),
       ),
     ).toHaveLength(1);
   }, 30_000);
@@ -836,5 +837,141 @@ describe('resolveImageRouting', () => {
   it('preserves explicit routing choices', () => {
     expect(resolveImageRouting('auto', false)).toBe('auto');
     expect(resolveImageRouting('direct', true)).toBe('direct');
+  });
+});
+
+describe('image workspace and collision regressions', () => {
+  it('leaves a symlinked .opencode tree untouched while saving under .local', () => {
+    const workDir = path.join(TEST_DIR, 'symlink-opencode-dir');
+    const externalDir = path.join(TEST_DIR, 'symlink-opencode-dir-external');
+    mkdirSync(workDir, { recursive: true });
+    mkdirSync(externalDir, { recursive: true });
+    const externalGi = path.join(externalDir, '.gitignore');
+    const externalContent = Buffer.from('# external custom\n*.bak\n');
+    writeFileSync(externalGi, externalContent);
+    symlinkSync(externalDir, path.join(workDir, '.opencode'));
+
+    const message = makeUserMsg([IMG]);
+    const logs: string[] = [];
+    const result = processImageAttachments({
+      messages: [message],
+      workDir,
+      imageRouting: 'auto',
+      disabledAgents: new Set<string>(),
+      log: (msg) => logs.push(msg),
+    });
+
+    expect(result).toBe(false);
+    expect(imagePartCount(message)).toBe(0);
+    expect(readFileSync(externalGi)).toEqual(externalContent);
+    expect(existsSync(path.join(externalDir, 'images'))).toBe(false);
+    expect(
+      existsSync(
+        path.join(workDir, '.local', 'images', 's1', IMG_CONTENT_NAME),
+      ),
+    ).toBe(true);
+    expect(logs.some((m) => m.includes('symlinked .opencode'))).toBe(false);
+  });
+
+  it('git check-ignore treats images/ as ignored under .local', () => {
+    const workDir = path.join(TEST_DIR, 'gitignore-check-ignore');
+    mkdirSync(workDir, { recursive: true });
+    const gitEnv = {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: os.devNull,
+      GIT_CONFIG_NOSYSTEM: '1',
+      XDG_CONFIG_HOME: path.join(workDir, 'empty-git-config'),
+    };
+
+    const init = spawnSync('git', ['init'], {
+      cwd: workDir,
+      encoding: 'utf8',
+      env: gitEnv,
+    });
+    if (init.status !== 0) {
+      throw new Error(
+        `git init failed (status=${init.status}): ${init.stderr}`,
+      );
+    }
+
+    processImageAttachments({
+      messages: [makeUserMsg([IMG])],
+      workDir,
+      imageRouting: 'auto',
+      disabledAgents: new Set<string>(),
+      log: () => {},
+    });
+
+    const nestedImage = path.join(
+      workDir,
+      '.local',
+      'images',
+      's1',
+      'probe.png',
+    );
+    mkdirSync(path.dirname(nestedImage), { recursive: true });
+    writeFileSync(nestedImage, 'x');
+
+    const configPath = path.join(
+      workDir,
+      '.opencode',
+      'oh-my-opencode-slim.json',
+    );
+    mkdirSync(path.dirname(configPath), { recursive: true });
+    writeFileSync(configPath, '{}');
+
+    const ignored = spawnSync(
+      'git',
+      ['check-ignore', '-q', path.relative(workDir, nestedImage)],
+      { cwd: workDir, encoding: 'utf8', env: gitEnv },
+    );
+    expect(ignored.status).toBe(0);
+
+    const configIgnored = spawnSync(
+      'git',
+      ['check-ignore', '-q', path.relative(workDir, configPath)],
+      { cwd: workDir, encoding: 'utf8', env: gitEnv },
+    );
+    // config must NOT be ignored (exit 1 = not ignored)
+    expect(configIgnored.status).toBe(1);
+  });
+
+  it('suffixed resolution is not memoized: canonical path returns when obstacle is gone', () => {
+    const { workDir } = makeTestDir('memo-suffix');
+    const sessionDir = path.join(workDir, '.local', 'images', 's1');
+    mkdirSync(sessionDir, { recursive: true });
+    const canonical = path.join(sessionDir, IMG_CONTENT_NAME);
+    const external = path.join(TEST_DIR, 'memo-suffix-external.bin');
+    writeFileSync(external, 'external');
+    symlinkSync(external, canonical);
+    const first = makeUserMsg([IMG]);
+    processAuto([first], workDir);
+    expect(nudgeText(first)).toContain(`image-${IMG_HASH}-1.png`);
+    rmSync(canonical);
+    const second = makeUserMsg([IMG]);
+    processAuto([second], workDir);
+    expect(nudgeText(second)).toContain(IMG_CONTENT_NAME);
+    expect(nudgeText(second)).not.toContain(`image-${IMG_HASH}-1.png`);
+  });
+
+  it('memo hit does not reuse a path replaced by a symlink', () => {
+    const { workDir } = makeTestDir('memo-symlink');
+    const first = makeUserMsg([IMG]);
+    processAuto([first], workDir);
+    const savedPath = nudgeText(first).match(
+      /(\/[^\s,]+image-[0-9a-f]{8}\.png)/,
+    )?.[1];
+    expect(savedPath).toBeDefined();
+    const external = path.join(TEST_DIR, 'memo-symlink-external.bin');
+    writeFileSync(external, 'external');
+    rmSync(savedPath as string);
+    symlinkSync(external, savedPath as string);
+    const second = makeUserMsg([IMG]);
+    processAuto([second], workDir);
+    const text = nudgeText(second);
+    expect(text).not.toContain(savedPath as string);
+    expect(text).toContain('image-');
+    expect(lstatSync(savedPath as string).isSymbolicLink()).toBe(true);
+    expect(readFileSync(external, 'utf8')).toBe('external');
   });
 });

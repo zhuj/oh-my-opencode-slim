@@ -84,7 +84,7 @@ export function isCompletedFlip(text: string): boolean {
 function pointerText(sessionID: string): string | undefined {
   return omittedOrFull(
     formatSystemReminder(
-      `Deepwork router head: \`.slim/deepwork/${sessionID}.md\`.`,
+      `Deepwork router head: \`.local/.slim/deepwork/${sessionID}.md\`.`,
     ),
     400,
   );
@@ -100,7 +100,11 @@ export function createDeepworkHeadGate(
 ): (sessionID: string) => boolean {
   const cache = new Map<string, { mtimeMs: number; active: boolean }>();
   return (sessionID) => {
-    const headPath = path.join(directory, '.slim/deepwork', `${sessionID}.md`);
+    const headPath = path.join(
+      directory,
+      '.local/.slim/deepwork',
+      `${sessionID}.md`,
+    );
     let mtimeMs: number;
     try {
       const stat = statSync(headPath);
