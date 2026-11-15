@@ -1482,6 +1482,7 @@ describe('tool execute bridge normalization', () => {
         description: 'd',
         prompt: 'p',
         sessionID: 'ses_old',
+        model: 'openrouter/openai/gpt-5.6-sol:high',
       },
     };
     const { beforeBridge } = createToolExecuteBridges(before, undefined);
@@ -1490,12 +1491,59 @@ describe('tool execute bridge normalization', () => {
     expect(seen[0]?.args).toMatchObject({
       subagent_type: 'fixer',
       task_id: 'ses_old',
+      model: 'openrouter/openai/gpt-5.6-sol:high',
     });
     expect(event.input).toEqual({
       agent: 'fixer',
       description: 'd',
       prompt: 'p',
       sessionID: 'ses_rewritten',
+      model: 'openrouter/openai/gpt-5.6-sol:high',
+    });
+  });
+
+  test('before bridge preserves separate task model fields for v1 hooks', async () => {
+    let seen: Record<string, unknown> | undefined;
+    const before = async (
+      _i: { tool: string; sessionID: string; callID: string },
+      o: { args: unknown },
+    ) => {
+      seen = { ...(o.args as Record<string, unknown>) };
+    };
+    const event = {
+      tool: 'subagent',
+      sessionID: 'ses_parent',
+      agent: 'fixer',
+      messageID: 'msg_2',
+      id: 'call_2',
+      input: {
+        agent: 'fixer',
+        description: 'd',
+        prompt: 'p',
+        provider: 'custom-gateway',
+        model: 'inkling-small:free',
+        variant: 'high',
+      },
+    };
+
+    const { beforeBridge } = createToolExecuteBridges(before, undefined);
+    await beforeBridge(event);
+
+    expect(seen).toEqual({
+      subagent_type: 'fixer',
+      description: 'd',
+      prompt: 'p',
+      provider: 'custom-gateway',
+      model: 'inkling-small:free',
+      variant: 'high',
+    });
+    expect(event.input).toEqual({
+      agent: 'fixer',
+      description: 'd',
+      prompt: 'p',
+      provider: 'custom-gateway',
+      model: 'inkling-small:free',
+      variant: 'high',
     });
   });
 

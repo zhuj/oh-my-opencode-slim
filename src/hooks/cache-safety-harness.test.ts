@@ -23,6 +23,7 @@ import {
   BACKGROUND_JOB_BOARD_METADATA_KEY,
   createTaskSessionManagerHook,
 } from './task-session-manager';
+import { testSnapshotStore } from './task-session-manager/test-snapshot-store';
 import type { MessageWithParts } from './types';
 import { isMessageWithParts } from './types';
 
@@ -90,6 +91,9 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
     {
       maxSessionsPerAgent: 2,
       backgroundJobBoard: board,
+      // Each pipeline owns its board; shared fixture paths must never restore
+      // records persisted by another suite or a previous test process.
+      backgroundJobSnapshotStore: testSnapshotStore,
       isKillAllStopActive: options.killAllStop,
       shouldManageSession: (sessionID) =>
         sessionAgentMap.get(sessionID) === 'orchestrator',

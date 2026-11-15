@@ -63,6 +63,8 @@ const LOOP_GUARD_EXEMPT: Record<string, true> = {
   task_cancel: true,
   task_message: true,
   task_revive: true,
+  task_wait: true,
+  task_queue_manage: true,
 };
 
 /**
@@ -311,6 +313,7 @@ export function createToolLoopGuardHook(
       }
 
       if (LOOP_GUARD_EXEMPT[tool]) {
+        sessions.delete(sessionID);
         resetTaskSupervision(sessionID);
         return;
       }

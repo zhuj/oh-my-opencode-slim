@@ -8,8 +8,7 @@ import {
   test,
 } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import os from 'node:os';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import {
   CompanionManager,
@@ -20,6 +19,7 @@ import * as hookFactories from './hooks';
 import * as handoffFactories from './hooks/task-session-manager/fallback-observation-transfer';
 import { OhMyOpenCodeLite as plugin } from './index';
 import * as interviewFactories from './interview';
+import { createTmpDir, removeTmpDir } from './test-utils';
 import { getTuiStatePath, readTuiSnapshot } from './tui-state';
 import type { BackgroundJobRecord } from './utils/background-job-board';
 import * as gateFactories from './utils/background-job-terminal-gate';
@@ -54,11 +54,9 @@ describe('plugin feature gates through exported hooks', () => {
   let originalEnv: NodeJS.ProcessEnv;
   let projectDir: string;
 
-  beforeEach(async () => {
+  beforeEach(() => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-feature-gates-'),
-    );
+    projectDir = createTmpDir();
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -70,9 +68,9 @@ describe('plugin feature gates through exported hooks', () => {
     delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   });
 
   const configure = async (overrides: Record<string, unknown>) => {
@@ -152,45 +150,48 @@ describe('plugin feature gates through exported hooks', () => {
   }
 
   for (const flavor of ['v1', 'v2'] as const) {
-    test(`${flavor}: native mode registers exactly the two host-read controls`, async () => {
-      await configure({ backgroundJobs: { mode: 'native' } });
-      let hooks: PluginHooks | undefined;
-      try {
-        hooks = await createHooks(flavor);
-        expect(hooks.tool?.task_status).toBeDefined();
-        expect(hooks.tool?.task_cancel).toBeDefined();
-        for (const name of [
-          'task_reply',
-          'task_revive',
-          'task_message',
-          'wait_for_user',
-        ]) {
-          expect(hooks.tool?.[name]).toBeUndefined();
+    for (const mode of ['managed', 'native', 'off'] as const) {
+      test(`${flavor}: mode ${mode} preserves its task controls and independent utilities`, async () => {
+        await configure({ backgroundJobs: { mode } });
+        let hooks: PluginHooks | undefined;
+        try {
+          hooks = await createHooks(flavor);
+          const controls = Object.keys(hooks.tool ?? {})
+            .filter(
+              (name) => name.startsWith('task_') || name === 'wait_for_user',
+            )
+            .sort();
+          const expected =
+            mode === 'managed'
+              ? [
+                  'task_cancel',
+                  'task_dependency_tree',
+                  'task_list',
+                  'task_queue_list',
+                  'task_queue_manage',
+                  'task_reply',
+                  'task_status',
+                  'task_wait',
+                  ...(flavor === 'v2'
+                    ? ['task_report']
+                    : ['task_message', 'task_revive', 'wait_for_user']),
+                ]
+              : mode === 'native'
+                ? ['task_cancel', 'task_status']
+                : [];
+          expect(controls).toEqual(expected.sort());
+          for (const name of [
+            'get_session_id',
+            'current_datetime',
+            'resolve_model',
+          ]) {
+            expect(hooks.tool?.[name]).toBeDefined();
+          }
+        } finally {
+          await hooks?.dispose?.();
         }
-      } finally {
-        await hooks?.dispose?.();
-      }
-    });
-
-    test(`${flavor}: mode off registers no task control tool`, async () => {
-      await configure({ backgroundJobs: { mode: 'off' } });
-      let hooks: PluginHooks | undefined;
-      try {
-        hooks = await createHooks(flavor);
-        for (const name of [
-          'task_status',
-          'task_cancel',
-          'task_reply',
-          'task_revive',
-          'task_message',
-          'wait_for_user',
-        ]) {
-          expect(hooks.tool?.[name]).toBeUndefined();
-        }
-      } finally {
-        await hooks?.dispose?.();
-      }
-    });
+      });
+    }
   }
 
   test('foreground-fallback disabled hook does not dispatch retry steering', async () => {
@@ -564,7 +565,8 @@ describe('plugin feature gates through exported hooks', () => {
 
   for (const sidebar of [false, true]) {
     test(`sidebar ${sidebar} controls all state writes with managed jobs on`, async () => {
-      const externalDir = await mkdtemp(path.join(projectDir, 'external-'));
+      const externalDir = path.join(projectDir, 'external');
+      await mkdir(externalDir);
       await configure({
         sidebar,
         backgroundJobs: {
@@ -597,7 +599,8 @@ describe('plugin feature gates through exported hooks', () => {
   }
 
   test('tui false overrides sidebar true: no server state writes or parent hydration', async () => {
-    const externalDir = await mkdtemp(path.join(projectDir, 'external-'));
+    const externalDir = path.join(projectDir, 'external');
+    await mkdir(externalDir);
     await configure({
       tui: false,
       sidebar: true,
@@ -686,7 +689,7 @@ describe('plugin feature gates through exported hooks', () => {
         background: true,
       } as BackgroundJobRecord);
       expect(restoreSpy).toHaveBeenCalledTimes(1);
-      expect(restoreSpy).toHaveBeenCalledWith('ses_bg', undefined);
+      expect(restoreSpy).toHaveBeenCalledWith('ses_bg', undefined, 'ses_p');
     } finally {
       await hooks?.dispose?.();
       restoreSpy.mockRestore();

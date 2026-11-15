@@ -16,9 +16,9 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import fs from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import type { BackgroundJobStorageBackend } from '../utils/background-job-persistence';
 import {
   configureBackgroundJobPersistence,
@@ -358,7 +358,7 @@ describe('v2 setup feature gates', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-gates-'));
+    fixtureRoot = createTmpDir();
     projectDir = path.join(fixtureRoot, 'project');
     await writeProjectConfig({ companion: { enabled: false } });
     process.env.OPENCODE_CONFIG_DIR = path.join(fixtureRoot, 'config');
@@ -369,12 +369,12 @@ describe('v2 setup feature gates', () => {
     delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
-    await rm(fixtureRoot, { recursive: true, force: true });
+    removeTmpDir(fixtureRoot);
   });
 
   test('interview disabled: no command marker, no context dispatch', async () => {
@@ -433,6 +433,39 @@ describe('v2 setup feature gates', () => {
         'storage',
       );
       expect(fs.existsSync(stateDir)).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
+  test('disabled commands stay absent when matching resident skills generate commands', async () => {
+    await writeProjectConfig({
+      companion: { enabled: false },
+      disabled_commands: ['deepwork', 'preset'],
+    });
+    const { ctx, commandAdds } = makeCtx(projectDir);
+    const skills = [
+      { id: 'deepwork', content: 'Resident deepwork instructions' },
+      { id: 'preset', content: 'Resident preset instructions' },
+      { id: 'review', content: 'Review instructions' },
+      { id: 'user:review', content: 'Shadowed skill instructions' },
+    ];
+    Object.assign(ctx.skill ?? {}, {
+      list: async () => ({ data: skills }),
+    });
+    Object.assign(ctx.command, {
+      list: async () => ({ data: [{ name: 'user:review' }, ...commandAdds] }),
+    });
+    Object.assign(ctx.session, { prompt: async () => ({}) });
+
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      const names = commandAdds.map(({ name }) => name);
+      expect(names).not.toContain('deepwork');
+      expect(names).not.toContain('preset');
+      expect(names).toContain('review');
+      expect(names).not.toContain('user:review');
+      expect(await ctx.skill?.list()).toEqual({ data: skills });
     } finally {
       await cleanup();
     }

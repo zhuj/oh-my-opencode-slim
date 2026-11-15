@@ -25,6 +25,12 @@ import {
   BUILTIN_OPENCODE_SUBAGENTS_TO_DISABLE,
 } from '../config/constants';
 import { resolveFeatureGates } from '../config/feature-gates';
+import {
+  DEFAULT_RESOURCE_PREFIXES,
+  resolveProjectResourceRoots,
+} from '../config/project-resource-paths';
+import { toV2ProjectSkillInfos } from '../config/project-skill-host-adapter';
+import { discoverProjectSkills } from '../config/project-skills';
 import { InterviewConfigSchema } from '../config/schema';
 import type { PluginConfigSnapshot } from '../config/snapshot';
 import { readPluginConfigSnapshot } from '../config/snapshot';
@@ -67,6 +73,10 @@ import {
   configureBackgroundJobPersistence,
   loadInitialBackgroundJobPersistence,
 } from '../utils/background-job-persistence';
+import {
+  rewriteDelegationDescription,
+  rewriteDelegationSchema,
+} from '../utils/delegation-description';
 import { isPluginDisabledByEnv } from '../utils/env';
 import { createEventDirectoryScope } from '../utils/event-directory-scope';
 import { isRecord } from '../utils/guards';
@@ -80,6 +90,11 @@ import {
   modelExistsInCatalog,
 } from '../utils/model-image-capability';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
+import {
+  assertSkillPermissionMap,
+  assertSkillRules,
+  InvalidSkillPolicyError,
+} from '../utils/skill-policy-validation';
 import { findTaskErrorNotice, parseTaskResultFromOutput } from '../utils/task';
 import {
   adaptTool,
@@ -113,8 +128,15 @@ import {
   recordInternalAdmission,
 } from './internal-admissions';
 import type { V2InterviewBridge } from './interview-bridge';
+import { createModelListSnapshot } from './model-list-shim';
 import { createPresetCommand, PRESET_COMMAND_NAME } from './preset-command';
 import { sessionPresetRpc } from './preset-rpc';
+import { isDiscoveryAcceptable } from './project-skill-diagnostics';
+import {
+  getV2NativeProjectSkillRoots,
+  loadV2ProjectSkillSources,
+  scanV2NativeProjectSkillNames,
+} from './project-skill-loader';
 import {
   applyRuntimeProfileOptions,
   createSessionProfileBridge,
@@ -134,10 +156,13 @@ import {
   type V1CommandBeforeHook,
   type V2CommandSubmit,
 } from './session-submit';
+import { createSkillCommandController } from './skill-command-lifecycle';
+import { readCommandNames } from './skill-commands';
 import {
   createSubagentExecutorWrapper,
   readRefusalOutcome,
 } from './subagent-executor-wrapper';
+import { resolveV2TouchedFilePaths } from './tool-path-shim';
 import type {
   V2AgentDraft,
   V2Cleanup,
@@ -151,7 +176,33 @@ import type {
   V2SessionPromptEvent,
   V2ToolAfterEvent,
   V2ToolBeforeEvent,
+  V2ToolDefinition,
+  V2ToolDraft,
 } from './types';
+
+/** Probe callback editing first; object-only hosts need an inspectable snapshot. */
+function updateToolDraft(
+  draft: V2ToolDraft,
+  id: string,
+  patchFor: (tool: Partial<V2ToolDefinition>) => Partial<V2ToolDefinition>,
+): void {
+  if (typeof draft.update !== 'function') return;
+  let callbackCalled = false;
+  try {
+    draft.update(id, (tool) => {
+      callbackCalled = true;
+      Object.assign(tool, patchFor(tool));
+    });
+  } catch (err) {
+    // Never retry a callback that already ran: it may have partially mutated.
+    if (callbackCalled || typeof draft.get !== 'function') throw err;
+  }
+  if (callbackCalled || typeof draft.get !== 'function') return;
+  const tool = draft.get(id);
+  if (!tool) return;
+  const patch = patchFor(tool);
+  if (Object.keys(patch).length > 0) draft.update(id, patch);
+}
 
 /** Wrap slash-command arguments in the generic v2 command marker. v2 command
  * drafts are add-only (no `template`), so `execute` submits this marker as a
@@ -927,10 +978,21 @@ const COMPACTION_STRIP_METADATA_KEYS: readonly string[] = [
  */
 export function createSessionCompactionBridge(
   metadataKeys: readonly string[] = COMPACTION_STRIP_METADATA_KEYS,
+  v1Compacting?: (input: { sessionID: string }) => Promise<void>,
 ): (event: V2SessionCompactionEvent) => Promise<void> {
   return async (event) => {
     try {
       if (!event || typeof event !== 'object') return;
+      // Clear session-scoped v1 state before compaction completes. Keep this
+      // fail-soft and independent from stripping so a cleanup failure cannot
+      // preserve volatile injected content in the compacted transcript.
+      if (v1Compacting && typeof event.sessionID === 'string') {
+        try {
+          await v1Compacting({ sessionID: event.sessionID });
+        } catch (err) {
+          log('[v2] v1 compacting hook failed', String(err));
+        }
+      }
       if (!Array.isArray(event.messages)) return;
       // Same v1-view bridging as the context handler's messages
       // transform: `parts` shares the `content` array reference so
@@ -1006,6 +1068,7 @@ function containsWildcard(value: string): boolean {
  * exact-match ruleset cannot express.
  */
 export function deriveExactPermissionRules(perm: unknown): V2PermissionRule[] {
+  assertSkillPermissionMap(perm);
   const rules: V2PermissionRule[] = [];
   if (!perm || typeof perm !== 'object' || Array.isArray(perm)) return rules;
   for (const [tool, value] of Object.entries(perm as Record<string, unknown>)) {
@@ -1194,6 +1257,7 @@ async function readFinalizedAgentPermissions(
   const native = listed.find((entry) => isRecord(entry) && entry.id === agent);
   if (!isRecord(native)) return undefined;
   const permission = native.permissions;
+  assertSkillRules(permission, 'finalized host agent permissions');
   if (!Array.isArray(permission)) {
     throw new Error(
       `native agent '${agent}' exposed a malformed permissions field`,
@@ -1218,6 +1282,93 @@ async function readFinalizedAgentPermissions(
       effect: rule.effect,
     };
   });
+}
+
+/** Registry as finalized by the setup closure's agent transform. */
+export type V2FinalizedRegistry = ReturnType<
+  RegistryFactoryBridge['requireRegistry']
+>;
+
+/** Agent-membership sets the permission rules bridge consults to classify an
+ * admitted prompt's session identity. */
+export interface V2AgentNameSets {
+  /** Canonical and visible identities of finalized marketplace agents. */
+  readonly marketplace: ReadonlySet<string>;
+  /** Every finalized plugin/native identity, foreign agents included. */
+  readonly known: ReadonlySet<string>;
+}
+
+/** Inputs the membership sets are derived from. An absent registry means
+ * agent finalization has not produced one yet, which yields an empty
+ * marketplace set — the same fail-open state an unfinalized setup had. */
+export interface V2AgentNameSetInputs {
+  readonly registry: V2FinalizedRegistry | undefined;
+  /** Plugin-managed roster, refilled IN PLACE by its single writer. */
+  readonly pluginAgents: ReadonlySet<string>;
+  /** Bumped by that writer so an in-place refill invalidates the cache. */
+  readonly pluginAgentsGeneration: number;
+  readonly nativeAgents:
+    | Readonly<Record<string, Readonly<Record<string, unknown>>>>
+    | undefined;
+}
+
+function buildAgentNameSets(inputs: V2AgentNameSetInputs): V2AgentNameSets {
+  const registry = inputs.registry;
+  const marketplace = new Set<string>();
+  const known = new Set<string>(inputs.pluginAgents);
+  for (const [name, config] of Object.entries(inputs.nativeAgents ?? {})) {
+    known.add(name);
+    if (typeof config.displayName === 'string') known.add(config.displayName);
+  }
+  if (registry) {
+    for (const name of registry.marketplaceAgentNames) {
+      marketplace.add(name);
+      marketplace.add(registry.identities[name] ?? name);
+    }
+    for (const [name, identity] of Object.entries(registry.identities)) {
+      known.add(name);
+      known.add(identity);
+    }
+  }
+  return { marketplace, known };
+}
+
+/**
+ * Cached reader for the two agent-membership sets the permission rules
+ * bridge reads on every prompt admission (its awaited prompt barrier makes
+ * one membership test per admitted prompt). Each set is rebuilt only when
+ * one of its inputs changes identity — registry finalization, the native
+ * agent snapshot, or a plugin-agent roster refill — so repeated admissions
+ * over a stable roster cost four comparisons instead of reconstructing both
+ * sets. Membership results are identical to building on every call; only
+ * the build frequency changes, so no admission can observe a stale or
+ * widened set.
+ *
+ * @internal `build` is a seam so tests can count set constructions, which
+ * cannot be observed without instrumentation.
+ */
+export function createAgentNameSetsReader(
+  readInputs: () => V2AgentNameSetInputs,
+  build: (inputs: V2AgentNameSetInputs) => V2AgentNameSets = buildAgentNameSets,
+): () => V2AgentNameSets {
+  let cache:
+    | { inputs: V2AgentNameSetInputs; sets: V2AgentNameSets }
+    | undefined;
+  return () => {
+    const inputs = readInputs();
+    if (
+      cache &&
+      cache.inputs.registry === inputs.registry &&
+      cache.inputs.pluginAgents === inputs.pluginAgents &&
+      cache.inputs.pluginAgentsGeneration === inputs.pluginAgentsGeneration &&
+      cache.inputs.nativeAgents === inputs.nativeAgents
+    ) {
+      return cache.sets;
+    }
+    const sets = build(inputs);
+    cache = { inputs, sets };
+    return sets;
+  };
 }
 
 function classifyPermissionIdentity(
@@ -1449,6 +1600,8 @@ export function createPermissionRulesBridge(
       throw new Error('ctx.session.update unavailable');
     }
     const permission = await options.permissionForAgent(agent);
+    assertSkillRules(permission, 'child permission policy');
+    assertSkillPermissionMap(permission, 'child permission policy');
     if (permission === undefined) {
       throw new Error(`permission policy unavailable for agent '${agent}'`);
     }
@@ -2113,6 +2266,7 @@ export function createToolExecuteBridges(
     callID: string;
     args: Record<string, unknown>;
   }) => string | undefined | Promise<string | undefined>,
+  resultPaths?: (tool: string, result: unknown) => readonly string[],
 ): V2ToolBridgeEvents {
   const beforeBridge = async (
     event: Record<string, unknown> & { input: unknown },
@@ -2200,10 +2354,16 @@ export function createToolExecuteBridges(
       output: unknown;
       title: string;
       metadata: Record<string, unknown>;
+      status?: 'error';
+      resolvedFilePaths?: readonly string[];
     } = {
       output: content,
       title: initialTitle,
       metadata: isRecord(originalMetadata) ? originalMetadata : {},
+      ...(errored ? { status: 'error' as const } : {}),
+      ...(resultPaths
+        ? { resolvedFilePaths: errored ? [] : resultPaths(e.tool, e.result) }
+        : {}),
     };
     await after(
       {
@@ -2275,7 +2435,28 @@ export function adaptMcpServer(v1: McpConfig): Record<string, unknown> {
   return out;
 }
 
-export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
+/**
+ * Test-only seams. Production never registers one: the cached membership
+ * reader and the generation its single writer bumps both live inside the
+ * setup closure, so the writer→cache invalidation wiring cannot be observed
+ * from outside it. Asserting that wiring needs the real objects, never a
+ * replica of the writer. Optional and inert when omitted — `readAgentNameSets`
+ * and `pluginAgents` are passed by reference, so registering a seam cannot
+ * change what any bridge observes.
+ */
+export interface V2SetupSeams {
+  /** Receives the production reader (calling it drives the real cache) and
+   * the roster Set the production writer refills in place. */
+  agentNameSets?: (state: {
+    read: () => V2AgentNameSets;
+    pluginAgents: ReadonlySet<string>;
+  }) => void;
+}
+
+export function createV2Setup(
+  factory: typeof OhMyOpenCodeLite = OhMyOpenCodeLite,
+  seams: V2SetupSeams = {},
+): (ctx: V2Context) => Promise<V2Cleanup> {
   return async (ctx: V2Context): Promise<V2Cleanup> => {
     let retireSessionPresets: (() => Promise<void>) | undefined;
     initLogger();
@@ -2339,6 +2520,22 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         return stopping;
       };
     };
+    let skillCandidates: readonly {
+      name: string;
+      directory: string;
+      skillFilePath: string;
+    }[] = [];
+    let projectSkillsReady = true;
+    let resumeAgentFinalization: (() => void) | undefined;
+    // Native model-list snapshot: captured by the model/provider domain
+    // transform registration below and served to the v1 pipeline as
+    // `client.model.list` (built with buildPluginInput inside the factory
+    // try block; registration happens after v1Hooks resolves — see the
+    // model-list block further down).
+    const modelListSnapshot = createModelListSnapshot();
+    let skillCommands:
+      | ReturnType<typeof createSkillCommandController>
+      | undefined;
 
     // ── Storage domain (optional): background-job persistence ──
     // Configured BEFORE the v1 factory runs so board/ledger creation
@@ -2403,16 +2600,92 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         ? (ctx as V2Context).model
         : undefined;
       log('[v2] ctx.model', { available: Boolean(modelDomain) });
-      const pluginInput = {
-        ...buildPluginInput(ctx, {
+      // Live model list: `ctx.model.list()` (ModelDomain extends the client
+      // model API) returns the host's current filtered snapshot — only
+      // enabled models of configured providers (host-side predicate
+      // applied). resolve_model prefers it at tool-call time; the
+      // setup-time draft snapshot (modelListSnapshot) is the fallback.
+      const v2LiveModelList = ctx.model?.list?.bind(ctx.model);
+      const pluginInput = buildPluginInput(
+        ctx,
+        {
           ...(modelDomain ? { modelDomain } : {}),
-        }),
-        pluginConfigSnapshot: startupConfigSnapshot,
-      };
+        },
+        modelListSnapshot,
+        v2LiveModelList,
+      );
+      pluginInput.pluginConfigSnapshot = startupConfigSnapshot;
+      pluginInput.readGeneratedSkillCommandNames = () =>
+        skillCommands?.readGeneratedSkillCommandNames();
+      const activeDirectory = ctx.location?.directory || directory;
+      const boundaryDirectory = ctx.location?.project?.directory;
+      if (typeof boundaryDirectory === 'string' && boundaryDirectory) {
+        try {
+          const resourcePrefixes =
+            startupConfigSnapshot.config.resource_prefixes ??
+            DEFAULT_RESOURCE_PREFIXES;
+          const resourceRoots = resolveProjectResourceRoots({
+            activeDirectory,
+            boundaryDirectory,
+            prefixes: resourcePrefixes,
+            category: 'skills',
+          });
+          const nativeScan = await scanV2NativeProjectSkillNames({
+            boundaryDirectory,
+          });
+          const hostSkillNames = new Set(nativeScan.names);
+          let editorInventoryComplete = true;
+          if (typeof ctx.skill?.list === 'function') {
+            try {
+              const inventory = await ctx.skill.list();
+              const editorSkills: unknown = inventory?.data;
+              if (!Array.isArray(editorSkills)) {
+                editorInventoryComplete = false;
+              } else
+                for (const skill of editorSkills) {
+                  if (!isRecord(skill)) {
+                    editorInventoryComplete = false;
+                    continue;
+                  }
+                  if (typeof skill.id === 'string')
+                    hostSkillNames.add(skill.id);
+                  else editorInventoryComplete = false;
+                }
+            } catch (err) {
+              editorInventoryComplete = false;
+              log('[v2] skill editor names unavailable', String(err));
+            }
+          }
+          const discovery = discoverProjectSkills({
+            projectDirectory: boundaryDirectory,
+            resourcePrefixes,
+            resourceRoots,
+            hostOwnedSkillRoots:
+              getV2NativeProjectSkillRoots(boundaryDirectory),
+            hostSkillNames: [...hostSkillNames],
+          });
+          if (
+            isDiscoveryAcceptable({
+              discovery,
+              nativeScanComplete: nativeScan.complete,
+              editorInventoryComplete,
+            })
+          ) {
+            skillCandidates = discovery.skills;
+            (
+              pluginInput as Record<string, unknown>
+            ).projectSkillPermissionNames = discovery.permissionNames;
+          }
+        } catch (err) {
+          if (err instanceof InvalidSkillPolicyError) throw err;
+          log('[v2] project skill discovery unavailable', String(err));
+        }
+      }
       log('[v2] calling OhMyOpenCodeLite...');
-      v1Hooks = (await OhMyOpenCodeLite(
-        pluginInput as never,
-      )) as unknown as Record<string, unknown>;
+      v1Hooks = (await factory(pluginInput as never)) as unknown as Record<
+        string,
+        unknown
+      >;
       registryBridge = v1Hooks.registryBridge as RegistryFactoryBridge;
       // Per-instance flip handle (the factory threads its isArmed getter
       // into the execute.before deps; this side owns arm/disarm).
@@ -2429,6 +2702,17 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // Don't hard-fail the whole plugin; register nothing and stay loaded.
       // The scope claim must not outlive the failed generation.
       eventDirectoryScope.release();
+      if (err instanceof InvalidSkillPolicyError) {
+        generationDisposed = true;
+        for (const dispose of [...disposers].reverse()) {
+          try {
+            await dispose();
+          } catch (disposeError) {
+            log('[v2] invalid-policy cleanup failed', String(disposeError));
+          }
+        }
+        throw err;
+      }
       return async () => {};
     }
 
@@ -2437,16 +2721,53 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       return async () => {};
     }
 
-    // Fail-loud unwinding: session hooks register
-    // unconditionally, so any throw from here through the return below
-    // must not leak the resources setup already registered (transforms,
-    // hooks, the interview bridge, v1 resources). Run the saved
-    // disposers LIFO — most recent registration first — each in its own
-    // try/catch so a failing disposer cannot mask the original error,
-    // then the v1 dispose hook best-effort, then rethrow the original
-    // error unchanged. The success path's returned cleanup keeps its
-    // own semantics.
     try {
+      if (
+        skillCandidates.length > 0 &&
+        typeof ctx.skill?.transform === 'function' &&
+        ctx.location?.project?.directory
+      ) {
+        let registrationState: 'pending' | 'registered' | 'failed' = 'pending';
+        try {
+          const sources = await loadV2ProjectSkillSources({
+            projectBoundary: ctx.location.project.directory,
+            candidates: skillCandidates,
+          });
+          const infos = toV2ProjectSkillInfos([], sources);
+          if (infos.length > 0) {
+            projectSkillsReady = false;
+            let draftSeen = false;
+            const reg = await ctx.skill.transform((draft) => {
+              if (generationDisposed || registrationState === 'failed') return;
+              draftSeen = true;
+              try {
+                const existing = new Set(draft.list().map((info) => info.id));
+                for (const info of infos) {
+                  if (existing.has(info.id)) continue;
+                  draft.add(info);
+                }
+              } finally {
+                // A registered transform may run later, after agent drafts arrive.
+                if (registrationState === 'registered') {
+                  projectSkillsReady = true;
+                  resumeAgentFinalization?.();
+                }
+              }
+            });
+            disposers.push(() => reg.dispose());
+            registrationState = 'registered';
+            if (draftSeen) {
+              projectSkillsReady = true;
+            }
+          }
+        } catch (err) {
+          registrationState = 'failed';
+          if (err instanceof InvalidSkillPolicyError) throw err;
+          projectSkillsReady = true;
+          log('[v2] skill.transform failed', String(err));
+        }
+      }
+
       const pluginConfig = startupConfigSnapshot.config;
       const interviewConfig = InterviewConfigSchema.parse(
         pluginConfig.interview ?? {},
@@ -2527,6 +2848,24 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         string,
         { options: Record<string, unknown>; temperature?: number }
       >();
+      /** Single writer for the plugin-agent roster: the Set identity handed
+       * to the bridges stays stable, so the generation counter is what makes
+       * an in-place refill observable to the cached membership sets. */
+      let pluginAgentsGeneration = 0;
+      const setPluginAgents = (names: Iterable<string>): void => {
+        pluginAgents.clear();
+        for (const name of names) pluginAgents.add(name);
+        pluginAgentsGeneration += 1;
+      };
+      /** Membership sets for the permission rules bridge (rebuilt only when
+       * the registry, native snapshot, or roster changes). */
+      const readAgentNameSets = createAgentNameSetsReader(() => ({
+        registry: finalizedRegistry,
+        pluginAgents,
+        pluginAgentsGeneration,
+        nativeAgents: nativeAgentSnapshot?.agents,
+      }));
+      seams.agentNameSets?.({ read: readAgentNameSets, pluginAgents });
       let marketplaceAgentsRequirePromptPolicy = false;
       let permissionRulesBridge:
         | ReturnType<typeof createPermissionRulesBridge>
@@ -2563,6 +2902,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       const finalizeAgentDraft = (draft: V2AgentDraft) => {
         if (permissionSnapshotFailure) return;
         if (
+          !projectSkillsReady ||
           hostMcpSnapshot === undefined ||
           nativeAgentSnapshot === undefined
         ) {
@@ -2631,8 +2971,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           string,
           Record<string, unknown>
         >;
-        pluginAgents.clear();
-        for (const name of Object.keys(resolvedAgents)) pluginAgents.add(name);
+        setPluginAgents(Object.keys(resolvedAgents));
         if (permissionRulesBridge) {
           permissionRulesBridge.refreshPluginAgents();
         }
@@ -2758,6 +3097,15 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           permissionSnapshotFailure =
             error instanceof Error ? error : new Error(String(error));
           resolvePermissionSnapshotReady();
+        }
+      };
+      resumeAgentFinalization = () => {
+        if (!pendingAgentDraft) return;
+        const deferred = agentPassDeferred;
+        captureAgentDraft(pendingAgentDraft);
+        if (deferred && permissionSnapshotReady) {
+          agentPassDeferred = false;
+          requestAgentRebuild();
         }
       };
       try {
@@ -3022,6 +3370,24 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           };
 
           const reg = await ctx.tool.transform((draft) => {
+            try {
+              updateToolDraft(draft, DELEGATION_TOOL_V2, (tool) => {
+                const patch: Partial<V2ToolDefinition> = {};
+                if (typeof tool.description === 'string') {
+                  patch.description = rewriteDelegationDescription(
+                    tool.description,
+                  );
+                }
+                if ('input' in tool) {
+                  patch.input = rewriteDelegationSchema(tool.input, {
+                    loosenSessionID: true,
+                  });
+                }
+                return patch;
+              });
+            } catch (err) {
+              log('[v2] native delegation metadata update failed', String(err));
+            }
             for (const [name, def] of toolEntries) {
               try {
                 // adaptTool stamps `options: { codemode: false }` on every
@@ -3050,10 +3416,37 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       }
 
       log('[v2] mcp servers registered', { count: Object.keys(mcps).length });
+      // ── Native v2 model list (ctx.model/provider.transform) ──
+      // Capture the transformed host catalog as a fallback for the live
+      // model-list source threaded into the v1 client shim above.
+      try {
+        if (typeof ctx.model?.transform === 'function') {
+          const reg = await ctx.model.transform((draft) =>
+            modelListSnapshot.capture(draft),
+          );
+          disposers.push(() => reg.dispose());
+          log('[v2] native model domain snapshot registered');
+        } else if (typeof ctx.provider?.transform === 'function') {
+          const reg = await ctx.provider.transform((draft) =>
+            modelListSnapshot.capture(draft),
+          );
+          disposers.push(() => reg.dispose());
+          log('[v2] native provider domain snapshot registered');
+        } else {
+          log(
+            '[v2] model/provider domain transform unavailable; model discovery falls back to presets',
+          );
+        }
+      } catch (err) {
+        log('[v2] model domain transform registration failed', String(err));
+      }
 
       // ── Commands (deepwork / reflect slash commands) ──
+      const hostCommandNames = await readCommandNames(ctx.command);
       try {
-        const entries = Object.entries(synthCommands ?? {});
+        const entries = Object.entries(synthCommands ?? {}).filter(
+          ([name]) => !hostCommandNames?.has(name),
+        );
         if (entries.length > 0) {
           const submitCommand = createSessionSubmit(ctx);
           const reg = await ctx.command.transform((draft) => {
@@ -3189,8 +3582,16 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           );
         }
       } catch (err) {
+        if (err instanceof InvalidSkillPolicyError) throw err;
         log('[v2] bundled skill registration failed', String(err));
       }
+      skillCommands = createSkillCommandController(
+        ctx,
+        [...Object.keys(synthCommands ?? {}), 'interview', ...disabledCommands],
+        pluginConfig.skillCommandMode,
+      );
+      const skillCommandController = skillCommands;
+      disposers.push(() => skillCommandController.dispose());
 
       // ── Session context hook: command markers + system/messages transforms ──
       // One registration handles: the interview marker bridge, generic command
@@ -3567,7 +3968,12 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         // is a correctness issue, not a summary-quality nicety).
         const compactionReg = await ctx.session.hook(
           'compaction',
-          createSessionCompactionBridge(),
+          createSessionCompactionBridge(
+            COMPACTION_STRIP_METADATA_KEYS,
+            v1Hooks['experimental.session.compacting'] as
+              | ((input: { sessionID: string }) => Promise<void>)
+              | undefined,
+          ),
         );
         disposers.push(() => compactionReg.dispose());
         log('[v2] compaction bridge registered (session.compaction)');
@@ -3729,6 +4135,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 return undefined;
               return model;
             },
+            (tool, result) =>
+              resolveV2TouchedFilePaths(tool, result, ctx.location?.directory),
           );
           if (before) {
             const reg = await ctx.tool.hook('execute.before', async (event) => {
@@ -3762,7 +4170,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           //
           // Flip pairing: the mechanism half (the args rewrite in
           // tool-execute-hooks) reads this setup's flip handle, armed when a
-          // registry replay verifiably lands the rewrite (draft.get probe).
+          // registry replay verifiably lands both the description and schema
+          // rewrites (draft.get probe).
           // The v2 registry replays transforms on the next read after a
           // change, not at registration, so arming happens inside the
           // callback; a registration-time probe would read as false and the
@@ -3821,6 +4230,14 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               const wrapped = new WeakSet<object>();
               const reg = await ctx.tool.transform((draft) => {
                 nativePresetWrapperReady = false;
+                if (
+                  generationDisposed ||
+                  typeof draft.update !== 'function' ||
+                  typeof draft.get !== 'function'
+                ) {
+                  backgroundFlip?.disarm();
+                  return;
+                }
                 try {
                   draft.update(DELEGATION_TOOL_V2, (tool) => {
                     if (lifecycleEnabled && backgroundFlip)
@@ -3937,6 +4354,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                       return registry.compileChildPermissions(agent, finalized);
                     }
                   } catch (err) {
+                    if (err instanceof InvalidSkillPolicyError) throw err;
                     log(
                       '[v2][permission-rules] finalized agent policy unavailable; using registered policy',
                       { agent, err: String(err) },
@@ -3947,37 +4365,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 pluginAgents,
                 requireKnownIdentity: () =>
                   marketplaceAgentsRequirePromptPolicy,
-                marketplaceAgentNames: () => {
-                  const registry = finalizedRegistry;
-                  if (!registry) return new Set();
-                  return new Set(
-                    registry.marketplaceAgentNames.flatMap((name) => [
-                      name,
-                      registry.identities[name] ?? name,
-                    ]),
-                  );
-                },
-                knownAgentNames: () => {
-                  const names = new Set<string>(pluginAgents);
-                  for (const [name, config] of Object.entries(
-                    nativeAgentSnapshot?.agents ?? {},
-                  )) {
-                    names.add(name);
-                    if (typeof config.displayName === 'string') {
-                      names.add(config.displayName);
-                    }
-                  }
-                  const registry = finalizedRegistry;
-                  if (registry) {
-                    for (const [name, identity] of Object.entries(
-                      registry.identities,
-                    )) {
-                      names.add(name);
-                      names.add(identity);
-                    }
-                  }
-                  return names;
-                },
+                marketplaceAgentNames: () => readAgentNameSets().marketplace,
+                knownAgentNames: () => readAgentNameSets().known,
                 defaultAgent: () => {
                   try {
                     const merged = loadMergedOpenCodeConfig(directory);
@@ -3999,6 +4388,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             }
             const eventTypes = buildV2EventSubscriptionTypes({
               interview: interviewEnabled,
+              skills: true,
             });
             const iter = ctx.event.subscribe({ types: eventTypes });
             const eventIterator = iter[Symbol.asyncIterator]();
@@ -4034,6 +4424,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                     continue;
                   }
                   try {
+                    skillCommandController.observeEvent(next.value);
                     await withTuiSnapshotBatch(async () => {
                       await interviewBridge?.handleEvent(next.value);
                       // Only reduced hosts retain legacy created prewarming.
@@ -4089,6 +4480,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         }
       } // end if (ctx.session) check
 
+      // next() has started consumption, not merely constructed an iterable.
+      // Catch up now; later activation is handled by inventory events, never
+      // awaited here because the host cannot finish activation until we return.
+      await skillCommandController.refresh();
+
       // ── Health check: surface silent zero-registration failures ──
       // Every bridge is fail-soft; without this, a fully broken registration
       // would look like a successful load with an empty session.
@@ -4106,6 +4502,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
 
       return async () => {
         log('[v2] dispose invoked');
+        skillCommandController.stop();
         generationDisposed = true;
         const presetDrain = retireSessionPresets?.();
         eventDirectoryScope.release();
@@ -4155,6 +4552,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         }
       };
     } catch (err) {
+      generationDisposed = true;
+      skillCommands?.stop();
       // The abort path never reaches the returned cleanup, so release the
       // scope claim here: a leaked live-directory entry would keep other
       // instances from ever reclaiming this location and would block the

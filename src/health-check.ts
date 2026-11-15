@@ -15,26 +15,10 @@
 import { ALL_AGENT_NAMES } from './config/constants';
 import type { BackgroundJobsMode } from './config/schema';
 
-/**
- * Minimum expected registrations for a healthy plugin load.
- *
- * On v2 hosts `wait_for_user`, `task_revive` and `task_message` are
- * unregistered (the native `question` tool covers the blocking boundary,
- * retained sessions resume through native `subagent(sessionID, prompt)`, and
- * a running child is steered the same way), so the v2 floor drops by three
- * relative to the v1 baseline. When the OMOS managed background-task
- * lifecycle is disabled (`backgroundJobs.mode = "off"`), the three
- * background-task tools (`task_cancel`, `task_status`, `task_reply`) plus
- * the v1-only `task_revive`, `task_message` and `wait_for_user` are not
- * registered either, so the floor drops by six on v1 (three on v2, where
- * all three v1-only tools were already gone).
- */
+/** Minimum registrations for the default V1 managed configuration. */
 export const HEALTH_CHECK = {
   minAgents: 5,
-  // Default v1 tool set when council and ACP agents are not configured:
-  // task_cancel, task_revive, task_status, task_message,
-  // task_reply, wait_for_user, webfetch, ast_grep_search, ast_grep_replace.
-  minTools: 9,
+  minTools: 17,
   minMcps: 1,
 } as const;
 
@@ -65,43 +49,40 @@ export function minimumExpectedAgentCount(
   return Math.max(1, enabledCount);
 }
 
-const BASELINE_TOOL_NAMES = new Set([
-  'task_cancel',
-  'task_revive',
-  'task_status',
-  'task_message',
-  'task_reply',
-  'wait_for_user',
-  'webfetch',
-  'ast_grep_search',
-  'ast_grep_replace',
-]);
-
-/** Task tools in the baseline, split by the lifecycle mode that registers them. */
-const TASK_TOOL_NAMES = new Set([
-  'task_cancel',
-  'task_revive',
-  'task_status',
-  'task_message',
-  'task_reply',
-  'wait_for_user',
-]);
-
-/** Tools that disappear together when the managed lifecycle is off. */
-const BACKGROUND_TASK_TOOL_NAMES = new Set([
-  'task_cancel',
-  'task_status',
-  'task_reply',
-]);
-
-/** Native mode registers only these two host-read controls. */
-const NATIVE_MODE_TASK_TOOL_NAMES = new Set(['task_cancel', 'task_status']);
-
-/** V1-only baseline tools: never registered on v2, nor without the lifecycle. */
+/** V1-only controls disappear on V2 and outside the managed lifecycle. */
 const V1_ONLY_BASELINE_TOOL_NAMES = new Set([
   'task_revive',
   'task_message',
   'wait_for_user',
+]);
+
+/** Native mode exposes only these host-read controls. */
+const NATIVE_MODE_TASK_TOOL_NAMES = new Set(['task_cancel', 'task_status']);
+
+/** Managed-only controls are registered with the shared job board and queue. */
+const MANAGED_TASK_TOOL_NAMES = new Set([
+  'task_reply',
+  'task_list',
+  'task_wait',
+  'task_dependency_tree',
+  'task_queue_list',
+  'task_queue_manage',
+  ...V1_ONLY_BASELINE_TOOL_NAMES,
+]);
+
+const TASK_TOOL_NAMES = new Set([
+  ...NATIVE_MODE_TASK_TOOL_NAMES,
+  ...MANAGED_TASK_TOOL_NAMES,
+]);
+
+const BASELINE_TOOL_NAMES = new Set([
+  ...TASK_TOOL_NAMES,
+  'webfetch',
+  'ast_grep_search',
+  'ast_grep_replace',
+  'get_session_id',
+  'current_datetime',
+  'resolve_model',
 ]);
 
 /**
@@ -133,15 +114,9 @@ export function minimumExpectedToolCount(
   if (v2)
     for (const name of V1_ONLY_BASELINE_TOOL_NAMES) unregistered.add(name);
   if (mode === 'off') {
-    for (const name of [
-      ...BACKGROUND_TASK_TOOL_NAMES,
-      ...V1_ONLY_BASELINE_TOOL_NAMES,
-    ])
-      unregistered.add(name);
+    for (const name of TASK_TOOL_NAMES) unregistered.add(name);
   } else if (mode === 'native') {
-    for (const name of TASK_TOOL_NAMES) {
-      if (!NATIVE_MODE_TASK_TOOL_NAMES.has(name)) unregistered.add(name);
-    }
+    for (const name of MANAGED_TASK_TOOL_NAMES) unregistered.add(name);
   }
   // Config values come from user-edited JSON/JSONC (and can be re-derived
   // via runtime preset switches); never trust the declared type at

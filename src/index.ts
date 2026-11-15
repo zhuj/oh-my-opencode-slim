@@ -1,4 +1,5 @@
-import { dirname } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Hooks, Plugin, ToolDefinition } from '@opencode-ai/plugin';
 import {
@@ -21,12 +22,17 @@ import {
   type AgentDefinition,
   buildOrchestratorPrompt,
 } from './agents/orchestrator';
+import { BASE_AGENT_PROMPT } from './agents/prompt-layers';
 import {
   buildResolvedAgentRegistry,
   type RegistryHostSnapshot,
   type ResolvedAgentRegistry,
 } from './agents/registry';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
+import {
+  createBundledSkillCommands,
+  registerBundledSkillCommands,
+} from './bundled-skill-commands';
 import {
   getV1BundledSkillPaths,
   removeLegacySkillSyncState,
@@ -39,13 +45,17 @@ import {
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
   TOAST_DURATION_MS,
 } from './config/constants';
-import type { ConfigLoadWarning, ConfigLoadWarningKind } from './config/loader';
+import type { ConfigLoadWarningKind } from './config/loader';
+import { resolveProjectResourceRoots } from './config/project-resource-paths';
+import { appendV1ProjectSkillPaths } from './config/project-skill-host-adapter';
+import { discoverProjectSkills } from './config/project-skills';
 import { RuntimeConfig } from './config/runtime';
 import {
   cloneConfigValue,
   type PluginConfigSnapshot,
   readPluginConfigSnapshot,
 } from './config/snapshot';
+import { discoverV1NativeProjectSkills } from './config/v1-native-project-skills';
 import { getBuildInfo } from './generated/build-info';
 import {
   HEALTH_CHECK,
@@ -88,6 +98,11 @@ import { isImagePart, processImageAttachments } from './hooks/image-hook';
 import { createMessageTransformView } from './hooks/message-transform-view';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
+import {
+  createV1RemainingContextTokensReader,
+  resolveV1TouchedFilePaths,
+} from './hooks/rules-context-usage';
+import { createRulesInjectorHook } from './hooks/rules-injector/hook';
 import type { ChildInputWaitRecord } from './hooks/task-session-manager/child-input-wait';
 import {
   clearChildInputWaitsForSession,
@@ -116,20 +131,32 @@ import {
 import { resolveDesiredMarketplacePackageIds } from './marketplace/status';
 import { createBuiltinMcps, getOverriddenBuiltinMcpKeys } from './mcp';
 import {
+  readConfigCommandNames,
+  resolveMissingCommandMessage,
+} from './skill-command-lookup';
+import {
   ast_grep_replace,
   ast_grep_search,
   createAcpRunTool,
   createCancelTaskTool,
+  createCurrentDateTimeTool,
+  createGetSessionIdTool,
   createInterviewSubmitStateTool,
   createNativeTaskControlTools,
+  createTaskDependencyTreeTool,
+  createTaskListTool,
   createTaskMessageTool,
+  createTaskQueueListTool,
+  createTaskQueueManageTool,
   createTaskReplyTool,
   createTaskReportTool,
   createTaskReviveTool,
   createTaskStatusTool,
+  createTaskWaitTool,
   createWaitForUserTool,
   createWebfetchTool,
 } from './tools';
+import { createResolveModelTool } from './tools/resolve-model';
 import {
   applyActivityEvent,
   resolveEventSessionID,
@@ -155,6 +182,7 @@ import {
   BackgroundJobSupervisor,
   type BackgroundTaskConcurrency,
   createDisplayNameMentionRewriter,
+  createInternalAgentTextPart,
   markPersistedBackgroundChildDelivered,
   normalizeAgentName,
   resolveRuntimeAgentName,
@@ -169,6 +197,7 @@ import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
 } from './utils/background-job-terminal-gate';
+import { delegationDefinitionHook } from './utils/delegation-description';
 import { isPluginDisabledByEnv } from './utils/env';
 import {
   createEventDirectoryScope,
@@ -192,7 +221,10 @@ import { findOwnedPackageJson } from './utils/package-root';
 import { registerPendingSessionPrune } from './utils/pending-session-prunes';
 import { parseModelReference, withTimeout } from './utils/session';
 import { SessionMetadataStore } from './utils/session-metadata';
-import { DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS } from './utils/session-runtime-status';
+import {
+  DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+  getRuntimeSessionStatusSnapshot,
+} from './utils/session-runtime-status';
 import {
   createSessionSelectionReader,
   modelFromMetadataString,
@@ -392,6 +424,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Per-generation image capability cache; the config hook drops the
   // cached promise on config changes and each factory run starts fresh.
   const imageCapabilityCache: ModelImageCapabilityCache = {};
+  let rulesInjector: ReturnType<typeof createRulesInjectorHook>;
+  let projectSkillDiscovery: ReturnType<typeof discoverProjectSkills>;
+  let knownCommandNames: ReadonlySet<string> | undefined;
+  const readGeneratedSkillCommandNames = (
+    ctx as Parameters<Plugin>[0] & {
+      readGeneratedSkillCommandNames?: () => ReadonlySet<string> | undefined;
+    }
+  ).readGeneratedSkillCommandNames;
   let agentDefs: ReturnType<typeof createAgents>;
   // Primary classification (issue #1591): internal names of the built-in
   // orchestrator plus every definition carrying the `primary` flag. Filled
@@ -1017,6 +1057,75 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     if (isCommandEnabled('reflect', commandOptions)) {
       reflectCommandHook = createReflectCommandHook();
     }
+    const pluginInput = ctx as Parameters<Plugin>[0] & {
+      projectSkillPermissionNames?: readonly string[];
+    };
+    const canonicalDirectory = (directory: string): string => {
+      try {
+        return realpathSync(directory);
+      } catch {
+        return resolve(directory);
+      }
+    };
+    const projectDirectory = (
+      ctx.project as { directory?: unknown } | undefined
+    )?.directory;
+    const boundary = canonicalDirectory(
+      ctx.worktree ??
+        (typeof projectDirectory === 'string'
+          ? projectDirectory
+          : ctx.directory),
+    );
+    const activeDirectory = canonicalDirectory(ctx.directory);
+    if (hostFlavor === 'v2') {
+      projectSkillDiscovery = {
+        skills: [],
+        permissionNames: pluginInput.projectSkillPermissionNames ?? [],
+        diagnostics: [],
+      };
+    } else if (existsSync(boundary) && existsSync(activeDirectory)) {
+      const resourceRoots = resolveProjectResourceRoots({
+        activeDirectory,
+        boundaryDirectory: boundary,
+        prefixes: runtime.resourcePrefixes,
+        category: 'skills',
+      });
+      projectSkillDiscovery = discoverProjectSkills({
+        projectDirectory: boundary,
+        resourcePrefixes: runtime.resourcePrefixes,
+        resourceRoots,
+        ...discoverV1NativeProjectSkills(boundary),
+      });
+    } else {
+      projectSkillDiscovery = {
+        skills: [],
+        permissionNames: [],
+        diagnostics: [],
+      };
+    }
+    runtime.setProjectSkillPermissionNames(
+      projectSkillDiscovery.permissionNames,
+    );
+    const client = ctx.client as unknown as {
+      session?: {
+        messages?: (args: { path: { id: string } }) => Promise<unknown>;
+      };
+      provider?: { list?: () => Promise<unknown> };
+    };
+    rulesInjector = createRulesInjectorHook({
+      projectBoundary: boundary,
+      projectActiveDirectory: activeDirectory,
+      prefixes: runtime.resourcePrefixes,
+      resolveTouchedFilePaths: resolveV1TouchedFilePaths,
+      readRemainingContextTokens: createV1RemainingContextTokensReader(
+        (id) =>
+          client.session?.messages?.({ path: { id } }) ??
+          Promise.reject(new Error('unsupported')),
+        () =>
+          client.provider?.list?.() ?? Promise.reject(new Error('unsupported')),
+      ),
+      reportError: () => log('[rules] injection failed'),
+    });
     agentDefs = createAgents(runtime, {
       projectDirectory: ctx.directory,
       hostFlavor,
@@ -1164,6 +1273,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               sessionMetadata.getModel(record.taskID) ??
                 resolvePrimaryModelFromFinalHostConfig(record.agent) ??
                 sessionMetadata.getModel(record.parentSessionID),
+              record.parentSessionID,
             );
           if (
             !revivedRunTracker?.promptMessageIDFor(
@@ -1204,7 +1314,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         markRevivedRunSettled(record.taskID);
         pruneRevivedContext();
         backgroundJobSupervisor!.onTerminal(record);
-        backgroundTaskConcurrency?.releaseTask(record.taskID);
+        if (
+          record.state === 'completed' ||
+          record.state === 'error' ||
+          record.state === 'stopped' ||
+          record.state === 'cancelled'
+        ) {
+          backgroundTaskConcurrency?.releaseTask(
+            record.taskID,
+            record.state === 'stopped' ? 'cancelled' : record.state,
+          );
+        }
       });
       revivedRunTracker = createRevivedRunTracker({
         input: ctx,
@@ -1955,6 +2075,24 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ...taskReportTools,
         ...taskMessageTools,
         ...taskReplyTools,
+        ...createTaskQueueListTool({
+          scheduler: backgroundTaskConcurrency!,
+          shouldManageSession: isManagedSession,
+          readRuntimeStatuses: () => getRuntimeSessionStatusSnapshot(ctx),
+        }),
+        ...createTaskQueueManageTool({
+          scheduler: backgroundTaskConcurrency!,
+          shouldManageSession: isManagedSession,
+        }),
+        ...createTaskDependencyTreeTool({
+          scheduler: backgroundTaskConcurrency!,
+          shouldManageSession: isManagedSession,
+        }),
+        ...createTaskWaitTool({
+          scheduler: backgroundTaskConcurrency!,
+          shouldManageSession: isManagedSession,
+        }),
+        ...createTaskListTool({ backgroundJobBoard: backgroundJobBoard! }),
         // Keep master's v1 registration order (cache-stable tool list).
         ...(hostFlavor !== 'v2' ? taskReviveTools : {}),
         ...taskStatusTools,
@@ -1997,6 +2135,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     tools = {
       ...lifecycleTaskTools,
       ...nativeTaskTools,
+      ...createGetSessionIdTool(),
+      ...createCurrentDateTimeTool(),
+      ...createResolveModelTool(ctx),
       ...interviewTools,
       ...acpRunTools,
       ...(shouldRegisterWebfetch && webfetch ? { webfetch } : {}),
@@ -2383,6 +2524,23 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       if (isCommandEnabled('reflect', commandGate)) {
         reflectCommandHook?.registerCommand(opencodeConfig);
       }
+      // V2 discovers skills in-process and registers permission-safe executors.
+      if (hostFlavor !== 'v2') {
+        const commands = createBundledSkillCommands(
+          undefined,
+          undefined,
+          runtime.plugin?.skillCommandMode,
+        );
+        registerBundledSkillCommands(
+          opencodeConfig,
+          Object.fromEntries(
+            Object.entries(commands).filter(([name]) =>
+              isCommandEnabled(name, commandGate),
+            ),
+          ),
+        );
+      }
+      knownCommandNames = readConfigCommandNames(opencodeConfig);
     },
     retire() {
       registryRetired = true;
@@ -2936,6 +3094,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     agent: agents,
 
     tool: tools,
+    'tool.definition': delegationDefinitionHook,
 
     mcp: mcps,
 
@@ -2959,22 +3118,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             fileURLToPath(import.meta.url),
             'oh-my-opencode-slim',
           )?.path;
+          const skills =
+            opencodeConfig.skills && typeof opencodeConfig.skills === 'object'
+              ? (opencodeConfig.skills as { paths?: string[] })
+              : {};
+          const existingPaths = Array.isArray(skills.paths) ? skills.paths : [];
           if (packageJson) {
-            const skills =
-              opencodeConfig.skills && typeof opencodeConfig.skills === 'object'
-                ? (opencodeConfig.skills as { paths?: string[] })
-                : {};
             removeLegacySkillSyncState(undefined, runtime.disabledSkills);
-            skills.paths = [
-              ...(Array.isArray(skills.paths) ? skills.paths : []),
-              ...getV1BundledSkillPaths(
-                dirname(packageJson),
-                ctx.directory,
-                runtime.disabledSkills,
-              ),
-            ];
-            opencodeConfig.skills = skills;
           }
+          skills.paths = appendV1ProjectSkillPaths(
+            [
+              ...existingPaths,
+              ...(packageJson
+                ? getV1BundledSkillPaths(
+                    dirname(packageJson),
+                    ctx.directory,
+                    runtime.disabledSkills,
+                  )
+                : []),
+            ],
+            projectSkillDiscovery.skills,
+          );
+          opencodeConfig.skills = skills;
         } catch (error) {
           log('[plugin] bundled v1 skill registration failed', String(error));
         }
@@ -3281,6 +3446,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
         if (eventSessionID && event.type === 'session.deleted') {
           toolLoopGuard?.resetSession(eventSessionID);
+          await rulesInjector.clearSession(eventSessionID);
         }
         if (eventSessionID) {
           if (taskActivityTracker) {
@@ -3531,6 +3697,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // generation cannot observe one stale fallback call.
       foregroundFallback?.dispose();
       try {
+        await rulesInjector.clearAll();
         await taskSessionManagerHook?.event({
           event: { type: 'server.instance.disposed' },
         });
@@ -3632,6 +3799,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         });
 
       const slashCommand = (input as { command?: string }).command;
+      if (slashCommand && !commandEnabled(slashCommand)) return;
       if (
         ((slashCommand === 'interview' && commandEnabled('interview')) ||
           (slashCommand === 'implement' && commandEnabled('implement'))) &&
@@ -3668,6 +3836,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           output as { parts: Array<{ type: string; text?: string }> },
         );
       }
+      // Parity with the auto-slash-command executor: a name owned by neither
+      // the merged config nor the generated skill commands is reported here
+      // instead of leaving the model with a bare, unexplained argument blob.
+      const missing = resolveMissingCommandMessage(
+        input.command,
+        knownCommandNames,
+        readGeneratedSkillCommandNames?.(),
+      );
+      if (missing !== undefined) {
+        const parts = (
+          output as { parts: Array<{ type: string; text?: string }> }
+        ).parts;
+        parts.length = 0;
+        parts.push(createInternalAgentTextPart(missing));
+      }
     },
 
     ...(chatHeadersHook
@@ -3681,6 +3864,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // v1 compaction requests use the same message transform as normal turns.
     // v2 handles compaction in its separate session.compaction bridge.
     'experimental.session.compacting': async ({ sessionID }) => {
+      await rulesInjector.clearSession(sessionID);
       compactingSessionIds.add(sessionID);
     },
 
@@ -4115,10 +4299,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         // Dedup by the EFFECTIVE prompt, not by default-prompt markers:
         // a custom replacement without `<Role>` previously slipped past
         // the marker check and was appended twice (P + host + P).
+        const rolePrompt = targetPrompt?.startsWith(`${BASE_AGENT_PROMPT}\n\n`)
+          ? targetPrompt.slice(`${BASE_AGENT_PROMPT}\n\n`.length)
+          : targetPrompt;
         const alreadyInjected =
-          !!targetPrompt &&
+          !!rolePrompt &&
           output.system.some(
-            (s) => typeof s === 'string' && s.includes(targetPrompt),
+            (s) => typeof s === 'string' && s.includes(rolePrompt),
           );
         if (!alreadyInjected && targetPrompt) {
           // Place the orchestrator prompt after AGENTS.md so the user's
@@ -4293,6 +4480,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         output as never,
       );
       if (taskSessionManagerHook) await taskSessionManagerAfter(input, output);
+      await rulesInjector.onToolExecuteAfter(input as never, output as never);
     },
   } as Hooks & {
     'v2.pendingRefusalOutcome':

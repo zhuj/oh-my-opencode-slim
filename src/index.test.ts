@@ -1,3 +1,5 @@
+/// <reference types="bun-types" />
+
 import {
   afterEach,
   beforeEach,
@@ -13,12 +15,12 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import * as os from 'node:os';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import * as promiseTimers from 'node:timers/promises';
 import { testRender } from '@opentui/solid';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
+import { CUSTOM_SKILLS } from './cli/custom-skills-registry';
 import {
   CompanionManager,
   companionSessionIdForDirectory,
@@ -53,6 +55,7 @@ import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
 import { MarketplaceStore } from './marketplace/store';
 import { createBuiltinMcps } from './mcp';
+import { createTmpDir, removeTmpDir, withTmpDir } from './test-utils';
 import tuiPlugin from './tui';
 import {
   getTuiStatePath,
@@ -173,18 +176,19 @@ describe('plugin tool registration', () => {
   const originalEnv: Partial<
     Record<(typeof ENV_KEYS)[number], string | undefined>
   > = {};
+  let fixtureDir = '';
 
   beforeEach(() => {
     for (const key of ENV_KEYS) {
       originalEnv[key] = process.env[key];
     }
     delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
-    const base = path.join(os.tmpdir(), 'oh-my-opencode-slim-hitl-empty');
-    process.env.OPENCODE_CONFIG_DIR = `${base}-config`;
-    process.env.XDG_CONFIG_HOME = `${base}-xdg`;
-    process.env.XDG_DATA_HOME = `${base}-data`;
-    process.env.XDG_CACHE_HOME = `${base}-cache`;
-    process.env.OPENCODE_LOG_DIR = `${base}-logs`;
+    fixtureDir = createTmpDir('oh-my-opencode-slim-hitl-empty-');
+    process.env.OPENCODE_CONFIG_DIR = path.join(fixtureDir, 'config');
+    process.env.XDG_CONFIG_HOME = path.join(fixtureDir, 'xdg');
+    process.env.XDG_DATA_HOME = path.join(fixtureDir, 'data');
+    process.env.XDG_CACHE_HOME = path.join(fixtureDir, 'cache');
+    process.env.OPENCODE_LOG_DIR = path.join(fixtureDir, 'logs');
   });
 
   afterEach(() => {
@@ -196,6 +200,7 @@ describe('plugin tool registration', () => {
         process.env[key] = orig;
       }
     }
+    removeTmpDir(fixtureDir);
   });
 
   test('registers wait_for_user and recovers a stale orchestrator session mapping', async () => {
@@ -218,18 +223,25 @@ describe('plugin tool registration', () => {
 
     const hooks = await plugin({
       client,
-      directory: '/private/tmp/oh-my-opencode-slim-hitl-project',
-      worktree: '/private/tmp/oh-my-opencode-slim-hitl-project',
+      directory: fixtureDir,
+      worktree: fixtureDir,
       serverUrl: new URL('http://127.0.0.1:4096'),
     } as never);
 
     expect(hooks.tool?.task_status).toBeDefined();
+    expect(hooks.tool?.task_queue_list).toBeDefined();
+    expect(hooks.tool?.task_queue_manage).toBeDefined();
+    expect(hooks.tool?.task_dependency_tree).toBeDefined();
+    expect(hooks.tool?.task_wait).toBeDefined();
+    expect(hooks.tool?.task_list).toBeDefined();
+    expect(hooks.tool?.task_result).toBeUndefined();
     expect(hooks.tool?.task_message).toBeDefined();
     expect(hooks.tool?.task_cancel).toBeDefined();
     expect(hooks.tool?.task_revive).toBeDefined();
     expect(hooks.tool?.wait_for_user).toBeDefined();
     expect(hooks.tool?.marketplace_inspect).toBeDefined();
     expect(hooks.tool?.marketplace_manage).toBeDefined();
+    expect(hooks.tool?.get_session_id).toBeDefined();
     await expect(
       hooks.tool?.wait_for_user?.execute(
         { reason: 'Complete the external approval.' },
@@ -239,7 +251,7 @@ describe('plugin tool registration', () => {
   });
 
   test('v2 host leaves wait_for_user unregistered', async () => {
-    const projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-wfu-gate-');
+    const projectDir = createTmpDir('oh-my-opencode-slim-wfu-gate-');
     const noop = async () => ({});
     const session = new Proxy({}, { get: () => noop }) as Record<
       string,
@@ -275,61 +287,71 @@ describe('plugin tool registration', () => {
       expect(hooks.tool?.task_revive).toBeUndefined();
       await hooks.dispose?.();
     } finally {
-      await rm(projectDir, { recursive: true, force: true });
+      removeTmpDir(projectDir);
     }
   });
 
   test('does not retain loop-guard state when search-path validation rejects', async () => {
-    const projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-search-hook-');
-    const client = createPluginClient(async () => ({}));
-    let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+    await withTmpDir(async (projectDir) => {
+      const client = createPluginClient(async () => ({}));
+      let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
 
-    try {
-      hooks = await plugin({
-        client,
-        directory: projectDir,
-        worktree: projectDir,
-        serverUrl: new URL('http://127.0.0.1:4096'),
-      } as never);
+      try {
+        hooks = await plugin({
+          client,
+          directory: projectDir,
+          worktree: projectDir,
+          serverUrl: new URL('http://127.0.0.1:4096'),
+        } as never);
 
-      const rejectedPath = path.join(projectDir, 'created-after-rejection');
-      await expect(
-        hooks['tool.execute.before']?.(
-          { tool: 'glob', sessionID: 'search-loop', callID: 'rejected' },
-          { args: { path: rejectedPath } },
-        ),
-      ).rejects.toThrow(/Search path does not exist/);
+        const rejectedPath = path.join(projectDir, 'created-after-rejection');
+        await expect(
+          hooks['tool.execute.before']?.(
+            { tool: 'glob', sessionID: 'search-loop', callID: 'rejected' },
+            { args: { path: rejectedPath } },
+          ),
+        ).rejects.toThrow(/Search path does not exist/);
 
-      // A host should not emit `after` after a rejected `before`, but this
-      // simulates that stray completion to ensure it cannot poison tracking.
-      await mkdir(rejectedPath);
-      await hooks['tool.execute.after']?.(
-        { tool: 'glob', sessionID: 'search-loop', callID: 'rejected' },
-        { output: 'same', metadata: {} },
-      );
-
-      for (let i = 0; i < 4; i++) {
-        const callID = `valid-${i}`;
-        await hooks['tool.execute.before']?.(
-          { tool: 'glob', sessionID: 'search-loop', callID },
-          { args: { path: rejectedPath } },
-        );
+        // A host should not emit `after` after a rejected `before`, but this
+        // simulates that stray completion to ensure it cannot poison tracking.
+        await mkdir(rejectedPath);
         await hooks['tool.execute.after']?.(
-          { tool: 'glob', sessionID: 'search-loop', callID },
-          { output: 'same', metadata: {} },
+          {
+            tool: 'glob',
+            sessionID: 'search-loop',
+            callID: 'rejected',
+            args: { path: rejectedPath },
+          },
+          { title: 'glob', output: 'same', metadata: {} },
         );
-      }
 
-      await expect(
-        hooks['tool.execute.before']?.(
-          { tool: 'glob', sessionID: 'search-loop', callID: 'valid-4' },
-          { args: { path: rejectedPath } },
-        ),
-      ).resolves.toBeUndefined();
-    } finally {
-      await hooks?.dispose?.();
-      await rm(projectDir, { recursive: true, force: true });
-    }
+        for (let i = 0; i < 4; i++) {
+          const callID = `valid-${i}`;
+          await hooks['tool.execute.before']?.(
+            { tool: 'glob', sessionID: 'search-loop', callID },
+            { args: { path: rejectedPath } },
+          );
+          await hooks['tool.execute.after']?.(
+            {
+              tool: 'glob',
+              sessionID: 'search-loop',
+              callID,
+              args: { path: rejectedPath },
+            },
+            { title: 'glob', output: 'same', metadata: {} },
+          );
+        }
+
+        await expect(
+          hooks['tool.execute.before']?.(
+            { tool: 'glob', sessionID: 'search-loop', callID: 'valid-4' },
+            { args: { path: rejectedPath } },
+          ),
+        ).resolves.toBeUndefined();
+      } finally {
+        await hooks?.dispose?.();
+      }
+    });
   });
 
   test('exposes an idempotent top-level dispose finalizer', async () => {
@@ -352,8 +374,8 @@ describe('plugin tool registration', () => {
 
     const hooks = await plugin({
       client,
-      directory: '/private/tmp/oh-my-opencode-slim-dispose-project',
-      worktree: '/private/tmp/oh-my-opencode-slim-dispose-project',
+      directory: fixtureDir,
+      worktree: fixtureDir,
       serverUrl: new URL('http://127.0.0.1:4096'),
     } as never);
 
@@ -364,9 +386,7 @@ describe('plugin tool registration', () => {
 
   test('v1 checks the project native skill inventory at chat.params, not config time', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), 'marketplace-v1-skills-'),
-    );
+    const root = createTmpDir('marketplace-v1-skills-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -440,15 +460,13 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('status and reload report a disabled marketplace against the live registry', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), 'marketplace-disabled-live-'),
-    );
+    const root = createTmpDir('marketplace-disabled-live-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -510,14 +528,14 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('activates only marketplace packages selected by the resolved preset at first host finalization', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-marketplace-finalize-'),
+    const root = await createTmpDir(
+      'oh-my-opencode-slim-marketplace-finalize-',
     );
     const configDir = path.join(root, 'config');
     const dataDir = path.join(root, 'data');
@@ -811,15 +829,13 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      await removeTmpDir(root);
     }
   });
 
   test('v1 config hook rejects selected packages with MCPs absent from an MCP-less host config', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-marketplace-mcp-'),
-    );
+    const root = await createTmpDir('oh-my-opencode-slim-marketplace-mcp-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -873,14 +889,14 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      await removeTmpDir(root);
     }
   });
 
   test('fresh desired projection uses newly enabled builtin MCPs', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      '/tmp/oh-my-opencode-slim-marketplace-fresh-mcp-',
+    const root = await createTmpDir(
+      'oh-my-opencode-slim-marketplace-fresh-mcp-',
     );
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
@@ -960,13 +976,13 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      await removeTmpDir(root);
     }
   });
 
   test('user-defined MCP override wins and reconciles back when removed', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp('/tmp/oh-my-opencode-slim-mcp-override-');
+    const root = await createTmpDir('oh-my-opencode-slim-mcp-override-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -1022,13 +1038,13 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      await removeTmpDir(root);
     }
   });
 
   test('config re-invocation with the same mutated object keeps built-ins', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp('/tmp/oh-my-opencode-slim-mcp-reinvoke-');
+    const root = await createTmpDir('oh-my-opencode-slim-mcp-reinvoke-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -1080,14 +1096,14 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      await removeTmpDir(root);
     }
   });
 
   test('marketplace status follows the active runtime preset over disk and environment selection', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      '/tmp/oh-my-opencode-slim-marketplace-runtime-preset-',
+    const root = await createTmpDir(
+      'oh-my-opencode-slim-marketplace-runtime-preset-',
     );
     const configDir = path.join(root, 'config');
     const dataDir = path.join(root, 'data');
@@ -1185,7 +1201,7 @@ describe('plugin tool registration', () => {
       await hooks.dispose?.();
       RuntimeConfig.reset(root);
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      await removeTmpDir(root);
     }
   });
 
@@ -1236,8 +1252,8 @@ describe('plugin tool registration', () => {
     };
     try {
       for (const invalidPreset of invalidPresetCases) {
-        const root = await mkdtemp(
-          '/tmp/oh-my-opencode-slim-invalid-marketplace-preset-',
+        const root = await createTmpDir(
+          'oh-my-opencode-slim-invalid-marketplace-preset-',
         );
         const configDir = path.join(root, 'config');
         await mkdir(configDir, { recursive: true });
@@ -1269,7 +1285,7 @@ describe('plugin tool registration', () => {
           expect(hostConfig.agent).not.toHaveProperty('selected-agent');
         } finally {
           await hooks.dispose?.();
-          await rm(root, { recursive: true, force: true });
+          await removeTmpDir(root);
         }
       }
     } finally {
@@ -1292,7 +1308,7 @@ describe('plugin tool registration', () => {
         abortCalls.push(path.id);
         return {};
       });
-      const configDir = await mkdtemp('/tmp/oh-my-opencode-slim-phase-2r-');
+      const configDir = createTmpDir('oh-my-opencode-slim-phase-2r-');
       await Bun.write(
         `${configDir}/oh-my-opencode-slim.json`,
         JSON.stringify({
@@ -1383,14 +1399,14 @@ describe('plugin tool registration', () => {
         globalThis.setTimeout = originalSetTimeout;
         globalThis.clearTimeout = originalClearTimeout;
         Date.now = originalNow;
-        await rm(configDir, { recursive: true, force: true });
+        removeTmpDir(configDir);
       }
     },
   );
 
   test('disposing a plugin generation retracts its board spinner before same-PID re-init', async () => {
     const originalEnv = { ...process.env };
-    const projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-generation-');
+    const projectDir = await createTmpDir('oh-my-opencode-slim-generation-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -1442,8 +1458,251 @@ describe('plugin tool registration', () => {
       await second?.dispose?.();
       await first?.dispose?.();
       process.env = originalEnv;
-      await rm(projectDir, { recursive: true, force: true });
+      await removeTmpDir(projectDir);
     }
+  });
+
+  test('reuses discovery across active ancestors up to project boundary and appends paths in place', async () => {
+    await withTmpDir(async (scratch) => {
+      const root = path.join(scratch, 'project');
+      const active = path.join(root, 'nested', 'active');
+      const above = path.dirname(root);
+      const makeSkill = async (dir: string, name: string) => {
+        const skill = path.join(dir, '.local', 'skills', name);
+        await mkdir(skill, { recursive: true });
+        await Bun.write(
+          path.join(skill, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: test\n---\n`,
+        );
+      };
+      await makeSkill(active, 'active-skill');
+      await makeSkill(path.dirname(active), 'ancestor-skill');
+      await makeSkill(root, 'boundary-skill');
+      await makeSkill(above, 'outside-skill');
+      const client = createPluginClient(async () => ({}));
+      const hooks = await plugin({
+        client,
+        directory: active,
+        project: { directory: root },
+        serverUrl: new URL('http://127.0.0.1:4096'),
+      } as never);
+      const hostConfig = {
+        skills: { paths: ['/host/skill'] },
+        custom: { keep: true },
+      };
+      try {
+        const returned = await hooks.config?.(hostConfig as never);
+        expect(returned).toBeUndefined();
+        expect(hostConfig.custom).toEqual({ keep: true });
+        expect(hostConfig.skills.paths).toContain('/host/skill');
+        for (const name of [
+          'active-skill',
+          'ancestor-skill',
+          'boundary-skill',
+        ]) {
+          expect(hostConfig.skills.paths?.some((p) => p.endsWith(name))).toBe(
+            true,
+          );
+        }
+        expect(
+          hostConfig.skills.paths?.some((p) => p.endsWith('outside-skill')),
+        ).toBe(false);
+        const agent = hooks.agent?.orchestrator as
+          | { permission?: unknown }
+          | undefined;
+        expect(agent).toBeDefined();
+      } finally {
+        await hooks.dispose?.();
+      }
+    });
+  });
+
+  test('worktree boundary takes precedence and resolved rule paths inject additively but error status does not', async () => {
+    await withTmpDir(async (scratch) => {
+      const root = path.join(scratch, 'project');
+      const outside = path.dirname(root);
+      const active = path.join(root, 'active');
+      const outsideSkill = path.join(
+        outside,
+        '.local',
+        'skills',
+        'outside-worktree-skill',
+      );
+      await mkdir(active, { recursive: true });
+      await mkdir(outsideSkill, { recursive: true });
+      await Bun.write(
+        path.join(outsideSkill, 'SKILL.md'),
+        '---\nname: outside-worktree-skill\ndescription: boundary check\n---\n',
+      );
+      await mkdir(path.join(root, '.local', 'rules'), { recursive: true });
+      await Bun.write(
+        path.join(root, '.local', 'rules', 'all.md'),
+        '---\nalwaysApply: true\n---\n# Rule\nApply this rule.\n',
+      );
+      const hooks = await plugin({
+        client: createPluginClient(async () => ({})),
+        directory: active,
+        worktree: root,
+        project: { directory: outside },
+        serverUrl: new URL('http://127.0.0.1:4096'),
+      } as never);
+      const base = {
+        title: 'read',
+        output: 'original',
+        metadata: {},
+        resolvedFilePaths: [path.join(root, 'file.ts')],
+      };
+      try {
+        const hostConfig = { skills: { paths: [] as string[] } };
+        await hooks.config?.(hostConfig as never);
+        expect(
+          hostConfig.skills.paths.some((entry) =>
+            entry.includes('outside-worktree-skill'),
+          ),
+        ).toBe(false);
+        const success = structuredClone(base);
+        await hooks['tool.execute.after']?.(
+          { tool: 'read', sessionID: 'rules-success' } as never,
+          success as never,
+        );
+        expect(success.output).toContain('original');
+        expect(success.output).toContain('Apply this rule.');
+        const errored = structuredClone(base);
+        await hooks['tool.execute.after']?.(
+          { tool: 'read', sessionID: 'rules-error', status: 'error' } as never,
+          errored as never,
+        );
+        expect(errored.output).toBe('original');
+      } finally {
+        await hooks.dispose?.();
+      }
+    });
+  });
+
+  test('reuses discovered skill names and paths after the fixture changes', async () => {
+    await withTmpDir(async (root) => {
+      const skillDir = path.join(root, '.local', 'skills', 'shared-skill');
+      await mkdir(skillDir, { recursive: true });
+      const skillFile = path.join(skillDir, 'SKILL.md');
+      await Bun.write(
+        skillFile,
+        '---\nname: shared-skill\ndescription: test\n---\n',
+      );
+      const configDir = path.join(root, 'config');
+      await mkdir(configDir);
+      await Bun.write(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          companion: { enabled: false },
+          agents: { oracle: { skills_include_local: true } },
+        }),
+      );
+      const originalConfigDir = process.env.OPENCODE_CONFIG_DIR;
+      process.env.OPENCODE_CONFIG_DIR = configDir;
+      let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+      try {
+        hooks = await plugin({
+          client: createPluginClient(async () => ({})),
+          directory: root,
+          worktree: root,
+          serverUrl: new URL('http://127.0.0.1:4096'),
+        } as never);
+        const oracle = hooks.agent?.oracle as {
+          permission?: { skill?: Record<string, string> };
+        };
+        expect(oracle.permission?.skill?.['shared-skill']).toBe('allow');
+        // Remove the on-disk candidate after bootstrap. Config can only still
+        // expose its path if it reuses the initialization discovery result.
+        await rm(skillDir, { recursive: true, force: true });
+        const config = { skills: { paths: ['/host/skills'] } };
+        await hooks.config?.(config as never);
+        expect(config.skills.paths).toContain('/host/skills');
+        expect(config.skills.paths).toContain(skillDir);
+      } finally {
+        await hooks?.dispose?.();
+        if (originalConfigDir === undefined)
+          delete process.env.OPENCODE_CONFIG_DIR;
+        else process.env.OPENCODE_CONFIG_DIR = originalConfigDir;
+      }
+    });
+  });
+
+  test('constructed disabled agents stay absent and user skill permission precedence is preserved', async () => {
+    await withTmpDir(async (projectDir) => {
+      const skillDir = path.join(
+        projectDir,
+        '.opencode',
+        'skills',
+        'project-only',
+      );
+      await mkdir(skillDir, { recursive: true });
+      await Bun.write(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: project-only\ndescription: fixture\n---\n',
+      );
+      const configDir = path.join(projectDir, 'config');
+      await mkdir(configDir);
+      process.env.OPENCODE_CONFIG_DIR = configDir;
+      await Bun.write(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          companion: { enabled: false },
+          disabled_agents: ['oracle'],
+          agents: {
+            oracle: {
+              skills_include_local: true,
+              permission: {
+                skill: { 'project-only': 'deny', 'user-only': 'ask' },
+              },
+            },
+          },
+        }),
+      );
+      const hooks = await plugin({
+        client: createPluginClient(async () => ({})),
+        directory: projectDir,
+        worktree: projectDir,
+        serverUrl: new URL('http://127.0.0.1:4096'),
+      } as never);
+      try {
+        expect(hooks.agent?.oracle).toBeUndefined();
+      } finally {
+        await hooks.dispose?.();
+      }
+
+      await Bun.write(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          companion: { enabled: false },
+          agents: {
+            oracle: {
+              skills_include_local: true,
+              permission: {
+                skill: { 'project-only': 'deny', 'user-only': 'ask' },
+              },
+            },
+          },
+        }),
+      );
+      const enabledHooks = await plugin({
+        client: createPluginClient(async () => ({})),
+        directory: projectDir,
+        worktree: projectDir,
+        serverUrl: new URL('http://127.0.0.1:4096'),
+      } as never);
+      try {
+        const oracle = enabledHooks.agent?.oracle as {
+          permission?: { skill?: Record<string, string> };
+        };
+        expect(oracle.permission?.skill?.['project-only']).toBe('deny');
+        expect(oracle.permission?.skill?.['user-only']).toBe('ask');
+        expect(
+          oracle.permission?.skill?.['unconfigured-skill'],
+        ).toBeUndefined();
+      } finally {
+        await enabledHooks.dispose?.();
+      }
+    });
   });
 });
 
@@ -1453,7 +1712,7 @@ describe('plugin built-in agent disabling', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-builtin-agents-');
+    projectDir = createTmpDir('oh-my-opencode-slim-builtin-agents-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -1470,7 +1729,7 @@ describe('plugin built-in agent disabling', () => {
 
   afterEach(async () => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   });
 
   const createHooks = () =>
@@ -1678,7 +1937,7 @@ describe('plugin reload generation cleanup', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-gens-');
+    projectDir = await createTmpDir('oh-my-opencode-slim-gens-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -1695,7 +1954,7 @@ describe('plugin reload generation cleanup', () => {
 
   afterEach(async () => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    await removeTmpDir(projectDir);
   });
 
   test('file read leaves the composed reminder payload byte-identical', async () => {
@@ -2962,6 +3221,8 @@ describe('plugin TUI agent activity', () => {
   let originalEnv: typeof process.env;
   let projectDir: string;
   let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+  let releaseFixture: () => void;
+  let fixtureRun: Promise<void>;
   const createActivityPlugin = () =>
     plugin({
       client: createPluginClient(async () => ({})),
@@ -2972,27 +3233,38 @@ describe('plugin TUI agent activity', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-tui-activity-');
-    process.env = {
-      ...originalEnv,
-      OPENCODE_CONFIG_DIR: projectDir,
-      XDG_DATA_HOME: `${projectDir}/data`,
-      XDG_CACHE_HOME: `${projectDir}/cache`,
-      OPENCODE_LOG_DIR: `${projectDir}/logs`,
-    };
-    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
-    await Bun.write(
-      `${projectDir}/oh-my-opencode-slim.json`,
-      JSON.stringify({ companion: { enabled: false } }),
-    );
+    const ready = new Promise<void>((resolve) => {
+      fixtureRun = withTmpDir(async (tmp) => {
+        projectDir = tmp;
+        process.env = {
+          ...originalEnv,
+          OPENCODE_CONFIG_DIR: projectDir,
+          XDG_DATA_HOME: `${projectDir}/data`,
+          XDG_CACHE_HOME: `${projectDir}/cache`,
+          OPENCODE_LOG_DIR: `${projectDir}/logs`,
+        };
+        delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+        await Bun.write(
+          `${projectDir}/oh-my-opencode-slim.json`,
+          JSON.stringify({ companion: { enabled: false } }),
+        );
 
-    hooks = await createActivityPlugin();
+        hooks = await createActivityPlugin();
+        resolve();
+        await new Promise<void>((release) => {
+          releaseFixture = release;
+        });
+        await hooks?.dispose?.();
+      });
+    });
+    await ready;
   });
 
   afterEach(async () => {
-    await hooks?.dispose?.();
+    releaseFixture();
+    await fixtureRun;
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    hooks = undefined;
   });
 
   const busy = (sessionID: string) =>
@@ -3729,6 +4001,8 @@ describe('background task admission model resolution', () => {
   let originalEnv: typeof process.env;
   let projectDir: string;
   let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+  let releaseFixture: () => void;
+  let fixtureRun: Promise<void>;
 
   const createPlugin = () =>
     plugin({
@@ -3740,37 +4014,46 @@ describe('background task admission model resolution', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-concurrency-'),
-    );
-    process.env = {
-      ...originalEnv,
-      OPENCODE_CONFIG_DIR: projectDir,
-      XDG_DATA_HOME: `${projectDir}/data`,
-      XDG_CACHE_HOME: `${projectDir}/cache`,
-      OPENCODE_LOG_DIR: `${projectDir}/logs`,
-    };
-    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
-    await Bun.write(
-      `${projectDir}/oh-my-opencode-slim.json`,
-      JSON.stringify({
-        companion: { enabled: false },
-        backgroundJobs: {
-          concurrency: {
-            defaultConcurrency: 0,
-            providerConcurrency: { openai: 1 },
-          },
-        },
-        agents: { fixer: { inheritModelFrom: 'session' } },
-      }),
-    );
-    hooks = await createPlugin();
+    const ready = new Promise<void>((resolve) => {
+      fixtureRun = withTmpDir(async (tmp) => {
+        projectDir = tmp;
+        process.env = {
+          ...originalEnv,
+          OPENCODE_CONFIG_DIR: projectDir,
+          XDG_DATA_HOME: `${projectDir}/data`,
+          XDG_CACHE_HOME: `${projectDir}/cache`,
+          OPENCODE_LOG_DIR: `${projectDir}/logs`,
+        };
+        delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+        await Bun.write(
+          `${projectDir}/oh-my-opencode-slim.json`,
+          JSON.stringify({
+            companion: { enabled: false },
+            backgroundJobs: {
+              concurrency: {
+                defaultConcurrency: 0,
+                providerConcurrency: { openai: 1 },
+              },
+            },
+            agents: { fixer: { inheritModelFrom: 'session' } },
+          }),
+        );
+        hooks = await createPlugin();
+        resolve();
+        await new Promise<void>((release) => {
+          releaseFixture = release;
+        });
+        await hooks?.dispose?.();
+      });
+    });
+    await ready;
   });
 
   afterEach(async () => {
-    await hooks?.dispose?.();
+    releaseFixture();
+    await fixtureRun;
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    hooks = undefined;
   });
 
   /** Admit two session-inheriting fixer tasks; the second must stay
@@ -4023,14 +4306,13 @@ describe('background task admission model resolution', () => {
 
 describe('plugin config model inheritance', () => {
   let originalEnv: typeof process.env;
-  const configDirs: string[] = [];
   // Directory of the most recent loadConfiguredPlugin() call, for tests
   // that need the RuntimeConfig singleton the plugin initialized.
   let lastConfigDir: string | undefined;
   let client: ReturnType<typeof createPluginClient>;
   const hostChildren = new Map<
     string,
-    { parentID: string; prompted: boolean }
+    { parentID: string; prompted: boolean; agent: string }
   >();
   const transcripts = new Map<string, unknown[]>();
   const primary = { providerID: 'openrouter', modelID: 'openrouter/auto' };
@@ -4042,6 +4324,10 @@ describe('plugin config model inheritance', () => {
       operator: { model: delegatedChain },
     },
   };
+  const fixtures: Array<{
+    release: () => void;
+    run: Promise<void>;
+  }> = [];
 
   beforeEach(() => {
     originalEnv = { ...process.env };
@@ -4051,65 +4337,107 @@ describe('plugin config model inheritance', () => {
   });
 
   afterEach(async () => {
-    process.env = originalEnv;
-    while (configDirs.length > 0) {
-      const configDir = configDirs.pop();
-      if (configDir) {
-        await rm(configDir, { recursive: true, force: true });
-      }
+    while (fixtures.length > 0) {
+      const fixture = fixtures.pop();
+      fixture?.release();
+      await fixture?.run;
     }
+    process.env = originalEnv;
   });
 
   async function loadConfiguredPlugin(
     config: Record<string, unknown>,
-    existingDirectory?: string,
+    existingDirectoryOrFallbackMessages?:
+      | string
+      | Array<Record<string, unknown>>,
     hostFlavor?: 'v2',
   ) {
-    const configDir =
-      existingDirectory ??
-      (await mkdtemp(path.join(os.tmpdir(), 'oh-my-opencode-inheritance-')));
-    if (!existingDirectory) configDirs.push(configDir);
-    lastConfigDir = configDir;
-    await Bun.write(
-      `${configDir}/oh-my-opencode-slim.json`,
-      JSON.stringify(config),
+    const existingDirectory =
+      typeof existingDirectoryOrFallbackMessages === 'string'
+        ? existingDirectoryOrFallbackMessages
+        : undefined;
+    const fallbackMessages = Array.isArray(existingDirectoryOrFallbackMessages)
+      ? existingDirectoryOrFallbackMessages
+      : undefined;
+    let release!: () => void;
+    let resolveReady!: (hooks: Awaited<ReturnType<typeof plugin>>) => void;
+    let rejectReady!: (error: unknown) => void;
+    const ready = new Promise<Awaited<ReturnType<typeof plugin>>>(
+      (resolve, reject) => {
+        resolveReady = resolve;
+        rejectReady = reject;
+      },
     );
-    process.env = {
-      ...originalEnv,
-      OPENCODE_CONFIG_DIR: configDir,
-      XDG_DATA_HOME: `${configDir}/data`,
-      XDG_CACHE_HOME: `${configDir}/cache`,
-      OPENCODE_LOG_DIR: `${configDir}/logs`,
-    };
-
-    client = createPluginClient(async () => ({}));
-    client.session.status = async () => ({ data: {} });
-    client.session.get = async ({ path }: { path: { id: string } }) => {
-      const child = hostChildren.get(path.id);
-      return child ? { data: { parentID: child.parentID } } : {};
-    };
-    client.session.messages = async ({ path }: { path: { id: string } }) => ({
-      data:
-        hostChildren.get(path.id)?.prompted === false
-          ? []
-          : (transcripts.get(path.id) ?? [
-              {
-                info: {
-                  role: 'assistant',
-                  time: { completed: Date.now() },
-                  finish: 'stop',
-                },
-                parts: [{ type: 'text', text: 'done' }],
-              },
-            ]),
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    return plugin({
-      client,
-      directory: configDir,
-      worktree: configDir,
-      serverUrl: new URL('http://127.0.0.1:4096'),
-      hostFlavor,
-    } as never);
+    const load = async (configDir: string) => {
+      try {
+        lastConfigDir = configDir;
+        await Bun.write(
+          `${configDir}/oh-my-opencode-slim.json`,
+          JSON.stringify(config),
+        );
+        process.env = {
+          ...originalEnv,
+          OPENCODE_CONFIG_DIR: configDir,
+          XDG_DATA_HOME: `${configDir}/data`,
+          XDG_CACHE_HOME: `${configDir}/cache`,
+          OPENCODE_LOG_DIR: `${configDir}/logs`,
+        };
+
+        client = createPluginClient(async () => ({}));
+        client.session.status = async () => ({ data: {} });
+        client.session.get = async ({ path }: { path: { id: string } }) => {
+          const child = hostChildren.get(path.id);
+          return child
+            ? {
+                data: {
+                  id: path.id,
+                  parentID: child.parentID,
+                  agent: child.agent,
+                },
+              }
+            : {};
+        };
+        client.session.messages = async ({
+          path,
+        }: {
+          path: { id: string };
+        }) => ({
+          data:
+            hostChildren.get(path.id)?.prompted === false
+              ? []
+              : (transcripts.get(path.id) ??
+                fallbackMessages ?? [
+                  {
+                    info: {
+                      role: 'assistant',
+                      time: { completed: Date.now() },
+                      finish: 'stop',
+                    },
+                    parts: [{ type: 'text', text: 'done' }],
+                  },
+                ]),
+        });
+        const hooks = await plugin({
+          client,
+          directory: configDir,
+          worktree: configDir,
+          serverUrl: new URL('http://127.0.0.1:4096'),
+          hostFlavor,
+        } as never);
+        resolveReady(hooks);
+        await done;
+        await hooks.dispose?.();
+      } catch (error) {
+        rejectReady(error);
+        throw error;
+      }
+    };
+    const run = existingDirectory ? load(existingDirectory) : withTmpDir(load);
+    fixtures.push({ release, run });
+    return ready;
   }
 
   test('v1 exposes enabled bundled skills without overriding user skills', async () => {
@@ -4230,7 +4558,7 @@ describe('plugin config model inheritance', () => {
   ): Promise<void> {
     const hooks = await loadConfiguredPlugin(config);
     try {
-      await hooks.config?.({ agent: hostAgent });
+      await hooks.config?.({ agent: hostAgent } as never);
       await hooks['chat.message']?.(
         {
           sessionID: 'orchestrator-1',
@@ -4324,7 +4652,11 @@ describe('plugin config model inheritance', () => {
     }
     const childID = options.task_id ?? `ses_child_${callID}`;
     if (!hostChildren.has(childID)) {
-      hostChildren.set(childID, { parentID: parentSessionID, prompted: false });
+      hostChildren.set(childID, {
+        parentID: parentSessionID,
+        prompted: false,
+        agent,
+      });
     }
     const childOutput = {
       message: {
@@ -4340,7 +4672,11 @@ describe('plugin config model inheritance', () => {
       { sessionID: childID, agent, model: primary } as never,
       childOutput as never,
     );
-    hostChildren.set(childID, { parentID: parentSessionID, prompted: true });
+    hostChildren.set(childID, {
+      parentID: parentSessionID,
+      prompted: true,
+      agent,
+    });
     return {
       subagentType: output.args.subagent_type,
       childModel: childOutput.message.model,
@@ -4448,6 +4784,42 @@ describe('plugin config model inheritance', () => {
         expect(agents[name]).not.toHaveProperty('model');
         expect(agents[name]).not.toHaveProperty('variant');
       }
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('registers every bundled skill command without replacing a host command', async () => {
+    // Given
+    const hooks = await loadConfiguredPlugin({});
+    const hostCommand = {
+      description: 'Host description',
+      template: 'Host template',
+    };
+    const hostConfig: {
+      command: Record<
+        string,
+        { readonly description: string; readonly template: string }
+      >;
+    } = {
+      command: { codemap: hostCommand },
+    };
+
+    try {
+      // When
+      await hooks.config?.(hostConfig);
+
+      // Then
+      for (const skill of CUSTOM_SKILLS) {
+        expect(hostConfig.command[skill.name]).toBeDefined();
+      }
+      expect(hostConfig.command.codemap).toBe(hostCommand);
+      expect(hostConfig.command.deepwork?.template).toBe(
+        'Start a deepwork session for a complex coding task',
+      );
+      expect(hostConfig.command.reflect?.template).toBe(
+        'Review repeated work and suggest workflow improvements',
+      );
     } finally {
       await hooks.dispose?.();
     }
@@ -5386,58 +5758,79 @@ describe('plugin config model inheritance', () => {
 
 describe('system.transform orchestrator injection', () => {
   let originalEnv: typeof process.env;
-  const configDirs: string[] = [];
+  const fixtures: Array<{
+    release: () => void;
+    run: Promise<void>;
+  }> = [];
 
   beforeEach(() => {
     originalEnv = { ...process.env };
   });
 
   afterEach(async () => {
-    process.env = originalEnv;
-    while (configDirs.length > 0) {
-      const configDir = configDirs.pop();
-      if (configDir) {
-        await rm(configDir, { recursive: true, force: true });
-      }
+    while (fixtures.length > 0) {
+      const fixture = fixtures.pop();
+      fixture?.release();
+      await fixture?.run;
     }
+    process.env = originalEnv;
   });
 
   async function loadPluginWithOrchestratorSession(
     config: Record<string, unknown> = {},
   ) {
-    const configDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-system-transform-'),
+    let release!: () => void;
+    let resolveReady!: (hooks: Awaited<ReturnType<typeof plugin>>) => void;
+    let rejectReady!: (error: unknown) => void;
+    const ready = new Promise<Awaited<ReturnType<typeof plugin>>>(
+      (resolve, reject) => {
+        resolveReady = resolve;
+        rejectReady = reject;
+      },
     );
-    configDirs.push(configDir);
-    await Bun.write(
-      `${configDir}/oh-my-opencode-slim.json`,
-      JSON.stringify(config),
-    );
-    process.env = {
-      ...originalEnv,
-      OPENCODE_CONFIG_DIR: configDir,
-      XDG_CONFIG_HOME: configDir,
-      XDG_DATA_HOME: `${configDir}/data`,
-      XDG_CACHE_HOME: `${configDir}/cache`,
-      OPENCODE_LOG_DIR: `${configDir}/logs`,
-    };
-    const client = createPluginClient(async () => ({}));
-    const hooks = await plugin({
-      client,
-      directory: configDir,
-      worktree: configDir,
-      serverUrl: new URL('http://127.0.0.1:4096'),
-    } as never);
-    // Session tracked as orchestrator (how chat.message records it).
-    await hooks['chat.message']?.(
-      {
-        sessionID: 'ses-orc',
-        agent: 'orchestrator',
-        model: { providerID: 'test', modelID: 'm' },
-      } as never,
-      {} as never,
-    );
-    return hooks;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const run = withTmpDir(async (configDir) => {
+      try {
+        await Bun.write(
+          `${configDir}/oh-my-opencode-slim.json`,
+          JSON.stringify(config),
+        );
+        process.env = {
+          ...originalEnv,
+          OPENCODE_CONFIG_DIR: configDir,
+          XDG_CONFIG_HOME: configDir,
+          XDG_DATA_HOME: `${configDir}/data`,
+          XDG_CACHE_HOME: `${configDir}/cache`,
+          OPENCODE_LOG_DIR: `${configDir}/logs`,
+        };
+        const client = createPluginClient(async () => ({}));
+        const hooks = await plugin({
+          client,
+          directory: configDir,
+          worktree: configDir,
+          serverUrl: new URL('http://127.0.0.1:4096'),
+        } as never);
+        // Session tracked as orchestrator (how chat.message records it).
+        await hooks['chat.message']?.(
+          {
+            sessionID: 'ses-orc',
+            agent: 'orchestrator',
+            model: { providerID: 'test', modelID: 'm' },
+          } as never,
+          {} as never,
+        );
+        resolveReady(hooks);
+        await done;
+        await hooks.dispose?.();
+      } catch (error) {
+        rejectReady(error);
+        throw error;
+      }
+    });
+    fixtures.push({ release, run });
+    return ready;
   }
 
   const ENV_BLOCK = [
@@ -5644,9 +6037,7 @@ describe('plugin foreground fallback host gating', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-fallback-gate-'),
-    );
+    projectDir = await createTmpDir('oh-my-opencode-slim-fallback-gate-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -5671,7 +6062,7 @@ describe('plugin foreground fallback host gating', () => {
   afterEach(async () => {
     jest.useRealTimers();
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    await removeTmpDir(projectDir);
   });
 
   test('companion preserves replay busy when an older error starts fallback', async () => {
@@ -7241,6 +7632,23 @@ describe('plugin command registration gating', () => {
   let originalEnv: typeof process.env;
   let projectDir: string;
 
+  const defaultCommands = [
+    'ai-estimates',
+    'clonedeps',
+    'codemap',
+    'deanchor',
+    'deepwork',
+    'delegation',
+    'implement',
+    'interview',
+    'oh-my-opencode-slim',
+    'reflect',
+    'simplify',
+    'step-back',
+    'verification-planning',
+    'worktrees',
+  ];
+
   const createClient = () => {
     const noop = async () => ({});
     const session = new Proxy({}, { get: () => noop }) as Record<
@@ -7289,9 +7697,7 @@ describe('plugin command registration gating', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-command-gate-'),
-    );
+    projectDir = await createTmpDir('oh-my-opencode-slim-command-gate-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -7305,43 +7711,81 @@ describe('plugin command registration gating', () => {
 
   afterEach(async () => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    await removeTmpDir(projectDir);
   });
 
   test('registers every command by default', async () => {
     await writeConfig({});
-    expect(Object.keys(await prepareCommands()).sort()).toEqual([
-      'deepwork',
-      'implement',
-      'interview',
-      'reflect',
-    ]);
+    expect(Object.keys(await prepareCommands()).sort()).toEqual(
+      defaultCommands,
+    );
+  });
+
+  test.each(['none', 'reference'] as const)(
+    'wires skillCommandMode %s into v1 without disabling workflow commands',
+    async (mode) => {
+      await writeConfig({ skillCommandMode: mode });
+      const commands = await prepareCommands();
+
+      for (const name of ['interview', 'implement', 'deepwork', 'reflect']) {
+        expect(commands[name]).toBeDefined();
+      }
+      if (mode === 'none') {
+        expect(commands).not.toHaveProperty('codemap');
+        expect(commands).not.toHaveProperty('simplify');
+      } else {
+        const command = commands.codemap;
+        if (
+          !command ||
+          typeof command !== 'object' ||
+          !('template' in command)
+        ) {
+          throw new Error('Missing codemap command template');
+        }
+        expect(command.template).toContain(JSON.stringify('codemap'));
+        expect(command.template).toEndWith(
+          '<user-request>\n$ARGUMENTS\n</user-request>',
+        );
+      }
+    },
+  );
+
+  test('skillCommandMode reference respects disabled commands and reflect skill gating', async () => {
+    await writeConfig({
+      skillCommandMode: 'reference',
+      disabled_commands: ['deepwork', 'interview'],
+      disabled_skills: ['reflect'],
+    });
+    const commands = await prepareCommands();
+    expect(commands).not.toHaveProperty('deepwork');
+    expect(commands).not.toHaveProperty('interview');
+    expect(commands).not.toHaveProperty('reflect');
+    expect(commands.codemap).toMatchObject({
+      template: expect.stringContaining(JSON.stringify('codemap')),
+    });
   });
 
   test('skips disabled_commands entries and keeps the rest', async () => {
     await writeConfig({ disabled_commands: ['interview', 'deepwork'] });
-    expect(Object.keys(await prepareCommands()).sort()).toEqual([
-      'implement',
-      'reflect',
-    ]);
+    expect(Object.keys(await prepareCommands()).sort()).toEqual(
+      defaultCommands.filter(
+        (name) => !['interview', 'deepwork'].includes(name),
+      ),
+    );
   });
 
   test('disabled implement command is not registered', async () => {
     await writeConfig({ disabled_commands: ['implement'] });
-    expect(Object.keys(await prepareCommands()).sort()).toEqual([
-      'deepwork',
-      'interview',
-      'reflect',
-    ]);
+    expect(Object.keys(await prepareCommands()).sort()).toEqual(
+      defaultCommands.filter((name) => !['implement'].includes(name)),
+    );
   });
 
   test('disabled reflect skill also unregisters /reflect', async () => {
     await writeConfig({ disabled_skills: ['reflect'] });
-    expect(Object.keys(await prepareCommands()).sort()).toEqual([
-      'deepwork',
-      'implement',
-      'interview',
-    ]);
+    expect(Object.keys(await prepareCommands()).sort()).toEqual(
+      defaultCommands.filter((name) => !['reflect'].includes(name)),
+    );
   });
 
   test('disabled commands stay execution-inert while enabled ones intercept', async () => {
@@ -7450,9 +7894,7 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-gc-wiring-'),
-    );
+    projectDir = await createTmpDir('oh-my-opencode-slim-gc-wiring-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -7473,7 +7915,7 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
 
   afterEach(async () => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    await removeTmpDir(projectDir);
     resetChildInputWaitForTests();
   });
 

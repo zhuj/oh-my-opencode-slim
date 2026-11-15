@@ -30,20 +30,34 @@ import {
   test,
 } from 'bun:test';
 import * as fs from 'node:fs';
-import { existsSync, readdirSync as readDirSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync as readDirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
-import type { BundledSkillInfo } from '../cli/custom-skills';
+import { Schema } from 'effect';
+import { CUSTOM_SKILLS } from '../cli/custom-skills-registry';
 import { stateFilePath } from '../companion/manager';
 import { RuntimeConfig } from '../config/runtime';
+import { createRulesInjectorHook } from '../hooks/rules-injector/hook';
+import { OhMyOpenCodeLite } from '../index';
 import { acquireMarketplaceLease } from '../marketplace/lease';
 import { MarketplaceStore } from '../marketplace/store';
+import { createTmpDir, removeTmpDir, withTmpDir } from '../test-utils';
 import { createEventDirectoryScope } from '../utils/event-directory-scope';
 import { flushLoggerForTesting } from '../utils/logger';
 import { compilePermissionPolicy } from './permissions';
-import { createV2Setup } from './setup';
-import type { V2Context, V2PermissionRule } from './types';
+import { createToolExecuteBridges, createV2Setup } from './setup';
+import type {
+  V2Context,
+  V2PermissionRule,
+  V2SkillDraft,
+  V2ToolDefinition,
+} from './types';
 
 type CapturedTool = {
   name: string;
@@ -56,9 +70,10 @@ interface MockCalls {
   agentRemoves: string[];
   agentDefault: string | undefined;
   agentTransformCount: number;
+  skillTransformCount: number;
+  skillAdds: Array<Record<string, unknown>>;
   toolAdds: CapturedTool[];
   commandAdds: Array<{ name: string; definition: Record<string, unknown> }>;
-  skillAdds: BundledSkillInfo[];
   mcpSets: Array<{ name: string; config: Record<string, unknown> }>;
   hooks: string[];
   toolBeforeCb:
@@ -74,14 +89,13 @@ interface MockCalls {
     | ((event: {
         sessionID: string;
         messageID: string;
-        prompt: { text: string };
+        prompt?: { text: string };
       }) => Promise<void>)
     | undefined;
   modelRequestHookCb:
     | ((event: Record<string, unknown>) => Promise<void>)
     | undefined;
   disposed: string[];
-  /** Replay registered skill transforms for one simulated state rebuild. */
   rebuildSkills: () => void;
   pluginUpdates: Array<Record<string, unknown>>;
   activatePlugins: () => Promise<void>;
@@ -148,6 +162,7 @@ function createEventQueue() {
 function makeMockV2Context(
   projectDir: string,
   skillDraftHasAdd = true,
+  deferSkillDraft = false,
 ): {
   ctx: V2Context;
   calls: MockCalls;
@@ -159,16 +174,27 @@ function makeMockV2Context(
   let pluginInventoryPublished = false;
   const nativeSubagent = {
     description: 'Native subagent',
+    input: { type: 'object', properties: {} },
     execute: async (_input: unknown, _context: unknown) => ({}),
   };
+  const skillDraft = () => ({
+    list: () => [],
+    ...(skillDraftHasAdd
+      ? { add: (info: Record<string, unknown>) => calls.skillAdds.push(info) }
+      : {}),
+    get: () => undefined,
+    remove: () => {},
+    update: () => {},
+  });
   const calls: MockCalls = {
     agentUpdates: [],
     agentRemoves: [],
     agentDefault: undefined,
     agentTransformCount: 0,
+    skillTransformCount: 0,
+    skillAdds: [],
     toolAdds: [],
     commandAdds: [],
-    skillAdds: [],
     mcpSets: [],
     hooks: [],
     toolBeforeCb: undefined,
@@ -179,21 +205,7 @@ function makeMockV2Context(
     disposed: [],
     pluginUpdates: [],
     rebuildSkills: () => {
-      for (const cb of skillCallbacks) {
-        cb({
-          ...(skillDraftHasAdd
-            ? {
-                add: (skill: BundledSkillInfo) => {
-                  calls.skillAdds.push(skill);
-                },
-              }
-            : {}),
-          get: () => undefined,
-          list: () => [],
-          remove: () => {},
-          update: () => {},
-        });
-      }
+      for (const cb of skillCallbacks) cb(skillDraft());
     },
     activatePlugins: async () => {
       if (pluginInventoryPublished) return;
@@ -218,8 +230,7 @@ function makeMockV2Context(
       calls.disposed.push(label);
     },
   });
-  // The skill domain replays registered transforms on simulated dirty-state
-  // rebuilds. The registration handle removes its callback on disposal.
+
   const ctx = {
     app: { name: 'opencode', version: 'v2-e2e' },
     options: {},
@@ -285,6 +296,20 @@ function makeMockV2Context(
         return reg(`tool.hook:${name}`);
       },
     },
+    skill: {
+      list: async () => ({ location: {}, data: [...calls.skillAdds] }),
+      transform: async (cb: (draft: unknown) => void) => {
+        calls.skillTransformCount += 1;
+        skillCallbacks.add(cb);
+        if (!deferSkillDraft) cb(skillDraft());
+        return {
+          dispose: () => {
+            calls.disposed.push('skill.transform');
+            skillCallbacks.delete(cb);
+          },
+        };
+      },
+    },
     command: {
       transform: async (cb: (draft: unknown) => void) => {
         cb({
@@ -297,20 +322,10 @@ function makeMockV2Context(
         });
         return reg(`command:${calls.commandAdds.length}`);
       },
-      list: async () => [],
-    },
-    skill: {
-      transform: async (cb: (draft: unknown) => void) => {
-        skillCallbacks.add(cb);
-        return {
-          dispose: () => {
-            calls.disposed.push('skill.transform');
-            skillCallbacks.delete(cb);
-          },
-        };
-      },
-      list: async () => [],
-      reload: async () => {},
+      list: async () => ({
+        location: {},
+        data: calls.commandAdds.map(({ name }) => ({ name })),
+      }),
     },
     // The supported host supplies durable KV and location-qualified identity.
     // Other runtime methods stay absent unless a test needs them.
@@ -320,10 +335,7 @@ function makeMockV2Context(
         directory: projectDir,
         agent: 'orchestrator',
       }),
-      hook: async (
-        name: 'context' | 'prompt',
-        cb: (event: never) => Promise<void>,
-      ) => {
+      hook: async (name: string, cb: (event: never) => Promise<void>) => {
         calls.hooks.push(`session:${name}`);
         if (name === 'context') {
           calls.contextHookCb = cb as unknown as MockCalls['contextHookCb'];
@@ -332,6 +344,10 @@ function makeMockV2Context(
         } else if (name === 'model.request') {
           calls.modelRequestHookCb =
             cb as unknown as MockCalls['modelRequestHookCb'];
+        }
+        if (name === 'compaction') {
+          calls.compactionHookCb =
+            cb as unknown as MockCalls['compactionHookCb'];
         }
         return reg(`session.hook:${name}`);
       },
@@ -407,6 +423,59 @@ function v2UsageEvent(
   };
 }
 
+async function withFixture<T>(
+  callback: (fixture: {
+    projectDir: string;
+    configDir: string;
+    fixtureRoot: string;
+    readPluginLog: () => string;
+  }) => Promise<T>,
+): Promise<T> {
+  const originalEnv = { ...process.env };
+
+  return await withTmpDir(async (tmp) => {
+    const projectDir = path.join(tmp, 'project');
+    const configDir = path.join(tmp, 'config');
+    const logDir = path.join(tmp, 'logs');
+    const readPluginLog = (): string => {
+      const files = readDirSync(logDir).filter(
+        (file) =>
+          file.startsWith('oh-my-opencode-slim.') && file.endsWith('.log'),
+      );
+      return files
+        .map((file) => readFileSync(path.join(logDir, file), 'utf8'))
+        .join('');
+    };
+
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      // Minimal fixture: empty plugin config with the companion disabled so
+      // factory init stays hermetic (no user config, no side processes).
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+    process.env.OPENCODE_CONFIG_DIR = configDir;
+    process.env.XDG_CONFIG_HOME = path.join(tmp, 'xdg-config');
+    process.env.XDG_DATA_HOME = path.join(tmp, 'xdg-data');
+    process.env.XDG_CACHE_HOME = path.join(tmp, 'xdg-cache');
+    process.env.OPENCODE_LOG_DIR = logDir;
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+
+    try {
+      return await callback({
+        projectDir,
+        configDir,
+        fixtureRoot: tmp,
+        readPluginLog,
+      });
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (!(key in originalEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, originalEnv);
+    }
+  });
+}
+
 describe('createV2Setup e2e', () => {
   let originalEnv: typeof process.env;
   let fixtureRoot: string;
@@ -430,7 +499,7 @@ describe('createV2Setup e2e', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-setup-e2e-'));
+    fixtureRoot = createTmpDir('omo-v2-setup-e2e-');
     projectDir = path.join(fixtureRoot, 'project');
     configDir = path.join(fixtureRoot, 'config');
     logDir = path.join(fixtureRoot, 'logs');
@@ -454,7 +523,7 @@ describe('createV2Setup e2e', () => {
       if (!(key in originalEnv)) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
-    await rm(fixtureRoot, { recursive: true, force: true });
+    removeTmpDir(fixtureRoot);
   });
 
   test('registers agents, tools, commands, mcp, and hooks on a full ctx', async () => {
@@ -2022,7 +2091,7 @@ describe('createV2Setup e2e', () => {
     const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
     await mkdir(legacyDir, { recursive: true });
     await Bun.write(path.join(legacyDir, 'skills-manifest.json'), '{ invalid');
-    const { ctx, calls } = makeMockV2Context(projectDir);
+    const { ctx, calls } = makeMockV2Context(projectDir, true, true);
     const cleanup = await createV2Setup()(ctx);
 
     // Nothing has reached the draft yet — the await has already settled.
@@ -2054,7 +2123,7 @@ describe('createV2Setup e2e', () => {
       path.join(legacyDir, 'skills-manifest.json'),
       JSON.stringify({ skills: {} }),
     );
-    const { ctx, calls } = makeMockV2Context(projectDir);
+    const { ctx, calls } = makeMockV2Context(projectDir, true, true);
     const cleanup = await createV2Setup()(ctx);
 
     try {
@@ -3619,7 +3688,6 @@ describe('createV2Setup e2e', () => {
 
     const cleanup = await createV2Setup()(ctx);
     try {
-      expect(skillReads).toBe(0);
       calls.rebuildSkills();
       expect(calls.skillAdds.map(({ id }) => id)).toContain('deepwork');
       await calls.activatePlugins();
@@ -3632,8 +3700,9 @@ describe('createV2Setup e2e', () => {
         headers: {},
         body: {},
       };
+      const readsBeforeRequest = skillReads;
       await calls.modelRequestHookCb?.(request);
-      expect(skillReads).toBe(1);
+      expect(skillReads).toBe(readsBeforeRequest + 1);
       inventory = [];
       includeBundled = false;
       await expect(calls.modelRequestHookCb?.(request)).rejects.toThrow(
@@ -5385,4 +5454,953 @@ describe('createV2Setup e2e', () => {
       await cleanup();
     }
   });
+});
+
+describe('createV2Setup project resources and skill commands', () => {
+  test('reduced host profiles an explorer created before deferred project skill readiness', async () => {
+    await withFixture(async ({ projectDir }) => {
+      // Given
+      const skillDir = path.join(projectDir, '.local', 'skills', 'review');
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: review\n---\nReview.\n',
+      );
+      await Bun.write(
+        path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          companion: { enabled: false },
+          agents: {
+            explorer: {
+              model: 'provider/refreshed',
+              temperature: 0.37,
+              options: { reasoningEffort: 'high' },
+            },
+          },
+        }),
+      );
+      const { ctx, calls, events } = makeMockV2Context(projectDir);
+      // Durable hosts bind native children through progress, not created events.
+      delete (ctx as { storage?: unknown }).storage;
+      const observed = Promise.withResolvers<void>();
+      const sessionID = 'ses_deferred_explorer';
+      ctx.session.get = async () => ({
+        id: sessionID,
+        parentID: 'ses_parent',
+        agent: 'explorer',
+      });
+      const switches: unknown[] = [];
+      ctx.session.switchModel = async (input) => {
+        switches.push(input);
+      };
+      const transform = ctx.skill.transform;
+      let pendingSkill: ((draft: V2SkillDraft) => void) | undefined;
+      let first = true;
+      ctx.skill.transform = async (callback) => {
+        if (first) {
+          first = false;
+          pendingSkill = callback;
+          return { dispose() {} };
+        }
+        return transform(callback);
+      };
+      const cleanup = await createV2Setup(async (input) => {
+        const hooks = await OhMyOpenCodeLite(input);
+        return {
+          ...hooks,
+          event: async () => {
+            observed.resolve();
+          },
+        };
+      })(ctx);
+      try {
+        // When: prewarm sees the child while the managed roster is still empty.
+        events.push({
+          type: 'session.created',
+          data: { id: sessionID, parentID: 'ses_parent', agent: 'explorer' },
+        });
+        await observed.promise;
+        expect(switches).toEqual([]);
+        const prompt = calls.promptHookCb?.({
+          sessionID,
+          messageID: 'msg_deferred_explorer',
+        });
+        pendingSkill?.({ list: () => [], add: () => {} });
+        await prompt;
+        const context = {
+          sessionID,
+          agent: 'explorer',
+          model: { providerID: 'provider', id: 'refreshed' },
+          messages: [],
+          system: [],
+          options: {},
+        };
+        await calls.contextHookCb?.(context);
+
+        // Then: the prompt captures the current profile, not a permanent ignore.
+        expect(switches).toEqual([
+          { sessionID, model: { providerID: 'provider', id: 'refreshed' } },
+        ]);
+        expect(context.options).toMatchObject({
+          temperature: 0.37,
+          reasoningEffort: 'high',
+        });
+      } finally {
+        await cleanup();
+      }
+    });
+  });
+
+  test('ignores a late project skill draft after setup aborts', async () => {
+    await withFixture(async ({ projectDir }) => {
+      // Given
+      const skillDir = path.join(projectDir, '.local', 'skills', 'review');
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: review\n---\nReview.\n',
+      );
+      const { ctx } = makeMockV2Context(projectDir);
+      let pendingSkill: ((draft: V2SkillDraft) => void) | undefined;
+      ctx.skill.transform = async (callback) => {
+        pendingSkill = callback;
+        return { dispose() {} };
+      };
+      ctx.agent.transform = async () => {
+        throw new Error('Agent registration rejected');
+      };
+      await expect(createV2Setup()(ctx)).rejects.toThrow(
+        'Agent registration rejected',
+      );
+
+      // When
+      const added: string[] = [];
+      pendingSkill?.({
+        list: () => [],
+        add: (info) => {
+          added.push(info.id);
+        },
+      });
+
+      // Then
+      expect(added).toEqual([]);
+    });
+  });
+
+  test('rewrites native delegation metadata while wrapping native execution', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const description =
+        'NEVER set this unless the user explicitly asks for a particular model or variant.';
+      const input = Schema.Struct({
+        model: Schema.optionalKey(Schema.String).annotate({ description }),
+        sessionID: Schema.optionalKey(
+          Schema.String.check(
+            Schema.makeFilter((value) => value.startsWith('ses_')),
+          ),
+        ),
+        prompt: Schema.String,
+      });
+      const execute = async () => ({ content: 'native result' });
+      const native: V2ToolDefinition = {
+        name: 'subagent',
+        description,
+        input,
+        execute,
+      };
+      const transform = ctx.tool.transform.bind(ctx.tool);
+      ctx.tool.transform = (callback) =>
+        transform((draft) => {
+          callback({
+            ...draft,
+            get: (id) => (id === native.name ? native : undefined),
+            update: (id, update) => {
+              if (id !== native.name) return;
+              if (typeof update === 'function') update(native);
+              else Object.assign(native, update);
+            },
+          });
+        });
+
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        expect(native.description).not.toBe(description);
+        expect(native.input).not.toBe(input);
+        expect(native.execute).not.toBe(execute);
+        expect(native.name).toBe('subagent');
+        const rewritten = native.input as typeof input;
+        expect(
+          Schema.decodeUnknownSync(rewritten)({ prompt: 'hello' }),
+        ).toEqual({
+          prompt: 'hello',
+        });
+        const beforeHook = calls.toolBeforeCb;
+        if (!beforeHook) throw new Error('tool:execute.before not captured');
+        for (const [index, sessionID] of [
+          null,
+          undefined,
+          'ses_<<new>>',
+        ].entries()) {
+          const event = {
+            tool: 'subagent',
+            sessionID: 'ses_parent',
+            agent: 'orchestrator',
+            messageID: 'msg_empty_resume',
+            id: `call_empty_resume_${index}`,
+            input: {
+              prompt: 'hello',
+              sessionID,
+              agent: 'explorer',
+              background: true,
+            },
+          };
+          await beforeHook(event);
+          expect(event.input).not.toHaveProperty('sessionID');
+          expect(event.input).not.toHaveProperty('task_id');
+          expect(event.input).toMatchObject({
+            agent: 'explorer',
+            prompt: 'hello',
+            background: true,
+          });
+          expect(
+            await native.execute(event.input, {
+              sessionID: 'ses_parent',
+              id: event.id,
+              signal: new AbortController().signal,
+              progress: async () => {},
+            }),
+          ).toEqual({ content: 'native result' });
+          expect(Schema.decodeUnknownSync(rewritten)(event.input)).toEqual({
+            prompt: 'hello',
+          });
+        }
+        expect(
+          Schema.decodeUnknownSync(rewritten)({
+            prompt: 'hello',
+            sessionID: 'ses_existing',
+          }),
+        ).toEqual({ prompt: 'hello', sessionID: 'ses_existing' });
+        expect(() =>
+          Schema.decodeUnknownSync(rewritten)({
+            prompt: 'hello',
+            sessionID: 'anything',
+          }),
+        ).toThrow();
+        expect(rewritten.fields.sessionID).toBe(input.fields.sessionID);
+        expect(rewritten.fields.prompt).toBe(input.fields.prompt);
+      } finally {
+        await cleanup();
+      }
+    });
+  });
+
+  test('bridges all registered skill sources after project registration while retaining host commands', async () => {
+    // Given: use the real plugin factory, not a real OpenCode runtime.
+    await withFixture(async ({ projectDir }) => {
+      const skillDir = path.join(
+        projectDir,
+        '.local',
+        'skills',
+        'project-extra',
+      );
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: project-extra\n---\nPRIVATE_PROJECT_BODY\n',
+      );
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const submissions: Array<Record<string, unknown>> = [];
+      ctx.session.prompt = async (input) => {
+        submissions.push(input);
+      };
+      ctx.skill.list = async () => ({
+        location: {},
+        data: [
+          ...[
+            'show-me',
+            'native-project',
+            'codemap',
+            'deepwork',
+            'reflect',
+            'loop',
+            'interview',
+          ].map((id) => ({
+            id,
+            name: `Display ${id}`,
+            path: `/host/${id}`,
+            content: 'PRIVATE_HOST_BODY',
+          })),
+          ...calls.skillAdds,
+        ],
+      });
+      ctx.command.list = async () => ({
+        location: {},
+        data: [
+          { name: 'codemap' },
+          { name: 'reflect' },
+          { name: 'interview' },
+          ...calls.commandAdds.map(({ name }) => ({ name })),
+        ],
+      });
+      // When
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        // Generic and skill commands retain host ownership; the interview
+        // bridge follows the explicitly selected release registration policy.
+        expect(calls.commandAdds.map(({ name }) => name)).toEqual([
+          'deepwork',
+          'preset',
+          'interview',
+          'implement',
+          'show-me',
+          'native-project',
+          'loop',
+          'project-extra',
+          ...CUSTOM_SKILLS.map(({ name }) => name).filter(
+            (name) => !['codemap', 'deepwork', 'reflect'].includes(name),
+          ),
+        ]);
+        const definition = calls.commandAdds.find(
+          ({ name }) => name === 'project-extra',
+        )?.definition;
+        if (typeof definition?.execute !== 'function')
+          throw new Error('Missing skill executor');
+        await definition.execute({
+          sessionID: 'ses_skill',
+          prompt: { text: '$ARGUMENTS\n$1' },
+        });
+        // Then: the body is inlined and the arguments keep their bytes.
+        const text = submissions[0]?.text ?? '';
+        expect(text).toContain('PRIVATE_PROJECT_BODY');
+        expect(text).toContain('Base directory for this skill: ');
+        expect(text).toContain('/project/.local/skills/project-extra/');
+        expect(
+          text.endsWith('<user-request>\n$ARGUMENTS\n$1\n</user-request>'),
+        ).toBe(true);
+        expect(submissions[0]).not.toHaveProperty('skills');
+      } finally {
+        await cleanup();
+      }
+      expect(calls.disposed.some((name) => name.startsWith('command:'))).toBe(
+        true,
+      );
+    });
+  }, 20_000);
+
+  test('initial skill catch-up starts after event consumption, not iterable construction', async () => {
+    await withFixture(async ({ projectDir }) => {
+      // Given
+      const { ctx, calls, events } = makeMockV2Context(projectDir);
+      let consuming = false;
+      ctx.session.prompt = async () => {};
+      const iterator = events.iterable[Symbol.asyncIterator]();
+      ctx.event.subscribe = () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => {
+            consuming = true;
+            return iterator.next();
+          },
+          return: () =>
+            iterator.return?.() ??
+            Promise.resolve({ done: true, value: undefined }),
+        }),
+      });
+      ctx.skill.list = async () => ({
+        location: {},
+        data: consuming
+          ? [
+              {
+                id: 'show-me',
+                name: 'show-me',
+                path: '/skills/show-me',
+                content: '',
+              },
+            ]
+          : [],
+      });
+      // When
+      const cleanup = await createV2Setup()(ctx);
+      // Then
+      try {
+        expect(calls.commandAdds.map(({ name }) => name)).toContain('show-me');
+      } finally {
+        await cleanup();
+      }
+    });
+  });
+
+  test('raw catalog events reconcile before an unrelated awaited event hook', async () => {
+    await withFixture(async ({ projectDir }) => {
+      // Given
+      const { ctx, calls, events } = makeMockV2Context(projectDir);
+      let ids = ['opencode', 'report'];
+      ctx.session.prompt = async () => {};
+      ctx.skill.list = async () => ({
+        location: {},
+        data: ids.map((id) => ({
+          id,
+          name: id,
+          path: `/skills/${id}`,
+          content: '',
+        })),
+      });
+      const blocked = Promise.withResolvers<void>();
+      const entered = Promise.withResolvers<void>();
+      const registered = Promise.withResolvers<void>();
+      const transform = ctx.command.transform;
+      ctx.command.transform = async (callback) => {
+        const registration = await transform(callback);
+        if (calls.commandAdds.some(({ name }) => name === 'show-me'))
+          registered.resolve();
+        return registration;
+      };
+      const cleanup = await createV2Setup(async (input) => ({
+        ...(await OhMyOpenCodeLite(input)),
+        event: async () => {
+          entered.resolve();
+          await blocked.promise;
+        },
+      }))(ctx);
+      // When
+      ids = [
+        ...ids,
+        'show-me',
+        ...Array.from({ length: 82 }, (_, i) => `late-${i}`),
+      ];
+      events.push({
+        type: 'skill.updated',
+        data: {},
+        location: { directory: projectDir },
+      });
+      try {
+        await entered.promise;
+        await registered.promise;
+        // Then: unrelated handler is still blocked, yet the skill is available.
+        expect(calls.commandAdds.map(({ name }) => name)).toContain('show-me');
+      } finally {
+        blocked.resolve();
+        await cleanup();
+      }
+    });
+  });
+
+  test('registers complete eligible Skill.Info through public transform after factory', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const skillDir = path.join(projectDir, '.local', 'skills', 'review');
+      mkdirSync(skillDir, { recursive: true });
+      const skillPath = path.join(skillDir, 'SKILL.md');
+      const content =
+        '---\nname: review\ndescription: Review code\nautoinvoke: false\n---\nBody.\n';
+      writeFileSync(skillPath, content);
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const cleanup = await createV2Setup()(ctx);
+
+      expect(calls.skillTransformCount).toBe(2);
+      expect(calls.skillAdds).toContainEqual({
+        id: 'review',
+        name: 'review',
+        description: 'Review code',
+        autoinvoke: false,
+        path: skillDir,
+        content,
+      });
+      await cleanup();
+      expect(calls.disposed).toContain('skill.transform');
+    });
+  }, 20_000);
+
+  test('does not register a project skill colliding with native Skill.Info id', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const skillDir = path.join(projectDir, '.local', 'skills', 'review');
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: review\n---\nBody.\n',
+      );
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const originalTransform = ctx.skill.transform.bind(ctx.skill);
+      ctx.skill.transform = async (cb) => {
+        await originalTransform((draft) =>
+          cb({
+            ...draft,
+            list: () => [{ id: 'review', name: 'native review' }],
+          }),
+        );
+        return { dispose: () => {} };
+      };
+      const cleanup = await createV2Setup()(ctx);
+      expect(calls.skillAdds.map(({ id }) => id)).not.toContain('review');
+      await cleanup();
+    });
+  }, 20_000);
+
+  test('uses location.directory separately from project boundary and does not use canonical fallback', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const active = path.join(projectDir, 'worktree');
+      const canonical = path.join(projectDir, 'canonical');
+      const activeSkill = path.join(active, '.local', 'skills', 'active-only');
+      const canonicalSkill = path.join(
+        canonical,
+        '.local',
+        'skills',
+        'canonical-only',
+      );
+      mkdirSync(activeSkill, { recursive: true });
+      mkdirSync(canonicalSkill, { recursive: true });
+      writeFileSync(
+        path.join(activeSkill, 'SKILL.md'),
+        '---\nname: active-only\n---\nBody.\n',
+      );
+      writeFileSync(
+        path.join(canonicalSkill, 'SKILL.md'),
+        '---\nname: canonical-only\n---\nBody.\n',
+      );
+      const { ctx, calls } = makeMockV2Context(active);
+      (
+        ctx.location as unknown as { project: Record<string, unknown> }
+      ).project = {
+        id: 'proj',
+        directory: projectDir,
+        canonical,
+      };
+      const cleanup = await createV2Setup()(ctx);
+      expect(calls.skillAdds.map((skill) => skill.id)).toEqual([
+        'active-only',
+        ...CUSTOM_SKILLS.map(({ name }) => name),
+      ]);
+      expect(calls.skillAdds[0].path).toBe(activeSkill);
+      await cleanup();
+    });
+  }, 20_000);
+
+  test('missing project.directory fails closed despite a misleading canonical root', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const canonical = path.join(projectDir, 'canonical');
+      const skillDir = path.join(canonical, '.local', 'skills', 'misleading');
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: misleading\n---\nBody.\n',
+      );
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      (
+        ctx.location as unknown as { project: Record<string, unknown> }
+      ).project = {
+        id: 'proj',
+        canonical,
+      };
+      const cleanup = await createV2Setup()(ctx);
+      expect(calls.skillAdds.map(({ id }) => id)).toEqual(
+        CUSTOM_SKILLS.map(({ name }) => name),
+      );
+      await cleanup();
+    });
+  }, 20_000);
+
+  test('tool after forwards only resolved paths and preserves errored-call semantics', async () => {
+    const observed: Array<Record<string, unknown>> = [];
+    const bridges = createToolExecuteBridges(
+      undefined,
+      async (_input, output) => {
+        observed.push(output as Record<string, unknown>);
+      },
+      undefined,
+      (tool, result) =>
+        tool === 'write' && typeof result === 'object' && result !== null
+          ? ['/resolved/host/path']
+          : [],
+    );
+    await bridges.afterBridge({
+      tool: 'write',
+      sessionID: 's',
+      id: 'c',
+      input: {},
+      status: 'completed',
+      result: { content: 'ok' },
+    });
+    await bridges.afterBridge({
+      tool: 'write',
+      sessionID: 's',
+      id: 'c',
+      input: {},
+      status: 'completed',
+      result: { content: 'ok' },
+    });
+    await bridges.afterBridge({
+      tool: 'write',
+      sessionID: 's',
+      id: 'c',
+      input: {},
+      status: 'error',
+      error: { message: 'host failure' },
+      result: { content: 'stale' },
+    });
+    expect(observed.map((entry) => entry.resolvedFilePaths)).toEqual([
+      ['/resolved/host/path'],
+      ['/resolved/host/path'],
+      [],
+    ]);
+    expect(observed[2]).toMatchObject({
+      output: 'host failure',
+      status: 'error',
+    });
+  });
+
+  test('tool execute.after uses the real touched-path adapter and fails closed without evidence', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const observed: Array<Record<string, unknown>> = [];
+      const setup = createV2Setup(
+        async (input) =>
+          ({
+            ...(await OhMyOpenCodeLite(input)),
+            'tool.execute.after': async (_input: unknown, output: unknown) => {
+              observed.push(output as Record<string, unknown>);
+            },
+          }) as never,
+      );
+      const cleanup = await setup(ctx);
+      const hook = calls.toolAfterCb;
+      if (!hook) throw new Error('tool:execute.after not captured');
+
+      await hook({
+        tool: 'write',
+        sessionID: 's',
+        id: 'c',
+        input: {},
+        status: 'completed',
+        result: { output: { target: path.join(projectDir, 'valid.ts') } },
+      });
+      await hook({
+        tool: 'write',
+        sessionID: 's',
+        id: 'c',
+        input: {},
+        status: 'completed',
+        result: { output: { text: 'no structured path evidence' } },
+      });
+      await hook({
+        tool: 'write',
+        sessionID: 's',
+        id: 'c',
+        input: {},
+        status: 'error',
+        error: { message: 'write failed' },
+        result: { output: { target: path.join(projectDir, 'stale.ts') } },
+      });
+
+      expect(observed.map((entry) => entry.resolvedFilePaths)).toEqual([
+        [path.join(projectDir, 'valid.ts')],
+        [],
+        [],
+      ]);
+      expect(observed[2]).toMatchObject({
+        output: 'write failed',
+        status: 'error',
+      });
+      await cleanup();
+    });
+  }, 20_000);
+
+  test('captures compaction callback and releases skill registration on dispose', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const skillDir = path.join(projectDir, '.local', 'skills', 'review');
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: review\n---\nBody.\n',
+      );
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const cleanup = await createV2Setup()(ctx);
+
+      expect(calls.compactionHookCb).toBeFunction();
+      await calls.compactionHookCb?.({
+        sessionID: 'ses_compact',
+        messages: [],
+      });
+      await cleanup();
+      expect(calls.disposed).toContain('skill.transform');
+      expect(calls.disposed).toContain('session.hook:compaction');
+    });
+  }, 20_000);
+
+  test('native compaction waits for the V1 compacting hook to clear shared rules state', async () => {
+    await withFixture(async ({ projectDir }) => {
+      let finish!: () => void;
+      let entered!: () => void;
+      const enteredPromise = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const deferred = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const v1Compacting = async () => {
+        entered();
+        await deferred;
+      };
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const cleanup = await createV2Setup(
+        async (input) =>
+          ({
+            ...(await OhMyOpenCodeLite(input)),
+            'experimental.session.compacting': v1Compacting,
+          }) as never,
+      )(ctx);
+      const compact = calls.compactionHookCb;
+      if (!compact) throw new Error('session.compaction not captured');
+
+      let settled = false;
+      const callback = compact({ sessionID: 'ses_compact', messages: [] }).then(
+        () => {
+          settled = true;
+        },
+      );
+      await Promise.race([
+        enteredPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, 50)),
+      ]);
+      expect(settled).toBe(false);
+      finish();
+      await callback;
+      expect(settled).toBe(true);
+      await cleanup();
+    });
+  }, 20_000);
+
+  test('native compaction clears real rules-injector state so a rule can be reinjected', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const ruleDir = path.join(projectDir, '.local', 'rules');
+      mkdirSync(ruleDir, { recursive: true });
+      writeFileSync(
+        path.join(ruleDir, 'always.md'),
+        '---\nalwaysApply: true\n---\nCOMPACTION REINJECTION RULE',
+      );
+      const touchedFile = path.resolve(projectDir, 'src', 'target.ts');
+      const injector = createRulesInjectorHook({
+        projectBoundary: path.resolve(projectDir),
+        prefixes: ['.local'],
+        resolveTouchedFilePaths: () => [touchedFile],
+        readRemainingContextTokens: async () => null,
+        reportError: (error) => {
+          throw error;
+        },
+      });
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const cleanup = await createV2Setup(
+        async (input) =>
+          ({
+            ...(await OhMyOpenCodeLite(input)),
+            'experimental.session.compacting': ({
+              sessionID,
+            }: {
+              sessionID: string;
+            }) => injector.clearSession(sessionID),
+          }) as never,
+      )(ctx);
+
+      try {
+        const sessionID = 'ses_rules_compaction';
+        const inject = async (): Promise<string> => {
+          const output = {
+            title: 'read target',
+            output: 'SOURCE OUTPUT',
+            metadata: {},
+          };
+          await injector.onToolExecuteAfter(
+            { tool: 'read', sessionID },
+            output,
+          );
+          return output.output;
+        };
+        expect(await inject()).toContain('COMPACTION REINJECTION RULE');
+        expect(await inject()).toBe('SOURCE OUTPUT');
+
+        const compact = calls.compactionHookCb;
+        if (!compact) throw new Error('session.compaction not captured');
+        await compact({ sessionID, messages: [] });
+
+        expect(await inject()).toContain('COMPACTION REINJECTION RULE');
+      } finally {
+        await cleanup();
+      }
+    });
+  }, 20_000);
+
+  test('adapted native executors admit delegation and bind the child preset', async () => {
+    await withFixture(async ({ projectDir }) => {
+      await Bun.write(
+        path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          companion: { enabled: false },
+          preset: 'team',
+          presets: { team: { explorer: { model: 'test/captured' } } },
+        }),
+      );
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const stored = new Map<string, any>();
+      (ctx as any).storage = {
+        get: async (key: string) => structuredClone(stored.get(key)),
+        set: async (key: string, value: unknown) => {
+          stored.set(key, structuredClone(value));
+        },
+        remove: async (key: string) => {
+          stored.delete(key);
+        },
+        scan: async () => ({ entries: [] }),
+      };
+      ctx.session.get = async ({ sessionID }) => ({
+        id: sessionID,
+        directory: projectDir,
+        agent: sessionID === 'root' ? 'orchestrator' : 'explorer',
+        ...(sessionID === 'child' ? { parentID: 'root' } : {}),
+      });
+      ctx.session.update = async () => ({});
+      let nativeCalls = 0;
+      const native = {
+        description: 'native',
+        input: { type: 'object', properties: {} },
+        execute: async (_input: any, context: any) => {
+          nativeCalls++;
+          await context.progress({ sessionID: 'child', status: 'running' });
+          return { content: 'done', metadata: { sessionID: 'child' } };
+        },
+      };
+      // Host draft reads and updates expose fresh executor adapters, not the
+      // function identity assigned by a plugin transform.
+      const adapted = () => {
+        const execute = native.execute;
+        return {
+          ...native,
+          execute: (...args: Parameters<typeof execute>) => execute(...args),
+        };
+      };
+      ctx.tool.transform = async (callback) => {
+        callback({
+          add: (tool) => calls.toolAdds.push(tool),
+          get: (id) => (id === 'subagent' ? adapted() : undefined),
+          update: (id, update) => {
+            if (id !== 'subagent') return;
+            const tool = adapted();
+            if (typeof update === 'function') update(tool);
+            else Object.assign(tool, update);
+            Object.assign(native, tool);
+          },
+        });
+        return { dispose() {} };
+      };
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        const event = {
+          tool: 'subagent',
+          sessionID: 'root',
+          id: 'adapted-call',
+          input: { agent: 'explorer', prompt: 'work', background: false },
+        };
+        if (!calls.toolBeforeCb) throw new Error('before hook not captured');
+        await calls.toolBeforeCb(event);
+        expect((event.input as any).model).toBe('test/captured');
+        await native.execute(event.input, {
+          sessionID: 'root',
+          id: event.id,
+          signal: new AbortController().signal,
+          progress: async () => {
+            expect(
+              stored.get('session-preset/v1/child').bundle.presetName,
+            ).toBe('team');
+          },
+        });
+        expect(nativeCalls).toBe(1);
+        expect(stored.get('session-preset/v1/child').bundle.presetName).toBe(
+          'team',
+        );
+      } finally {
+        await cleanup();
+      }
+    });
+  }, 20_000);
+
+  test('marketplace activation fails and unwinds when child session.update is unavailable', async () => {
+    await withFixture(async ({ projectDir }) => {
+      const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+      store.install({
+        manifest: {
+          schemaVersion: 2,
+          id: 'team/no-child-update',
+          version: '1.0.0',
+          displayName: 'No child update',
+          description: 'Requires child policy enforcement',
+          agentName: 'no-child-update-agent',
+          prompt: 'Use only admitted capabilities.',
+          skills: [],
+          mcps: [],
+          tools: ['read'],
+          author: { name: 'Test' },
+          tags: [],
+          license: 'MIT',
+          compatibility: { plugin: '>=2.0.0' },
+          model: { source: 'explicit', candidates: ['provider/package'] },
+          routing: {
+            description: 'Marketplace test lane',
+            when: 'Testing host capability failure.',
+            keywords: ['marketplace'],
+          },
+        } as never,
+      });
+      await Bun.write(
+        path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          companion: { enabled: false },
+          preset: 'marketplace-test',
+          presets: {
+            'marketplace-test': {
+              marketplace: { agents: ['team/no-child-update'] },
+            },
+          },
+        }),
+      );
+      const { ctx, calls } = makeMockV2Context(projectDir);
+      const setupCtx = ctx as unknown as {
+        mcp: {
+          transform: (callback: (draft: unknown) => void) => Promise<{
+            dispose: () => void;
+          }>;
+        };
+        agent: {
+          transform: (callback: (draft: unknown) => void) => Promise<{
+            dispose: () => void;
+          }>;
+        };
+      };
+      setupCtx.mcp.transform = async (callback) => {
+        callback({
+          list: () => [],
+          get: () => undefined,
+          set: () => {},
+          update: () => {},
+          remove: () => {},
+        });
+        return {
+          dispose: () => calls.disposed.push('marketplace-mcp-transform'),
+        };
+      };
+      setupCtx.agent.transform = async (callback) => {
+        callback({
+          list: () => [],
+          get: () => undefined,
+          default: () => {},
+          update: () => {},
+          remove: () => {},
+        });
+        return {
+          dispose: () => calls.disposed.push('marketplace-agent-transform'),
+        };
+      };
+
+      await expect(createV2Setup()(ctx)).rejects.toThrow(
+        'Marketplace agents require ctx.session.update',
+      );
+      expect(calls.disposed).toContain('marketplace-agent-transform');
+      expect(calls.disposed).toContain('marketplace-mcp-transform');
+    });
+  }, 20_000);
 });
