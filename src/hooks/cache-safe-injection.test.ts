@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   appendTaggedSyntheticPart,
+  appendTaggedToolOutput,
   appendTrailingVolatileMessage,
   createTaggedSyntheticPart,
   hasTaggedPart,
@@ -17,6 +18,19 @@ const PHASE_KEY = 'oh-my-opencode-slim.phaseReminder';
 const COUNCIL_KEY = 'oh-my-opencode-slim.councilInject';
 const GOAL_KEY = 'oh-my-opencode-slim.deepworkGoal';
 const KEYS = [PHASE_KEY, COUNCIL_KEY, GOAL_KEY] as const;
+
+describe('appendTaggedToolOutput', () => {
+  test('preserves original output and metadata and appends each tag once', () => {
+    const output = { title: 'read', output: 'original\n', metadata: { x: 1 } };
+    const metadata = output.metadata;
+    appendTaggedToolOutput(output, 'rules', 'omos.rules.v1');
+    const appended = output.output.slice('original\n'.length);
+    appendTaggedToolOutput(output, 'rules', 'omos.rules.v1');
+    expect(output.output.startsWith('original\n')).toBe(true);
+    expect(output.output.slice('original\n'.length)).toBe(appended);
+    expect(output.metadata).toBe(metadata);
+  });
+});
 
 function userMessage(text: string): MessageWithParts {
   return {

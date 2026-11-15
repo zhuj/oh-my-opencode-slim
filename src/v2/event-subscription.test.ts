@@ -84,6 +84,16 @@ describe('buildV2EventSubscriptionTypes', () => {
     );
   });
 
+  test('subscribes to skill inventory invalidations only when requested', () => {
+    const enabled = buildV2EventSubscriptionTypes({ skills: true });
+    expect(enabled).toContain('skill.updated');
+    expect(enabled).toContain('plugin.updated');
+    expect(enabled).not.toContain('command.updated');
+    const disabled = buildV2EventSubscriptionTypes({ skills: false });
+    expect(disabled).not.toContain('skill.updated');
+    expect(disabled).not.toContain('plugin.updated');
+  });
+
   test('the union is frozen once built — no per-request surface changes', () => {
     const types = buildV2EventSubscriptionTypes();
     expect(Object.isFrozen(types)).toBe(true);

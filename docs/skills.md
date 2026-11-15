@@ -2,8 +2,7 @@
 
 Skills are specialized capabilities and workflows you can assign to agents.
 Unlike MCPs (which are running servers), skills are **prompt-based instructions**
-injected into an agent's system prompt to guide decisions, workflows, and, when
-relevant, tool use.
+loaded into an agent's context to guide decisions, workflows, and tool use.
 
 Bundled skills are registered by the plugin at load (never copied to the user
 skill directory): v1 scans the package paths and v2 registers them in-process.
@@ -15,6 +14,137 @@ precedence over the bundled registration.
 Legacy managed copies are removed only if their content still matches the last
 managed version. Edited copies are kept; disabled edited copies are moved to
 `~/.config/opencode/.oh-my-opencode-slim-skill-backups/` outside the skill scan.
+
+## Skill Slash Commands
+
+On OpenCode V2, every skill in the host's registered skill inventory is eligible
+for `/<skill-id>` unless an explicit command already owns that name or its
+effective command mode is `none`.
+This includes global/user skills such as `/show-me`, native project skills,
+plugin-project skills, and registered bundled skills. IDs, not display names,
+identify commands; duplicate IDs produce only one command. Skills with
+`autoinvoke: false` still get a generic command when their effective mode is
+`full` or `reference`.
+
+### Modes and Precedence
+
+The optional root plugin setting `skillCommandMode` selects the default mode.
+Omitting it preserves `full`, the existing inline behavior:
+
+| Mode | Generic skill-command behavior |
+|------|--------------------------------|
+| `full` | Inline the skill body using the existing, unchanged template. |
+| `reference` | Instruct the model to load and follow the exact skill ID with the `skill` tool, then supply the original arguments in `<user-request>`. No skill body is inlined. |
+| `none` | Skip generic command generation without disabling the skill itself. |
+
+A skill's `SKILL.md` YAML frontmatter can override the global mode with nested
+`slim.command` set to `none`, `full`, or `reference`. A missing or invalid override
+inherits the global mode. A valid `full` or `reference` override can enable a
+generic command even when the global mode is `none`. See the
+[configuration examples](configuration.md#skill-slash-command-mode).
+
+These settings only control generic skill commands. They do not change skill
+discovery, `disabled_skills`, or permissions. Explicit host/user commands and
+the plugin's `/deepwork`, `/reflect`, and `/interview` workflows keep
+their own behavior and collision precedence in every mode.
+
+### Prompt Delivery
+
+In `full` mode, `/show-me explain this flow` submits a normal user prompt built
+from the unchanged shared skill-command template:
+
+```text
+<skill-instruction>
+Base directory for this skill: /path/to/skills/show-me/
+File references (@path) in this skill are relative to this directory.
+
+...show-me body...
+</skill-instruction>
+
+<user-request>
+explain this flow
+</user-request>
+```
+
+In `full` mode, when the host inventory reports no body, the
+`<skill-instruction>` wrapper is still emitted with an empty body rather than
+falling back to a model-mediated `skill` tool load. The two directory-hint lines
+are dropped when no skill directory is known, so a body is never anchored to a
+wrong path.
+
+In `reference` mode, the prompt instead asks the model to load and follow the
+exact skill ID through the `skill` tool, followed by the original arguments in
+`<user-request>`. It contains no inline skill body. This is a model-mediated
+instruction, not an automatic tool call or a guarantee that loading succeeds.
+The skill must be available to the tool, and normal skill-tool permissions and
+denials still apply. Bundled skills are also registered natively on V1 through
+the package skill paths; command generation does not replace that registration.
+
+The bridge does not inject a skill body into system prompts, attach the target
+through `prompt.skills`, or call `session.skill`. Arguments remain unchanged,
+including whitespace, multiline input, quotes, `$ARGUMENTS`, and `$1`. Files,
+agent mentions, already-attached skills, and delivery mode are forwarded
+unchanged.
+
+V1 bundled commands use `$ARGUMENTS` as the placeholder the host substitutes.
+In `full` mode, their base directory is the bundled skill's directory inside
+the installed package. V2 has no host substitution, so it formats the selected
+prompt per invocation.
+
+`full` spends more context per invocation and delivers the body without a
+native skill-tool load, whether or not the target skill is granted to the
+active agent. This does not grant permission for actions described by that
+body. Choose `reference` when you want loading to go through the normal skill
+tool and its permission gate instead.
+
+### Host Scope and Refresh
+
+On V2, the mode applies to all skills in the inventoried generic-command bridge.
+On V1, it applies only to plugin-generated bundled templates. Native OpenCode
+skill-to-command conversion for non-bundled skills remains host-owned and is
+not controlled by these settings. Host-command precedence is unchanged.
+
+The global `skillCommandMode` is loaded at startup. Reload the plugin (or
+restart OpenCode) after changing it; an inventory refresh alone does not reload
+the global setting.
+
+A slash command whose name is in neither the merged config's command registry
+nor the generated skill-command set is answered with
+`Command "/<name>" not found. Use the skill tool to list available skills and
+commands.` On V1 the first set is the full host and user command inventory. On
+V2 `prepareCommands` receives an empty config, so that set holds only the
+plugin's own reserved command names and the generated skill-command names are
+the second set; a host-native V2 command is outside both.
+
+The catalog reconciles after event consumption starts and on `skill.updated`
+or `plugin.updated`, including filesystem skills registered later during host
+activation. Updates are serialized and coalesced without polling or waiting for
+later plugins inside setup. Host skill reloads update additions, removals, and
+descriptions. Scoped events must match the instance directory and workspace;
+unscoped events refresh only that instance's catalog. Generated command names
+and missing-command lookups belong to that setup generation, so another
+workspace's refresh or an older generation's disposal cannot replace them.
+
+V2 also resolves per-skill `slim.command` metadata on these inventory refreshes.
+It accepts paths to either `SKILL.md` or the containing directory. If the file
+is unreadable or no usable path exists, it uses inline metadata when available,
+otherwise the global mode. Such skills are not excluded merely because their
+path or file is unavailable.
+
+An unchanged inventory reuses the current registration. When a refresh replaces
+it, the bridge removes the previous registration before reading command
+collisions, so existing explicit executors are preserved. Missing or invalid
+inventories leave no generated commands rather than restoring stale entries
+over explicit commands. A later valid event can recover the bridge. Missing
+prompt/registration APIs disable only generic commands.
+
+`command.updated` is deliberately ignored because the bridge's own registration
+emits it. A command-only reload of an earlier transform can introduce an explicit
+name hidden under a generated command until the next skill/plugin update; the
+host inventory lacks provenance to resolve that case automatically. Later
+explicit registrations win naturally. This is not universal dynamic command
+precedence. Plugin-owned project skill files are still discovered at setup;
+reload the plugin to rediscover those files (see project customization).
 
 ---
 
@@ -35,6 +165,7 @@ broader evidence only when the change's risk or uncertainty warrants it.
 | [`simplify`](#simplify) | Behavior-preserving code simplification | `oracle` |
 | [`codemap`](#codemap) | Repository codemap generation | `orchestrator` |
 | [`clonedeps`](#clonedeps) | Local dependency source cloning | `orchestrator` |
+| [`delegation`](#delegation) | Lossless model references for delegation | `orchestrator` |
 | [`deepwork`](#deepwork) | Heavy/complex coding sessions workflow | `orchestrator` |
 | [`verification-planning`](#verification-planning) | Design project-specific evidence before implementation | `orchestrator` |
 | [`step-back`](#step-back) | Pause snowballing patches and reassess direction | `orchestrator` |
@@ -43,6 +174,10 @@ broader evidence only when the change's risk or uncertainty warrants it.
 | [`reflect`](#reflect) | Review repeated work and suggest reusable workflow improvements | `orchestrator` |
 | [`worktrees`](#worktrees) | Safe Git worktree lane management | `orchestrator` |
 | [`oh-my-opencode-slim`](#oh-my-opencode-slim) | Plugin configuration and self-improvement guidance | `orchestrator` |
+
+For example, invoke the bundled workflows directly with `/deepwork <task>`,
+`/reflect`, or `/codemap`. Skills remain available through the native skill
+system on hosts that do not expose them in the slash-command catalog.
 
 ---
 
@@ -81,7 +216,7 @@ See **[Codemap Skill](codemap.md)** for full documentation including manual comm
 **Local source mirroring for important project dependencies.**
 
 `clonedeps` helps the Orchestrator clone a small, approved set of dependency
-source repositories into `.slim/clonedeps/repos/` so OpenCode can inspect library
+source repositories into `.local/.slim/clonedeps/repos/` so OpenCode can inspect library
 internals while keeping cloned code out of git.
 
 The skill is assigned to `orchestrator`. The orchestrator may ask `@explorer`
@@ -91,7 +226,7 @@ There is intentionally no helper script; dependency discovery and ref validation
 are handled by the orchestrator/explorer workflow so the skill works across
 languages and repository types.
 
-Before planning, the orchestrator checks `.slim/clonedeps.json` and reuses
+Before planning, the orchestrator checks `.local/.slim/clonedeps.json` and reuses
 existing clones when possible. After cloning, it adds or updates a concise
 `## Cloned Dependency Source` section in root `AGENTS.md` that lists each
 read-only cloned repo path directly with a one-sentence purpose.
@@ -106,6 +241,60 @@ Safety defaults:
 - ignore-file edits are limited to managed marker blocks.
 
 See **[Clonedeps](clonedeps.md)** for the full workflow and file layout.
+
+---
+
+## delegation
+
+**Lossless model-reference selection for delegated host calls.**
+
+`delegation` teaches the Orchestrator the canonical
+`provider/model[#variant]` format. The first slash separates the provider;
+remaining slashes and all colons belong to the model ID. Only `#` separates a
+variant. The skill uses the `ref` field from each `resolve_model` match and
+applies variant precedence before calling a provider-required host API.
+
+Use it whenever delegation selects or overrides a model. It stops rather than
+guessing a provider, silently substituting a model, or accepting malformed
+reserved delimiters.
+
+Override fields must be supported by the active host tool schema; OpenCode v1
+native `task` has no model override field. When a host exposes separate
+`provider`, `model`, and `variant` fields, a separate `model` is kept lossless,
+including IDs such as `inkling-small:free`. The task-session admission hook
+uses that provider/model identity for routing and concurrency without
+rewriting the host arguments.
+
+`resolve_model` returns `{ matches }` from the connected provider/model registry
+when the host exposes it, with the static `MODEL_MAPPINGS` preset table as a
+degraded fallback. Matches retain catalog spelling and include `provider`,
+`model`, and one canonical `ref`.
+Results are deduplicated and ranked before the fixed 20-result cap; an empty
+query lists known models, and an unmatched query returns an empty list.
+
+Discovery checks literal catalog identities first, including nested model IDs
+and colon suffixes such as `:free` or `:max`. In bare free-text queries only,
+legacy colon/space suffixes recognize `off`, `low`, `medium`, `high`, `xhigh`, `max`, `minimal`,
+`none`, `auto`, and `thinking`; parenthesized variants can use custom names.
+Qualified references never reinterpret colon suffixes as variants:
+`provider/model:max` preserves `model:max`. Variants affect query interpretation
+but are not added to returned model references or checked for provider support.
+
+Bare-name aliases support Gemini 3 Pro high/low → preview, Gemini 3.1 Pro
+high/low → base, and the legacy `claude-opus-4-7-thinking` → base spelling.
+Literal catalog matches take precedence over aliases. Explicit provider scopes
+never spill into another provider. GPT, Claude, Kimi and GLM version separators
+are normalized for matching, while output identities remain unchanged.
+Existing exact/token/prefix/substring/typo tiers and lexical tie-breaking are
+retained; discovery does not manufacture unavailable fallback candidates or
+rewrite catalog identities used by host calls.
+
+**Migration:** Dollar-separated references are rejected. Replace their provider
+separator with `/`. Executable colon-delimited variants must use `#` instead:
+`provider/model:high` now means the literal model ID `model:high`, while
+`provider/model#high` selects variant `high`. Colons already in catalog IDs
+remain unchanged. The redundant `ref_standard` and `ref_explicit` response
+fields have been removed; consumers must use `ref`.
 
 ---
 
@@ -142,18 +331,25 @@ Start it directly with:
    default) or when the task asks for check-ins.
 
 **State** (kept small; for resuming after compaction, not activity logging):
-- Router head `.slim/deepwork/<session-id>.md`: `status:` and `slug:` only.
-- Progress file `.slim/deepwork/<task-slug>/progress.md`: ~40 lines of current
+
+- Router head `.local/.slim/deepwork/<session-id>.md`: `status:` and `slug:` only.
+  Reused on resume; never modify another session's head.
+- Progress file `.local/.slim/deepwork/<task-slug>/progress.md`: ~40 lines of current
   state — pass, goal, next step, decisions, running lanes, ranked known
   issues, and concise References to project files (add a sha when its revision
   matters). No activity log.
 - Deepwork-owned process files stop at head and progress. Durable verdicts,
   research, and decisions go to the project's existing tracked documentation;
   generated assets stay where their producing script or path contract requires.
-- Before creating state, `.gitignore` gets `.slim/deepwork/` and `.ignore` gets
-  `!.slim/deepwork/` plus `!.slim/deepwork/**` (only missing entries).
+- Before creating state, `.gitignore` gets `.local/.slim/deepwork/` and `.ignore` gets
+  `!.local/.slim/deepwork/` plus `!.local/.slim/deepwork/**` (only missing entries).
 
 **Migrating existing `.slim/deepwork/` trees** (one-time, per project; no tooling):
+
+The command, skill, and post-compaction pointer all use
+`.local/.slim/deepwork/`. Existing files are not moved or read from the old root
+automatically.
+
 - Keep generated or pinned assets where code, tests, or frozen pins require them.
 - Promote durable old topic files individually to existing tracked project docs;
   discard transient process notes instead of bulk-migrating them.
@@ -293,8 +489,8 @@ or broad self-improvement ideas with no usage evidence.
 
 `worktrees` is an orchestrator-only skill for managing Git worktrees as safe,
 isolated coding lanes. Instead of polluting your current branch or juggling stash
-state, the Orchestrator can set up lanes under `.slim/worktrees/<slug>/` and
-track them in `.slim/worktrees.json`.
+state, the Orchestrator can set up lanes under `.local/.slim/worktrees/<slug>/` and
+track them in `.local/.slim/worktrees.json`.
 
 Other agents can be delegated tasks inside the worktree lane, but the Orchestrator coordinates the lifecycle, validation, and final integration.
 
@@ -317,7 +513,7 @@ configure the plugin itself: model presets, custom agents, agent prompts,
 `orchestratorPrompt` delegation hints, skills, MCP permissions, optional agents,
 and related OpenCode config files.
 
-It is installed by default with the bundled skills and is available to the
+It is registered by default with the bundled skills and is available to the
 Orchestrator through the default `skills: ["*"]` configuration.
 
 The skill also tells the Orchestrator to notice repeatable workflow friction and
@@ -352,6 +548,7 @@ Control which skills each agent can use in `~/.config/opencode/oh-my-opencode-sl
 | `["*"]` | All installed skills |
 | `["*", "!codemap"]` | All skills except `codemap` |
 | `["simplify"]` | Only `simplify` |
+| `["?review"]` | Select `review`, requiring permission approval |
 | `[]` | No skills |
 | `["!*"]` | Deny all skills |
 
@@ -393,13 +590,13 @@ Specialists with no skills show nothing.
 
 ### Adding or removing skills on top of an inherited list
 
-`skills` is replaced wholesale when multiple config layers (user, project, preset) define it. To adjust an inherited list instead, use the `skills_add` / `skills_remove` directives. They are folded into the effective `skills` array during config resolution and stripped afterwards, so agents and hooks only ever see plain `skills`:
+`skills` is replaced wholesale when multiple config layers (user, project, preset) define it. To adjust an inherited list instead, use the `skills_add` / `skills_remove` directives. They are folded into the effective token list during config resolution and stripped afterwards. Authorization is compiled separately while deliberate entries can still be distinguished from automatic/default selections; a normalized list is not itself permission to load every selected skill:
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `skills_add` | string[] | Skill names appended to the effective list (after `skills`) |
 | `skills_remove` | string[] | Skill names removed from the effective list; removal wins over addition |
-| `skills_include_local` | boolean | Adds valid skills from the project's and ancestors' `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees before `skills_remove` applies |
+| `skills_include_local` | boolean | Selects valid current/ancestor `.opencode/skills` and `.agents/skills` names plus admitted supplemental project skills, subject to `skills_remove` and explicit permission policy |
 
 ```json
 {
@@ -416,5 +613,51 @@ Specialists with no skills show nothing.
 - Duplicates are removed (first occurrence wins) before removals are applied
 - If the result contains `"*"`, each removed name is appended as `"!<name>"` so the exclusion beats the wildcard grant
 - On an agent without a `skills` list, directives resolve against that agent's default grants (orchestrator: all skills), so `skills_add` keeps the defaults and appends, and `skills_remove` prunes from them
+- An explicit base `skills` array and surviving deliberate `skills_add` entries retain their authority over nested `permission.skill`. Add-only directives do not promote inherited defaults past an explicit ask/deny; repeating a default name in `skills_add` is a deliberate grant.
+- Default and automatically discovered selections remain bounded by scalar or ordered exact/wildcard `permission.skill` rules. `skills_include_local` can select a local name without auto-allowing it: the name may remain listed/admitted while its effective decision is ask or deny.
 - `skills_add` never overrides an inherited exclusion: adding a name that the effective list already excludes (as `"!<name>"`) is a no-op. To re-allow it, lift the exclusion with a `skills_remove` entry of the form `"!<name>"`
 - A removal entry of the form `"!<name>"` removes the exclusion token itself (it lifts an existing exclusion); the `"*"` token is never expanded
+
+For marketplace agents, the resolved selection also defines capability
+admission. Ask/deny authorization does not enlarge that admission, and a
+deliberate wildcard selection remains open-ended rather than being expanded to
+currently known names. SDK/native permissions and child constraints share this
+admission: later explicit host allows can win inside it, never outside it.
+
+### Unsupported Integer-Index Skill IDs
+
+Canonical decimal skill IDs `0` through `4294967294` are rejected because
+JavaScript enumerates those object keys before other permission rules. This
+also rejects directive tokens such as `?123` / `!123`, exact skill permission
+rules, and exact skill resources generated by compilation. It does not ban all
+numeric-looking names: `01`, `00`, `-0`, `+1`, `1.0`, `1e2`, `4294967295`, and
+larger non-index strings remain supported.
+
+Actual skill IDs must not contain `?` or `*` anywhere. The restriction covers
+plugin-owned project/native-path and frontmatter identities, marketplace skill
+dependencies, package/bundled defaults, discovered local IDs, and literal
+`disabled_skills` entries. Literal `!` names such as `!123` remain permitted:
+typed internal selection keeps these defaults and discovered names distinct
+from directive operators through capability admission and permission projection.
+
+This does not restrict wildcard **policy syntax**. The config directive arrays
+`skills`, `skills_add`, and `skills_remove` keep their existing single-prefix
+interpretation: `*`, `?review`, `!blocked`, and supported pattern tokens still
+work. A directive `!123` still targets numeric `123` and is rejected, unlike an
+actual default/discovered ID named `!123`. Permission resource patterns such as
+`*`, `?`, `foo*`, and `review?` are also unchanged. There is no new escaping syntax
+or config key, and numeric resources for non-skill actions remain valid.
+
+Plugin-owned project/bundled registration and marketplace dependency/frontmatter
+intake reject invalid IDs with diagnostics rather than silently treating an
+explicit name as absent, choosing a fallback identity, or registering a partial
+candidate list. Existing normalization still applies before validating the
+identity a given intake actually uses. V2 project skills check the path-derived
+host ID as well as the frontmatter permission identity when they differ.
+
+Host-owned native/global skill catalogs are not universally enumerated or
+unregistered. This is not host-wide rejection of independently registered IDs.
+Their wildcard access is outside this compatibility guard; exact
+invalid skill selections/rules entering plugin policy are rejected fail-closed.
+See [Configuration](configuration.md#unsupported-integer-index-skill-identifiers)
+for the config-loading and child prompt-admission failure contract.

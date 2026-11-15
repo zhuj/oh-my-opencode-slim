@@ -55,6 +55,7 @@ export {
 } from './orchestrator-wake';
 export { createPhaseReminderHook } from './phase-reminder';
 export { createReflectCommandHook } from './reflect';
+export { createRulesInjectorHook } from './rules-injector/hook';
 export { createSearchPathGuardHook } from './search-path-guard';
 export { SessionLifecycle } from './session-lifecycle';
 export { createTaskSessionManagerHook } from './task-session-manager';

@@ -415,6 +415,10 @@ const V2_FLAT_HOST_PROMPTS = new Map<string, string>([
     'v2 flat host PromptInput ({ sessionID, text }) has no agent field; v2 agent selection goes through session.switchAgent',
   ],
   [
+    'v2/skill-commands.ts',
+    'v2 CommandInvocation forwards its sessionID and flat PromptInput.Prompt; native session.prompt has no agent selector, so skill commands retain the host-selected session agent without switchAgent',
+  ],
+  [
     'v2/client-shim.ts',
     'adapter that translates v1 SDK calls into v2 flat PromptInput; existing v2 sessions retain their admitted agent without a per-prompt agent field',
   ],
@@ -1258,6 +1262,17 @@ describe('agent-less prompt regression guard', () => {
     expect(findViolations('v2/client-shim.ts', shimCall)).toEqual([]);
     expect(findViolations('somewhere-else.ts', shimCall)).toEqual([
       'somewhere-else.ts:1 - s.prompt(',
+    ]);
+  });
+
+  test('the v2 skill command allowance does not hide other bound prompts', () => {
+    const commandCall = [
+      'const prompt = ctx.session.prompt.bind(ctx.session);',
+      'await prompt({ ...invocation.prompt, sessionID: invocation.sessionID });',
+    ].join('\n');
+    expect(findViolations('v2/skill-commands.ts', commandCall)).toEqual([]);
+    expect(findViolations('somewhere-else.ts', commandCall)).toEqual([
+      'somewhere-else.ts:2 - prompt(',
     ]);
   });
 

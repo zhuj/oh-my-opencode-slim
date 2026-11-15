@@ -22,21 +22,24 @@ const BASE_TYPES = [
 ] as const;
 
 const INTERVIEW_TEXT_TYPES = ['session.text.ended'] as const;
+const SKILL_INVENTORY_TYPES = ['skill.updated', 'plugin.updated'] as const;
 
 export type V2EventSubscriptionType =
   | (typeof BASE_TYPES)[number]
-  | (typeof INTERVIEW_TEXT_TYPES)[number];
+  | (typeof INTERVIEW_TEXT_TYPES)[number]
+  | (typeof SKILL_INVENTORY_TYPES)[number];
 
 export interface V2EventSubscriptionOptions {
   interview?: boolean;
+  skills?: boolean;
 }
 
 export function buildV2EventSubscriptionTypes(
   options?: V2EventSubscriptionOptions,
 ): ReadonlyArray<V2EventSubscriptionType> {
-  return Object.freeze(
-    options?.interview
-      ? [...BASE_TYPES, ...INTERVIEW_TEXT_TYPES]
-      : [...BASE_TYPES],
-  );
+  return Object.freeze([
+    ...BASE_TYPES,
+    ...(options?.interview ? INTERVIEW_TEXT_TYPES : []),
+    ...(options?.skills ? SKILL_INVENTORY_TYPES : []),
+  ]);
 }
