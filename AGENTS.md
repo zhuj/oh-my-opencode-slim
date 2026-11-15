@@ -11,7 +11,7 @@ This document provides guidelines for AI agents operating in this repository.
 oh-my-opencode-slim is a **lightweight harness**. Every change is reviewed against:
 
 - **Lightweight first** — adopt the smallest implementation that meets the requirement; no speculative abstraction, redundant configuration, or unnecessary indirection.
-- **No duplicate design** — when OpenCode v2 already owns a mechanism, reuse or observe it instead of building a parallel plugin-side state machine. Check the pinned host source under `.slim/clonedeps/repos/opencode/` before adding plugin-side machinery.
+- **No duplicate design** — when OpenCode v2 already owns a mechanism, reuse or observe it instead of building a parallel plugin-side state machine. Check the pinned host source under `.local/.slim/clonedeps/repos/opencode/` before adding plugin-side machinery.
 - **One source of truth for tool instructions** — tool usage lives in tool descriptions; never restate it in agent prompts. When prompt prose and a tool description overlap, deleting the prose is the preferred change.
 - **Model-facing bytes are a budget** — prompts and tool descriptions are paid on every request, in every preset. Removal is the preferred change; an addition must state the behavior it buys, verified by rendering and counting, and must serve the cheapest supported preset, not just the dev default.
 
@@ -123,6 +123,28 @@ oh-my-opencode-slim/
 5. Run `bun test` to verify tests pass
 6. Commit changes. Eval outputs are ignored run artifacts; do not commit edits made by eval sessions.
 
+## OpenCode Runtime Test Safety
+
+Do not run tests that start or exercise a real OpenCode process or runtime
+unless the user directly asks for it. Prefer unit tests, mocks, fixtures, and
+static checks; ask for explicit permission before running real-OpenCode tests.
+
+## Test Scratch Directories
+
+All tests, test-support fixtures, and test preloads must allocate scratch roots
+through `src/test-utils.ts`. Use `withTmpDir` for asynchronous callbacks,
+`withTmpDirSync` for synchronous callbacks, or `createTmpDir` paired with
+`removeTmpDir` when a scratch directory must live across test hooks. Do not
+call `mkdtemp`/`mkdtempSync` directly or choose scratch roots under the home
+directory, repository/current working directory, a hardcoded `/tmp` path, or
+directly from `os.tmpdir()`.
+
+Every `createTmpDir` lease must be removed from `afterEach`, `afterAll`, or a
+`finally` block so assertion and setup failures still clean up. Create any
+nested fixture structure inside the helper-provided root. Keep inert path
+strings used only as expected values or mock data unchanged. The
+`src/test-scratch-tripwire.test.ts` guard enforces this policy.
+
 ## Release Workflow
 
 For plugin or Companion releases, follow `docs/release.md`. It documents the
@@ -203,12 +225,12 @@ same second); TUI client processes use the `tui-` prefix.
 ## Cloned Dependency Source
 
 Read-only dependency source repositories are available under
-`.slim/clonedeps/repos/` for inspection. Do not edit these clones.
+`.local/.slim/clonedeps/repos/` for inspection. Do not edit these clones.
 
-- `.slim/clonedeps/repos/anomalyco__opencode-v1.18.13/` - `https://github.com/anomalyco/opencode.git` at `v1.18.13@a105350812f05f914c768e468559dbd6bd508d8e`; inspect `packages/plugin` and `packages/sdk/js` for OpenCode plugin and SDK internals.
-- `.slim/clonedeps/repos/opencode/` - `https://github.com/anomalyco/opencode.git` at `v2.2.0@1097e2668b1e08ad63bdf0b1c4860b9bc01e420c` (release tag; active development branch is `dev`); inspect `packages/core` and `packages/server` for the v2 TypeScript runtime (split from the former `packages/opencode`), `packages/plugin` for the v2 plugin/hook API, `packages/sdk` (embedded host) and `packages/client` (HTTP client) for v2 SDK internals, and `packages/core/src/tool/plugin/subagent.ts` for background subagent support.
-- `.slim/clonedeps/repos/modelcontextprotocol__typescript-sdk/` - `https://github.com/modelcontextprotocol/typescript-sdk.git` at `1.30.0@2d889f2b329e46680ec9bdd565de4616c497825a`; inspect it for MCP protocol and server integration internals.
-- `.slim/clonedeps/repos/agentclientprotocol__agent-client-protocol/` - `https://github.com/agentclientprotocol/agent-client-protocol.git` at `main@541daf8fa488c6b93aad4a874ac050b3daf9b282`; inspect it for ACP protocol specification and schema details.
+- `.local/.slim/clonedeps/repos/anomalyco__opencode-v1.18.13/` - `https://github.com/anomalyco/opencode.git` at `v1.18.13@a105350812f05f914c768e468559dbd6bd508d8e`; inspect `packages/plugin` and `packages/sdk/js` for OpenCode plugin and SDK internals.
+- `.local/.slim/clonedeps/repos/opencode/` - `https://github.com/anomalyco/opencode.git` at `v2.2.0@1097e2668b1e08ad63bdf0b1c4860b9bc01e420c` (release tag; active development branch is `dev`); inspect `packages/core` and `packages/server` for the v2 TypeScript runtime (split from the former `packages/opencode`), `packages/plugin` for the v2 plugin/hook API, `packages/sdk` (embedded host) and `packages/client` (HTTP client) for v2 SDK internals, and `packages/core/src/tool/plugin/subagent.ts` for background subagent support.
+- `.local/.slim/clonedeps/repos/modelcontextprotocol__typescript-sdk/` - `https://github.com/modelcontextprotocol/typescript-sdk.git` at `1.30.0@2d889f2b329e46680ec9bdd565de4616c497825a`; inspect it for MCP protocol and server integration internals.
+- `.local/.slim/clonedeps/repos/agentclientprotocol__agent-client-protocol/` - `https://github.com/agentclientprotocol/agent-client-protocol.git` at `main@541daf8fa488c6b93aad4a874ac050b3daf9b282`; inspect it for ACP protocol specification and schema details.
 
 ## Agent Operating Context
 

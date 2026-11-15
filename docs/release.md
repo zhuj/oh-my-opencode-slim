@@ -123,6 +123,12 @@ state protocol/asset set changes.
 
 ### 2. Verify before tagging or publishing
 
+For agent-driven work, do not start or exercise a real OpenCode process/runtime
+unless the user explicitly requests it. Prefer focused unit tests, mocked host
+contracts, typechecking, and static artifact/schema checks. Real-host smoke and
+compatibility commands require separate explicit authorization; the standard
+checks below are not permission to run them.
+
 ```bash
 bun run check:ci
 bun run typecheck

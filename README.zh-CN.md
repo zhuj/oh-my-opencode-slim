@@ -37,6 +37,9 @@ oh-my-opencode-slim 是一个用于 OpenCode 的智能体编排插件。它内�
 
 - **[六个专业智能体](#meet-the-pantheon)** —— Orchestrator、Explorer、Oracle、Council、Designer 和 Fixer。每部分工作都会交给最适合的智能体；可跨任意提供商混用任意模型。
 - **[后台编排](docs/background-orchestration.md)** —— Orchestrator 将专家作为后台任务派发、跟踪并整合结果后再继续；默认并行工作。
+  可选的 `id`/`depends_on` 字段规定依赖顺序；`task_wait` 等待任务组成功完成，
+  `task_dependency_tree` 显示有界依赖树和阻塞原因。`task_queue_list` 检查队列，
+  `task_queue_manage` 管理排队任务而不中止运行中的任务；本地 `/queue` 显示所选父会话的队列。
 - **[内置 Skills](#skills)** —— 如 `deepwork`、`codemap`、`verification-planning` 和 `reflect` 等基于提示词的工作流，按智能体分配。
 - **[Council](docs/council.md)** —— 使用 `@council` 针对同一问题并行运行多个模型，并综合为一个答案。
 - **[Companion](docs/companion.md)** —— 可选的浮动桌面窗口，显示哪些智能体正在运行，包括并行后台专家。
@@ -569,7 +572,7 @@ bunx oh-my-opencode-slim@latest companion install
 | **[多路复用器集成](docs/multiplexer-integration.md)** | 在 Tmux、Zellij、Herdr 或 cmux 窗格中实时观看智能体工作 |
 | **[Codemap](docs/codemap.md)** | 生成层级代码地图，更快理解大型代码库 |
 | **[Clonedeps](docs/clonedeps.md)** | 将选定的依赖源码克隆到被忽略的本地工作区中以供检查 |
-| **[Worktrees](docs/worktrees.md)** | 使用 `.slim/worktrees/` 通道进行隔离的并行或高风险编码工作 |
+| **[Worktrees](docs/worktrees.md)** | 使用 `.local/.slim/worktrees/` 通道进行隔离的并行或高风险编码工作 |
 | **[预设切换](docs/presets/preset-switching.md)** | 使用 `/preset` 在运行时切换智能体模型预设 |
 | **[Interview](docs/interview.md)** | 通过基于浏览器的问答流程，将粗略想法转成结构化 markdown 规格 |
 | **[Companion](docs/companion.md)** | 用于解析、帮助和类型信息的浮动窗口 companion |

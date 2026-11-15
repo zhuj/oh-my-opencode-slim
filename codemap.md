@@ -18,7 +18,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 | Path | Role |
 |---|---|
 | `package.json` | Package manifest, dependency graph, release scripts, published file list. |
-| `src/index.ts` | Main plugin bootstrap: wires agents (incl. dynamic councillors), tools, MCPs, hooks, shared background job board + supervisor, interview support, cache monitor, orchestrator-wake scheduler, TUI preset switching, and health checks. Does not touch multiplexer pane lifecycle (client-only). Exports the dual `default.server`/`default.setup` so v1 and v2 hosts share one build. |
+| `src/index.ts` | Main plugin bootstrap: wires agents (incl. dynamic councillors), tools, MCPs, hooks, shared background job board + supervisor, interview support, cache monitor, the v1 orchestrator-wake scheduler, TUI preset switching, and health checks. V2 uses native terminal notifications and has no plugin wake scheduler. Does not touch multiplexer pane lifecycle (client-only). Exports the dual `default.server`/`default.setup` so v1 and v2 hosts share one build. |
 | `src/cli/index.ts` | CLI entrypoint for installation/bootstrap workflows. |
 | `src/config/schema.ts` | Source-of-truth runtime config schema used by validation and schema generation. |
 | `src/config/runtime.ts` | Per-directory `RuntimeConfig` singleton: derived getters over the frozen plugin config, pre-mutation host-config snapshot, and preset/model overrides. |
@@ -40,6 +40,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 | `src/hooks/foreground-fallback/` | Interactive-session fallback control path for rate-limit or degraded foreground execution with event-driven agent mapping. | [View Map](src/hooks/foreground-fallback/codemap.md) |
 | `src/hooks/json-error-recovery/` | JSON/tool-output recovery helpers for malformed model responses. | [View Map](src/hooks/json-error-recovery/codemap.md) |
 | `src/hooks/phase-reminder/` | Message-transform reminder enforcing orchestrator workflow phases. | [View Map](src/hooks/phase-reminder/codemap.md) |
+| `src/hooks/rules-injector/` | Injects matched project/global rules only into successful tool-result tails, with boundary checks, per-session deduplication, context budgeting, and compaction/disposal cleanup. | `hook.ts`, `matcher.ts`, `rule-files.ts` |
 | `src/hooks/search-path-guard/` | Pre-checks `grep`/`glob` `args.path` validity in `tool.execute.before` and fails fast with an actionable error instead of upstream ripgrep noise. | [View Map](src/hooks/search-path-guard/codemap.md) |
 | `src/hooks/task-session-manager/` | Resumable `task` session tracking: machine-side job board (never rendered), terminal-delivery observation, short alias resolution, live runtime-status reads, HITL wait gating, fallback-observation handoff, same-provider background conversion, and revived-run tracking. | [View Map](src/hooks/task-session-manager/codemap.md) |
 | `src/hooks/tool-loop-guard/` | Detects byte-identical repeated tool calls per session; corrective warning at 3, hard block at 5, with task-lifecycle exemptions and per-turn wait-tool counting. | [View Map](src/hooks/tool-loop-guard/codemap.md) |
@@ -57,10 +58,10 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 | `src/skills/codemap/` | Repository-mapping skill package and codemap state-management script. | [View Map](src/skills/codemap/codemap.md) |
 | `src/skills/clonedeps/` | Workflow-only dependency source mirroring skill that routes discovery/ref resolution through explorer and direct orchestrator git operations. | [View Map](src/skills/clonedeps/codemap.md) |
 | `src/skills/simplify/` | Behavior-preserving simplification skill package. | [View Map](src/skills/simplify/codemap.md) |
-| `src/tools/` | Tool factory surface for AST-grep, smartfetch, ACP, and task lifecycle controls (cancel/status/result/revive/wait-for-user, plus the v1-only amendment channel `task_message`), plus shared task-status policy and activity trackers and on-disk preset-switching helpers. | [View Map](src/tools/codemap.md) |
+| `src/tools/` | Tool factory surface for AST-grep, smartfetch, ACP, model/session/time helpers, retained task inventory, queue/dependency controls, and task lifecycle controls (cancel/status/revive/wait-for-user, plus v1-only `task_message`), plus shared task-status policy and activity trackers and on-disk preset-switching helpers. | [View Map](src/tools/codemap.md) |
 | `src/tools/ast-grep/` | AST-grep binary management and AST-aware search/replace tool flow. | [View Map](src/tools/ast-grep/codemap.md) |
 | `src/tools/smartfetch/` | Fetch/extract/cache pipeline for web content and binary persistence. | [View Map](src/tools/smartfetch/codemap.md) |
-| `src/utils/` | Cross-cutting helpers: logging, session metadata, background job board/store/coordinator/supervisor, live session-status reads, in-process opencode client access, task parsing, env, compat/zip, and client call-shape contracts. | [View Map](src/utils/codemap.md) |
+| `src/utils/` | Cross-cutting helpers: logging, session metadata, direct background job board, snapshot persistence, scheduler, supervisor, live session-status reads, in-process opencode client access, task parsing, env, compat/zip, and client call-shape contracts. | [View Map](src/utils/codemap.md) |
 | `src/v2/` | OpenCode v2 (`opencode2`) adapter: bridges the v1 plugin factory into v2's promise-plugin transform/runtime-hook API. Loaded via `default.setup`; v1 uses `default.server` unchanged. | [View Map](src/v2/codemap.md) |
 | `scripts/` | Build/release validation and generated-artifact maintenance scripts. | [View Map](scripts/codemap.md) |
 | `src/generated/` | Generated build metadata (`build-info.ts` via `scripts/gen-build-info.ts`); never edit by hand. | [View Map](src/generated/codemap.md) |
@@ -83,7 +84,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
    - Prompt content is injected only through the cache-safe helpers in `src/hooks/cache-safe-injection.ts` so provider prompt-cache prefixes stay byte-stable.
 
 3. **Delegated execution**
-   - Native OpenCode background tasks are parsed from `task` output and tracked in the shared background job board (board + store + coordinator + supervisor in `src/utils/`).
+   - Native OpenCode background tasks are parsed from `task` output and tracked in the shared background job board (direct board + snapshot store + scheduler + supervisor in `src/utils/`).
    - `src/hooks/task-session-manager/` updates job-board state, resolves short aliases, and observes terminal deliveries in the parent's history (the board itself is never rendered); runtime-status reconciliation and the shared terminal-publication gate (`background-job-terminal-gate.ts`) keep board state honest against live session status.
    - `src/hooks/orchestrator-wake/` periodically nudges an idle parent orchestrator when incomplete TODOs remain, pushes later terminal results as one-shot deltas, and reacts to jobs that stop without a terminal result.
    - The TUI client (`src/tui.ts` → `src/multiplexer/client/`) optionally mirrors those sessions into tmux, Zellij, Herdr, cmux, kitty, WezTerm, or Orca panes/surfaces; each client anchors new panes to its own pane resolved from the client environment at spawn time (never a shared registry).
@@ -143,7 +144,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 - `biome.json`: formatting/lint policy.
 - `tsconfig.json`: TypeScript compiler settings.
 - `knip.jsonc`: dead-code audit config (entries cover files the import graph cannot see); run via `bun run knip`; deliberate export keeps carry `@public knip:` tags with inline reasons.
-- `.slim/codemap.json`: codemap change-detection state for this repository.
+- `.local/.slim/codemap.json`: codemap change-detection state for this repository.
 - `scripts/verify-release-artifact.ts`: release artifact validation script.
 - `src/health-check.ts`: plugin init health-check thresholds (`HEALTH_CHECK`) and `minimumExpectedToolCount` (accounts for disabled baseline tools); kept internal — never re-exported from the package root — so the legacy plugin loader cannot mis-invoke helpers as plugin factories (issue #894).
 - `src/plugin-entry.ts`: `INSTALLER_MANAGED_PLUGIN_OPTION` marker and `PluginEntry` type for installer-managed config entries.
