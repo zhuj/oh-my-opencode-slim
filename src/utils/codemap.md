@@ -1,5 +1,7 @@
 # src/utils/
 
+**Last Updated:** 2026-11-15
+
 ## Responsibility
 
 Centralized utilities and shared abstractions used across the oh-my-opencode-slim plugin. This folder provides:
@@ -19,7 +21,12 @@ Centralized utilities and shared abstractions used across the oh-my-opencode-sli
 
 - **BackgroundJobBoard** (`background-job-board.ts`): Singleton registry and lifecycle manager for background tasks with reusable session pool patterns, automatic cleanup, and reconciliation hooks. Also owns the terminal-outcome subscription fan-out, launch-identity projection, and the process-local lifecycle ledger (tombstones, deletion epochs, suppression write-through). The board is never rendered: records retain run/activity/publication fences and observed status, not render-age or generic update timestamps.
 - **BackgroundJobSupervisor** (`background-job-supervisor.ts`): One-shot wall-clock watchdog with timer/generation/abort mechanics; on expiry it aborts the child through the same lease-guarded host primitive `task_cancel` uses and never publishes a terminal itself
-- **BackgroundTaskConcurrency** (`background-task-concurrency.ts`): Process-local admission scheduler for native background task launches with model/provider capacity tracking
+- **BackgroundJobSnapshotStore** (`background-job-snapshot-store.ts`): Shared V1/V2 best-effort filesystem snapshots of retained board records, one versioned SHA-256-keyed file per top-level root session under `<project>/.local/.slim/background-jobs/`; nested tasks share that file and retain their immediate parent IDs. Per-root locks and temporary-file rename serialize updates; the task-session manager suppresses writes after a failed whole-store load.
+- **Pending-input ownership** (directly in `background-job-board.ts`): An unresolved exact prompt ID marks retained admission as uncertain and prevents unowned launch/reset. Rollback restores the captured predecessor only under its exact lease and unchanged-record fence; the terminal gate requires evidence bound to the queued input.
+- **BackgroundTaskConcurrency** (`background-task-concurrency.ts`): Directory-scoped process-local admission scheduler for native background launches; model/provider capacity, queued/postponed controls, parent pause, dependency readiness, and exact cancellation ownership. Settled operational entries release callbacks and native-call bindings.
+- **Task graph/state** (`background-task-state.ts`, `background-task-state-types.ts`, `background-task-dependencies.ts`): Parent-scoped logical IDs and monotonic admission IDs, atomic dependency updates, reverse dependency indexes, failure propagation, and bounded unresolved-prerequisite diagnostics.
+- **Task waiting/inspection** (`background-task-wait.ts`, `background-task-admission-wait.ts`, `background-task-dependency-tree.ts`): Notification-based waits with abort cleanup, retained admission ownership fences, and deterministic breadth-first graph output bounded by node/edge/depth/UTF-8 budgets.
+- **Task retention** (`background-task-retention.ts`, `background-task-limits.ts`): Terminal scheduler history uses one-hour, 1,024-per-parent, and 4,096-per-runtime soft bounds; live work, active waiters, lifecycle owners, and their prerequisite chains stay pinned. Cleanup runs on publication/ownership changes without a timer.
 - **Runtime Session Status** (`session-runtime-status.ts`): Reads and validates the in-process OpenCode session-status map with absent/unknown distinction; reduces the `session.get` outcome/idleAt projection to terminal/pending/unknown verdicts for v2 recovery triage (`hostRoundStateOf`), and classifies one live session for a probe (`classifyLiveSession`: `running`/`idle`/an attributable host terminal outcome read through a bounded, timer-injectable shared host read on hosts without the map).
 - **Session Info Read** (`session-info-read.ts`): Single-flight raw `session.get` per client session domain and task id, shared by the probe, the ownership gate, and the gate's rehydration observer; a consumer deadline releases only its waiter, never the underlying read, and a differing identity is refused while the read is open (`raceEvidenceDeadline` bounds waits deterministically).
 - **Session Metadata** (`session-metadata.ts`): Bounded session → agent/directory map with LRU eviction and active orchestrator protection
@@ -27,10 +34,11 @@ Centralized utilities and shared abstractions used across the oh-my-opencode-sli
 - **Child Transcript** (`child-transcript.ts`): Child session transcript evidence extraction and terminal evidence classification; the startup historical idle classifier complements on-demand host-outcome attribution. A marker-free migrated v1 history retains its v1 closure for startup and untracked reads; v2 lifecycle markers keep the idle boundary mandatory. Shared latest-input/text helpers reject malformed history rather than skipping it. Diagnostic tails enforce UTF-8 budgets in one pass.
 - **Host Transcript Attribution** (`child-transcript.ts`, `attributeHostRoundToTranscript`): Validates parsed host terminal evidence against assistant creation/completion after the latest delivered input; newer activity stays pending and unreadable timestamps stay unknown. Recovery and untracked reads retain the shared host-round parser/composer.
 - **BackgroundJobTerminalGate** (`background-job-terminal-gate.ts`): Terminal evidence verification with host outcome attribution, reading leases, and a bounded two-tier evidence re-arm (fast `graceMs` retries, then exponential slow re-arms) that is armed only on hosts where no polling reconciler owns recovery
-- **BackgroundJobPersistence** (`background-job-persistence.ts`): Persistence layer for lifecycle state with tombstone and epoch tracking across host restarts
+- **BackgroundJobPersistence** (`background-job-persistence.ts`): Optional V2 `ctx.storage` lifecycle metadata: launch identities, delivery markers, tombstones, deletion epochs, suppression, and alias high-water marks; distinct from filesystem board snapshots
 - **BackgroundJobFixture** (`background-job-fixture.ts`): Test-only board fixtures for adapter/state-machine tests (not for production)
 - **TestTimers** (`test-timers.ts`): Test-only deterministic timer harness (manual clock, injected `setTimeout`/`clearTimeout` seams, zero-duration `tick` drain); wire into timer-seam components, see AGENTS.md "Test Time"
-- **TUI Reusable Projection** (`tui-reusable-projection.ts`): Board → tui-state projection for sidebar reusable dot display
+- **Test scratch policy**: Allocate test scratch roots through `src/test-utils.ts` (`withTmpDir`, `withTmpDirSync`, or `createTmpDir` with `removeTmpDir`), not repository-local or hardcoded paths; see AGENTS.md "Test Scratch Directories".
+- **TUI Reusable Projection** (`tui-reusable-projection.ts`): Board → tui-state sidebar display projection, not task/session mapping storage
 - **JSDOM Probe** (`jsdom.ts`): JSDOM runtime detection without making it a prerequisite
 - **Redact** (`redact.ts`): Shape-based secret redaction for logging and task output structure masking
 
@@ -78,12 +86,19 @@ comparison without merging callers' distinct parsing/update policies.
 ## Flow
 
 ### Background Job Lifecycle
+
 1. Agent launches a background task via BackgroundJobBoard.registerLaunch() (watchdog arms wall-clock deadline)
 2. Task runs and updates status via BackgroundJobBoard.updateStatus()
 3. On completion/error/cancellation, task is marked terminal and added to reusable pool; watchdog timers cleared
 4. Subsequent tasks reuse completed sessions via aliases
 5. Unused reusable sessions are automatically trimmed based on maxReusablePerAgent
 6. Deadline exceeded during execution → watchdog aborts the child via the host; the host's real terminal evidence publishes the run
+
+### Task/Session Snapshot Recovery
+
+1. The task-session manager loads valid root snapshots into the board before exposing task-board operations; load failure leaves the in-memory board usable but suppresses snapshot writes to avoid replacing prior data.
+2. Previously running records restore as non-running (`stopped`, status uncertain). A positive `session.get` proves existence, not activity; absent APIs, malformed/empty status, and ambiguous V1 errors preserve the mapping. Only a typed V2 `Session.NotFoundError` for the same generation proves deletion.
+3. Board mutations are coalesced per root and written through the shared filesystem store on a best-effort basis; disposal detaches the listener and drains accepted writes. Board retention and session deletion remove records; the root file disappears only when no records remain. Neither optional V2 lifecycle metadata nor TUI projections replace these board snapshots or prove cross-host liveness.
 
 ### Session Selection Flow
 1. resolveCurrentSelection() reads session.get() with bounded timeout
@@ -154,7 +169,9 @@ export { extractZip } from './zip-extractor';
 ```
 
 This allows consumers to import from `src/utils` rather than individual files.
-Session metadata, the opencode client accessor, and the type-only call-shape contract are intentionally imported directly from their modules (not re-exported).
+The snapshot store is imported directly by the task-session manager. Session
+metadata, the opencode client accessor, and the type-only call-shape contract
+are also imported directly from their modules (not re-exported).
 
 ## Files
 
@@ -164,9 +181,15 @@ Session metadata, the opencode client accessor, and the type-only call-shape con
 | `agent-variant.ts` | Agent name normalization and regex escaping |
 | `background-job-board.ts` | Background task registry, lifecycle manager, terminal-outcome subscriptions, launch-identity projection, and lifecycle ledger |
 | `background-job-supervisor.ts` | Wall-clock watchdog: one timer per run, host abort on expiry |
-| `background-task-concurrency.ts` | Process-local admission scheduler for background tasks |
+| `background-task-concurrency.ts` | Directory scheduler, capacity, queue controls, and lifecycle ownership |
+| `background-task-state.ts`, `background-task-state-types.ts` | Admission records, logical aliases, and state transitions |
+| `background-task-dependencies.ts` | Atomic graph validation, readiness indexes, and failure propagation |
+| `background-task-dependency-tree.ts` | Bounded deterministic dependency inspection |
+| `background-task-wait.ts`, `background-task-admission-wait.ts` | Notification-based terminal/admission waits with abort cleanup |
+| `background-task-retention.ts`, `background-task-limits.ts` | Soft terminal-history bounds, dependency pins, and shared resource limits |
 | `background-job-persistence.ts` | Persistence for lifecycle state (tombstones, deletion) |
 | `background-job-terminal-gate.ts` | Terminal evidence verification and attribution; bounded two-tier evidence re-arm for late-attributable host outcomes (shim hosts only — `runtime-status-reconciliation.ts` owns recovery where `session.status` exists) |
+| `background-job-snapshot-store.ts` | Shared V1/V2 per-root filesystem snapshots of retained task/session board records |
 | `background-job-fixture.ts` | Test-only board fixtures for adapter/state-machine tests |
 | `test-timers.ts` | Test-only deterministic timer harness for seam-wired timer code |
 | `tui-reusable-projection.ts` | Board → tui-state projection for sidebar reusable dots |

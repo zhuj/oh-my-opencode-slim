@@ -1,8 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { OhMyOpenCodeLite as plugin } from '../index';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { BackgroundJobBoard } from '../utils/background-job-board';
 import { createBackgroundJobTerminalGate } from '../utils/background-job-terminal-gate';
 import { createTaskStatusTool } from './task-status';
@@ -37,7 +35,7 @@ async function loadPlugin(
   session: Record<string, unknown>,
   options: LoadPluginOptions = {},
 ) {
-  const projectDir = await mkdtemp(join(tmpdir(), 'omo-lifecycle-fence-'));
+  const projectDir = createTmpDir('omo-lifecycle-fence-');
   const trackedKeys = [
     'OPENCODE_CONFIG_DIR',
     'XDG_DATA_HOME',
@@ -84,7 +82,7 @@ async function loadPlugin(
         process.env[key] = value;
       }
     }
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   };
   pendingCleanups.push(cleanup);
   return {

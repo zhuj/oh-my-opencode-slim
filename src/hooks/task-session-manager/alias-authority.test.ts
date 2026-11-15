@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, jest, mock, spyOn, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { OhMyOpenCodeLite } from '../../index';
+import { createTmpDir, removeTmpDir, withTmpDir } from '../../test-utils';
 import { createCancelTaskTool } from '../../tools/cancel-task';
 import { createTaskReplyTool } from '../../tools/task-reply';
 import { createTaskReviveTool } from '../../tools/task-revive';
@@ -219,7 +217,7 @@ describe('alias numbering', () => {
     outputs: string[];
   }> {
     currentOptions = options;
-    const projectDir = await mkdtemp(join(tmpdir(), 'omo-alias-numbering-'));
+    const projectDir = createTmpDir('omo-alias-numbering-');
     // Another file's mock.module of opencode-client outlives mock.restore().
     spyOn(opencodeClient, 'getClient').mockImplementation(
       (value) => (value as { client: unknown }).client as never,
@@ -257,7 +255,7 @@ describe('alias numbering', () => {
       return { aliases, outputs: captured };
     } finally {
       await hooks.dispose?.();
-      await rm(projectDir, { recursive: true, force: true }).catch(() => {});
+      removeTmpDir(projectDir);
     }
   }
 
@@ -767,8 +765,7 @@ describe('recorded host alias interleave', () => {
 
 describe('oracle audit fences', () => {
   test('root dispose before a launch does not create pending work or abort', async () => {
-    const projectDir = await mkdtemp(join(tmpdir(), 'omo-alias-dispose-'));
-    try {
+    await withTmpDir(async (projectDir) => {
       const abort = mock(async () => ({}));
       const prompt = mock(async () => ({}));
       const client = {
@@ -825,9 +822,7 @@ describe('oracle audit fences', () => {
           agent: 'orchestrator',
         } as never),
       ).rejects.toThrow(/disposed|Unknown task/);
-    } finally {
-      await rm(projectDir, { recursive: true, force: true }).catch(() => {});
-    }
+    });
   });
 });
 

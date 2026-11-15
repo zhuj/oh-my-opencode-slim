@@ -405,7 +405,8 @@ export async function handleEvent(
               {
                 taskID: info.id,
                 parentSessionID: info.parentID,
-                error: error instanceof Error ? error.message : String(error),
+                errorLength:
+                  error instanceof Error ? error.message.length : undefined,
               },
             );
           }

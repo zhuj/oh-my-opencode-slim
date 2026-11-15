@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { BackgroundJobBoard as FixtureBoard } from './background-job-fixture';
 import {
+  aliasHighWaterMark,
   type BackgroundJobStorageBackend,
+  bumpAliasHighWaterMark,
   clearSuppression,
   configureBackgroundJobPersistence,
   getSuppressionTombstone,
@@ -183,6 +185,149 @@ describe('background-job persistence', () => {
     expect(freshLedger.deletionEpochs.get('ses_relaunch')).toBe(1);
   });
 
+  test('alias counters round-trip across a simulated restart', async () => {
+    const { backend } = createMemoryBackend();
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+
+    const firstBoard = new BackgroundJobBoard();
+    for (let counter = 1; counter <= 2; counter += 1) {
+      expect(
+        firstBoard.registerLaunch({
+          taskID: `ses_alias_${counter}`,
+          parentSessionID: 'parent-alias',
+          agent: 'fixer',
+          description: 'before restart',
+        }).alias,
+      ).toBe(`fix-${counter}`);
+    }
+    await flushWrites();
+
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+    expect(aliasHighWaterMark('parent-alias', 'fix')).toBe(2);
+
+    const restarted = new BackgroundJobBoard();
+    expect(
+      restarted.registerLaunch({
+        taskID: 'ses_alias_3',
+        parentSessionID: 'parent-alias',
+        agent: 'fixer',
+        description: 'after restart',
+      }).alias,
+    ).toBe('fix-3');
+  });
+
+  test('two live boards share the live alias high-water mark', async () => {
+    const { backend } = createMemoryBackend();
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+
+    const boardA = new BackgroundJobBoard();
+    for (let counter = 1; counter <= 2; counter += 1) {
+      expect(
+        boardA.registerLaunch({
+          taskID: `ses_live_a${counter}`,
+          parentSessionID: 'parent-live',
+          agent: 'fixer',
+          description: 'first board',
+        }).alias,
+      ).toBe(`fix-${counter}`);
+    }
+
+    // The second board reads the live floor even before writes flush.
+    const boardB = new BackgroundJobBoard();
+    expect(
+      boardB.registerLaunch({
+        taskID: 'ses_live_b1',
+        parentSessionID: 'parent-live',
+        agent: 'fixer',
+        description: 'second board',
+      }).alias,
+    ).toBe('fix-3');
+    await flushWrites();
+  });
+
+  test('alias high-water marks never regress on concurrent bumps', async () => {
+    const { backend } = createMemoryBackend();
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+
+    bumpAliasHighWaterMark('parent-race', 'fix', 5);
+    bumpAliasHighWaterMark('parent-race', 'fix', 3);
+    await flushWrites();
+
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+    expect(aliasHighWaterMark('parent-race', 'fix')).toBe(5);
+  });
+
+  test('loaded alias floor 9 survives a lower bump and trusted recovery of 3 across restart', async () => {
+    const { backend, map } = createMemoryBackend();
+    map.set('omo/bgj/alias/parent-floor:fix', 9);
+    configureBackgroundJobPersistence(backend);
+    const snapshot = await loadInitialBackgroundJobPersistence();
+    expect(snapshot.aliasHighWaterMarks.get('parent-floor:fix')).toBe(9);
+
+    bumpAliasHighWaterMark('parent-floor', 'fix', 3);
+    const board = new BackgroundJobBoard();
+    expect(
+      board.restoreRetainedSession({
+        taskID: 'ses_recovered_floor',
+        parentSessionID: 'parent-floor',
+        agent: 'fixer',
+        description: 'verified historical alias',
+        state: 'completed',
+        alias: 'fix-3',
+      })?.alias,
+    ).toBe('fix-3');
+    await flushWrites();
+
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+    expect(aliasHighWaterMark('parent-floor', 'fix')).toBe(9);
+    expect(map.get('omo/bgj/alias/parent-floor:fix')).toBe(9);
+  });
+
+  test('alias loading rejects nonnumeric and nonfinite persisted counters', async () => {
+    const { backend, map } = createMemoryBackend();
+    map.set('omo/bgj/alias/parent-valid:fix', 4);
+    map.set('omo/bgj/alias/parent-string:fix', '9');
+    map.set('omo/bgj/alias/parent-nan:fix', Number.NaN);
+    map.set('omo/bgj/alias/parent-infinite:fix', Number.POSITIVE_INFINITY);
+    configureBackgroundJobPersistence(backend);
+
+    const snapshot = await loadInitialBackgroundJobPersistence();
+
+    expect([...snapshot.aliasHighWaterMarks]).toEqual([
+      ['parent-valid:fix', 4],
+    ]);
+    expect(aliasHighWaterMark('parent-valid', 'fix')).toBe(4);
+    expect(aliasHighWaterMark('parent-valid', 'ora')).toBe(0);
+    expect(aliasHighWaterMark('parent-string', 'fix')).toBe(0);
+    expect(aliasHighWaterMark('parent-nan', 'fix')).toBe(0);
+    expect(aliasHighWaterMark('parent-infinite', 'fix')).toBe(0);
+  });
+
+  test('persisted counters do not authorize numbered aliases for an old parent', async () => {
+    const { backend, map } = createMemoryBackend();
+    map.set('omo/bgj/alias/parent-old:fix', 9);
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+
+    const board = new BackgroundJobBoard({ deferNumberedAliases: true });
+    expect(
+      board.registerLaunch({
+        taskID: 'ses_old_parent_child',
+        parentSessionID: 'parent-old',
+        agent: 'fixer',
+        description: 'old parent remains deferred',
+      }).alias,
+    ).toBe('ses_old_parent_child');
+    expect(board.isNumberedAliasReady('parent-old')).toBe(false);
+    expect(aliasHighWaterMark('parent-old', 'fix')).toBe(9);
+  });
+
   test('writes queued before a reconfiguration never land on the new backend', async () => {
     const gate = deferred<void>();
     const { backend: backendA, map: mapA } = createMemoryBackend();
@@ -196,6 +341,7 @@ describe('background-job persistence', () => {
 
     // Tombstone + epoch writes queue behind the gate (old epoch).
     recordSuppression('ses_stale_cross', 1);
+    bumpAliasHighWaterMark('parent-stale-cross', 'fix', 9);
 
     const { backend: backendB, map: mapB } = createMemoryBackend();
     configureBackgroundJobPersistence(backendB);
@@ -212,13 +358,18 @@ describe('background-job persistence', () => {
     expect(
       [...mapB.keys()].some((key) => key.includes('ses_stale_cross')),
     ).toBe(false);
+    expect(mapA.has('omo/bgj/alias/parent-stale-cross:fix')).toBe(false);
+    expect(mapB.has('omo/bgj/alias/parent-stale-cross:fix')).toBe(false);
+    expect(aliasHighWaterMark('parent-stale-cross', 'fix')).toBe(0);
 
     // New-epoch writes on the new backend work normally.
     recordSuppression('ses_fresh_cross', 2);
+    bumpAliasHighWaterMark('parent-stale-cross', 'fix', 2);
     await flushWrites();
     expect(
       [...mapB.keys()].some((key) => key.includes('ses_fresh_cross')),
     ).toBe(true);
+    expect(mapB.get('omo/bgj/alias/parent-stale-cross:fix')).toBe(2);
   });
 
   test('storage-absent fallback: pure memory, zero behavior change', async () => {
@@ -227,10 +378,12 @@ describe('background-job persistence', () => {
     expect(() => {
       recordSuppression('ses_fallback', 1);
       clearSuppression('ses_fallback');
+      bumpAliasHighWaterMark('parent-fallback', 'fix', 7);
     }).not.toThrow();
     await flushWrites();
 
     // No backend → nothing is seeded into fresh boards or ledgers.
+    expect(aliasHighWaterMark('parent-fallback', 'fix')).toBe(0);
     const board = new BackgroundJobBoard();
     const record = board.registerLaunch({
       taskID: 'ses_fresh',
@@ -447,12 +600,19 @@ describe('background-job persistence', () => {
     ).toBe(true);
     await flushWrites();
 
+    const relaunchLease = board.acquireLease(
+      'ses_refused_relaunch',
+      replaced.generation,
+      'relaunch',
+    );
+    if (!relaunchLease) throw new Error('missing relaunch lease');
     const relaunched = board.registerLaunch({
       taskID: 'ses_refused_relaunch',
       parentSessionID: 'parent-refused',
       agent: 'fixer',
       description: 'refused run',
       background: true,
+      relaunchLease,
       now: 300,
     });
     await flushWrites();
@@ -465,7 +625,7 @@ describe('background-job persistence', () => {
 
     // The host refused the queued admission: memory and persistence both
     // return to the replaced run, including the marker that acknowledged it.
-    expect(board.abandonLaunch(relaunched, replaced)).toBe(true);
+    expect(board.abandonLaunch(relaunched, relaunchLease)).toBe(true);
     await flushWrites();
     expect(board.get('ses_refused_relaunch')).toEqual(replaced);
     expect(

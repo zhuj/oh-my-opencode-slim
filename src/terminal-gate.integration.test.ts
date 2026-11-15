@@ -1,7 +1,5 @@
 import { afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import * as hookFactories from './hooks';
 import { isVolatileTaggedMessage } from './hooks/cache-safe-injection';
@@ -10,6 +8,7 @@ import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager/
 import type { RevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
 import * as runtimeFactories from './hooks/task-session-manager/runtime-status-reconciliation';
 import { OhMyOpenCodeLite as plugin } from './index';
+import { createTmpDir, removeTmpDir } from './test-utils';
 import type {
   BackgroundJobRecord,
   BackgroundJobBoard as ProductionBoard,
@@ -101,9 +100,7 @@ async function assembly(
   } = {},
 ) {
   const env = { ...process.env };
-  const directory = await mkdtemp(
-    path.join(tmpdir(), 'slim-terminal-assembly-'),
-  );
+  const directory = createTmpDir('slim-terminal-assembly-');
   process.env.OPENCODE_CONFIG_DIR = directory;
   process.env.XDG_CONFIG_HOME = directory;
   process.env.XDG_DATA_HOME = directory;
@@ -188,9 +185,14 @@ async function assembly(
     async (_args: unknown): Promise<unknown> => transcript(),
   );
   const get = mock(
-    async (_args: unknown): Promise<unknown> => ({
+    async (args: {
+      path?: { id?: string };
+      sessionID?: string;
+    }): Promise<unknown> => ({
       data: {
+        id: args.path?.id ?? args.sessionID ?? 'child',
         parentID: 'parent',
+        agent: 'explorer',
         outcome: 'succeeded',
         time: { idle: Date.now() },
       },
@@ -235,7 +237,7 @@ async function assembly(
       if (!(key in env)) delete process.env[key];
     }
     Object.assign(process.env, env);
-    await rm(directory, { recursive: true, force: true });
+    removeTmpDir(directory);
   });
   const hooks = await plugin({
     client,
@@ -4701,7 +4703,7 @@ test('window containment: time_idle above windowUpper (clock-skew row) is reject
 
 const HOST_SCHEMA_PATH = path.join(
   path.resolve(import.meta.dir, '..'),
-  '.slim/clonedeps/repos/opencode/packages/schema/src/session.ts',
+  '.local/.slim/clonedeps/repos/opencode/packages/schema/src/session.ts',
 );
 const hostSchemaAvailable = existsSync(HOST_SCHEMA_PATH);
 const driftTest = hostSchemaAvailable ? test : test.skip;
@@ -4710,7 +4712,7 @@ driftTest(
   'runbook §6 — host-schema drift: gate outcome literals track the cloned host session schema' +
     (hostSchemaAvailable
       ? ''
-      : ' [SKIPPED: host clone absent — fetch it with the clonedeps skill into .slim/clonedeps/repos/opencode]'),
+      : ' [SKIPPED: host clone absent — fetch it with the clonedeps skill into .local/.slim/clonedeps/repos/opencode]'),
   async () => {
     const source = readFileSync(HOST_SCHEMA_PATH, 'utf8');
     // Info.outcome Literals — the host's idle_outcome vocabulary

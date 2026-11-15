@@ -22,6 +22,7 @@ describe('delegation normalization', () => {
         prompt: 'p',
         sessionID: 'ses_1',
         background: true,
+        model: 'openrouter/openai/gpt-5.6-sol#high',
       }),
     ).toEqual({
       subagent_type: 'fixer',
@@ -29,6 +30,7 @@ describe('delegation normalization', () => {
       prompt: 'p',
       task_id: 'ses_1',
       background: true,
+      model: 'openrouter/openai/gpt-5.6-sol#high',
     });
   });
 
@@ -57,13 +59,37 @@ describe('delegation normalization', () => {
     expect(out.task_id).toBeUndefined();
   });
 
-  test('round-trips hook mutations', () => {
-    const v1 = subagentArgsToV1({ agent: 'fixer', sessionID: 'ses_1' });
+  test.each([
+    ['colon-bearing', 'openrouter/openai/gpt-5.6-sol:free'],
+    ['hash variant', 'openrouter/openai/gpt-5.6-sol:free#max'],
+  ])(
+    'round-trips the %s provider/model/variant reference losslessly',
+    (_grammar, model) => {
+      const args = {
+        agent: 'fixer',
+        description: 'd',
+        prompt: 'p',
+        sessionID: 'ses_1',
+        background: true,
+        model,
+      };
+
+      expect(v1ArgsToSubagent(subagentArgsToV1(args))).toEqual(args);
+    },
+  );
+
+  test('round-trips hook mutations without dropping the model override', () => {
+    const v1 = subagentArgsToV1({
+      agent: 'fixer',
+      sessionID: 'ses_1',
+      model: 'openrouter/openai/gpt-5.6-sol#high',
+    });
     delete v1.task_id;
     v1.task_id = 'ses_2';
     expect(v1ArgsToSubagent(v1)).toEqual({
       agent: 'fixer',
       sessionID: 'ses_2',
+      model: 'openrouter/openai/gpt-5.6-sol#high',
     });
   });
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils/background-job-fixture';
 import { createMessageTransformView } from '../message-transform-view';
 import { createTaskSessionManagerHook } from './index';
+import { testSnapshotStore } from './test-snapshot-store';
 
 const SESSION = 'parent-1';
 
@@ -62,6 +63,7 @@ function makeHook(board: BackgroundJobBoard) {
     {
       maxSessionsPerAgent: 2,
       backgroundJobBoard: board,
+      backgroundJobSnapshotStore: testSnapshotStore,
       shouldManageSession: () => true,
     },
   );

@@ -44,7 +44,11 @@ export interface SameProviderConversionInput {
 export function convertSameProviderBackgroundTask(
   input: SameProviderConversionInput,
 ): SameProviderConversionResult {
-  if (input.args.background !== true) {
+  if (
+    input.args.background !== true ||
+    input.policy === undefined ||
+    Object.keys(input.policy).length === 0
+  ) {
     return { converted: false };
   }
 

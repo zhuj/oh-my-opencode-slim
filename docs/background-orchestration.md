@@ -64,6 +64,23 @@ delegated children to the frozen inference snapshot and back `/preset`), so
 they keep applying in every mode; they are not board state. See
 [Configuration](configuration.md).
 
+Managed mode also provides parent-scoped admission and retained-task inspection:
+
+| Tool | Purpose |
+|------|---------|
+| `task_list` | List retained tasks by stored state without a live-status read |
+| `task_queue_list` | Inspect admission lifecycle, queue ordering, and native session associations |
+| `task_queue_manage` | Postpone, resume, cancel, clear, pause, change dependencies, or tune admission limits |
+| `task_wait` | Wait on scheduler notifications for successful completion of parent-owned logical/admission IDs |
+| `task_dependency_tree` | Inspect a bounded prerequisite graph and current blockers |
+
+These tools use the release's managed-session admission predicate; an admitted
+Build or custom primary session has the same parent-scoped access as the
+orchestrator. Native task/session IDs remain the handles for `task_status`,
+`task_cancel`, and host continuation. `task_message` and `task_revive` retain
+their v1-only public registration; v2 steers and resumes through native
+`subagent(sessionID, prompt)`.
+
 `backgroundJobs.mode: "native"` keeps the managed layer off but registers the
 two thin host-read controls, because the native delegation surface has no
 model-facing status or cancel: `task_status` reads a child session's host
@@ -75,6 +92,144 @@ a bounded `session.get`; neither touches a board, lease, or ledger.
 
 There is no automatic legacy fallback: missing background-subagent support is an
 environment or version problem, not an intentional v1 mode.
+
+Queue management is distinct from retained-session cancellation.
+`task_queue_manage` can cancel only queued or postponed admissions and never
+aborts a starting or running child. List, per-admission actions, clear, and
+pause/resume are scoped to the calling managed parent session. Runtime
+concurrency limits are shared by the directory scheduler, so changing one
+requires `confirm_global: true`; lowering a limit does not preempt active work.
+
+### Scheduler-enforced dependencies
+
+Operational cleanup releases settled admission callbacks, terminal queue entries,
+and active session bindings. Terminal scheduler history has soft retention limits:
+one hour after completion, 1,024 terminal records per parent, and 4,096 across the
+directory runtime. Cleanup evicts the oldest eligible records synchronously after
+state publication, waiter/lifecycle cleanup, and scheduler disposal; there is no
+retention timer. Live admissions, active `task_wait` calls, pending native-call
+lifecycle owners, and operational entries pin records and their prerequisite
+chains, even above these limits. Plugin reinitialization continues to share the
+same directory runtime while ownership overlaps.
+
+Eviction removes the record and its logical/admission aliases atomically. An
+evicted ID fails as unknown/not found, never as successful completion. Logical
+IDs may be reused only after eviction; generated admission IDs are monotonic
+within the process and are never reused, including across scheduler recreation.
+Use admission IDs when distinguishing successive uses of a logical ID. Retained
+terminal-only history may refer to an evicted ancestor; live dependency chains
+and active waiters never lose their prerequisites.
+
+`task_wait` and `task_queue_manage` are lifecycle operations exempt from the
+repeated-tool guard. Read-only `task_queue_list` and `task_dependency_tree`
+observations remain warn-only guarded when arguments and results repeat;
+changed results or an intervening lifecycle action restart the observation run.
+Task-session logs retain identifiers, states, and content lengths rather than
+task descriptions, prompts, output previews, or arbitrary error text.
+
+Native `task` calls accept plugin-consumed `id` and `depends_on` fields. On v2,
+use the same fields with native `subagent` (`agent` replaces `subagent_type`).
+The execute-before hook consumes these fields even though the native host
+schema does not advertise them.
+
+```jsonc
+// Submit the prerequisite first.
+{ "subagent_type": "explorer", "description": "Inspect API", "prompt": "Inspect the API contract", "id": "inspect-api", "background": true }
+// This admission stays queued until inspect-api completes successfully.
+{ "subagent_type": "fixer", "description": "Implement API", "prompt": "Implement the approved API", "id": "implement-api", "depends_on": ["inspect-api"], "background": true }
+```
+
+IDs are scoped to the calling parent session and must already exist: forward
+references are rejected. Identifiers contain 1–128 ASCII letters, digits,
+periods, underscores, colons, or hyphens, starting with a letter or digit.
+The `admission-N` namespace is reserved for generated identifiers. Omitted
+`id` uses the generated admission ID. Empty/malformed identifiers, duplicate
+IDs or edges, unknown/cross-parent references, self references and cycles fail
+before native execution. An empty `depends_on` array means no prerequisites.
+Dependency arrays accept at most 256 entries (including queue replacements and
+the resulting edge set after additions). Oversized inputs fail before mutation.
+
+Dependency-blocked background admissions consume no capacity; independent work
+can proceed. A prerequisite error or cancellation immediately fails queued or
+postponed descendants without launching a child. With `background: false`,
+every prerequisite must **already be completed**: otherwise the call fails
+immediately with per-dependency states. Foreground calls never implicitly wait
+for dependencies or capacity. Existing top-level/nested background defaults
+remain unchanged.
+
+Task output adds `id` (logical ID) and `admission_id` (scheduler ID). Native
+`task_id`, v2 `sessionID`, and `<task id="…">` remain host-owned and unchanged.
+Use native IDs for task result/session operations. Dependency references and
+`task_wait` accept logical IDs or admission IDs, not native child IDs.
+`task_queue_list` includes both identities, canonical admission-ID edges in
+`depends_on`, `dependency_error` when a prerequisite failed, and bounded
+unresolved-prerequisite samples (`waiting_on`, `waiting_on_count`,
+`waiting_on_truncated`) showing each direct dependency's logical `id`,
+`admission_id`, and `lifecycle_state` (`unknown` when the same-parent
+record is missing); completed prerequisites are omitted.
+
+Only the owning managed parent can modify queued/postponed edges:
+
+```jsonc
+// task_queue_manage
+{ "action": "set_dependencies", "admission_id": "admission-2", "depends_on": ["inspect-api"] }
+{ "action": "add_dependency", "admission_id": "admission-2", "dependency_id": "another-existing-task" }
+{ "action": "remove_dependency", "admission_id": "admission-2", "dependency_id": "inspect-api" }
+{ "action": "clear_dependencies", "admission_id": "admission-2" }
+// task_wait: explicitly block the current managed parent session
+{ "ids": ["inspect-api", "implement-api"] }
+// task_dependency_tree: answer what blocks a task from starting now
+{ "ids": ["implement-api"], "max_depth": 3 }
+```
+
+Mutations validate atomically and immediately reconsider queue admission.
+`task_wait` succeeds only when every task completes; unknown IDs fail before
+waiting, and errors/cancellations fail immediately with task states. It uses
+scheduler notifications, not polling. Aborting the wait does not cancel tasks.
+`task_wait` accepts 1–128 identifiers. `task_dependency_tree` accepts 1–32 roots
+and integer `max_depth` from 0–64, inclusive. Inspection admits at most 128 nodes,
+examines/emits at most 512 dependency edges, and returns at most 65,536 UTF-8
+bytes of valid JSON. These limits also apply to direct execution paths.
+Multi-source breadth-first traversal deduplicates admissions and retains the
+minimum discovered root distance; root input order does not affect output or
+truncation. Roots are sorted by admission ID. Adjacency is sorted within the
+remaining edge budget (legacy oversized adjacency is sampled before sorting).
+`truncation_reasons` distinguishes `depth`, `nodes`, `edges`, `bytes`, and
+`missing`. `missing_dependency_ids` identifies absent authoritative records,
+not merely hidden nodes. `truncated_dependency_ids` includes known omitted or
+missing IDs; an exhausted edge budget cannot enumerate unexamined IDs.
+`limits`, `examined_edges`, and `expanded_nodes` describe traversal budgets.
+Byte pressure removes trailing task objects, then diagnostic entries, never
+JSON fragments; `omitted_tasks` and `diagnostics_truncated` report that loss.
+If host metadata alone exceeds the budget, parent/root metadata is cleared.
+Each visible task reports `dependency_count` and `dependencies_truncated`;
+`depends_on` and `blocked_by` are display samples, not readiness decisions.
+Cycle witnesses cover the admitted, examined graph only. Hidden prerequisites
+still block or fail admissions: scheduler readiness never uses display budgets.
+Dependencies are process-local and are not restored after a process restart.
+
+### Live queue view
+
+Use the local TUI command `/queue` to inspect the selected parent session
+without sending a message or starting an LLM turn. The view shows no more than
+five queued or postponed admissions plus total queued, postponed, and pause
+state. It never persists prompts, results, or tool arguments.
+
+- On OpenCode v1, `/queue` opens one reactive dialog and refreshes it on the
+  existing one-second TUI cadence. Changing session or project closes it.
+- On OpenCode v2, `/queue` toggles an appended sidebar section. This is the
+  source-proven compatibility path because v2 exposes keymap commands and
+  sidebar slots, but no supported live custom-dialog renderer.
+
+The view is available only with the TUI, sidebar, and managed jobs enabled,
+and respects `disabled_commands: ["queue"]` independently of other commands.
+Both hosts discard stale reads after session/project changes or disposal.
+Refreshes are serialized so slow reads cannot accumulate.
+
+The server-owned scheduler remains authoritative. A project-scoped atomic file
+contains only a bounded display projection; TUI entry points never import or
+mutate scheduler state.
+
 
 ---
 ## Core Principle
@@ -115,11 +270,13 @@ Attribution through the existing task launch path promotes it to an ordinary
 listed task, including recovery and publication wakes.
 This distinction uses explicit provenance, not agent names or description text.
 
-Aliases and reusable-session history are process-local and do not survive process
-restarts as a reusable board. Post-restart recovery is partial and best-effort;
-it does not guarantee restoration of those aliases or the complete history. Two
-read-only channels work after a restart: a background launch's marker in the
-parent's history still resolves its alias when it is the final non-empty line of
+The Background Job Board persists retained task/session mappings and their
+aliases on a best-effort basis in this project checkout. Recovery may be partial
+if snapshots are missing, invalid, or could not be written; it does not
+guarantee a complete reusable-session history after a restart. For sessions not
+restored from a valid snapshot, two read-only channels work after a restart:
+a background launch's marker in the parent's history still resolves its alias
+when it is the final non-empty line of
 that tool result (tail-anchored only), and `task_status` reports a read-only
 observed state for an owned session the board no longer tracks — completed or
 uncertain running-or-incomplete from transcript evidence (unknown when the
@@ -145,9 +302,10 @@ ID as alias, and task creation still succeeds. This is deliberate: no cheap host
 read bounds the numbers issued before a restart. The live child count misses
 deleted children and a persisted high-water mark can miss a failed write, so
 either floor could hand an old `fix-2` to a new child while history still pairs
-`fix-2` with another session. Adopted and rehydrated host children keep their
-session ID as alias; a restored child keeps its historical alias only when
-history pairs that alias with it alone and no row of that parent holds it
+`fix-2` with another session. Adopted and transcript-rehydrated host children keep
+their session ID as alias; a child recovered from host history keeps its
+historical alias only when history pairs that alias with it alone and no row
+of that parent holds it
 (never once the parent's readable history is cut: a v2 compaction or,
 on v1, more than 1,000 messages).
 None of them consumes a new number. A forked session counts as new, but the
@@ -306,6 +464,29 @@ completion. The recovery and fencing rules are documented in
 [Background job state](opencode-v2-compatibility.md#background-job-state-rehydrate-probe-and-persistence),
 and the tools themselves in [Tools](tools.md#background-task-control).
 
+The task-session manager additionally restores retained task/session mappings
+from best-effort filesystem snapshots before exposing board operations. Each
+top-level root owns a versioned, atomically replaced file under
+`<project>/.local/.slim/background-jobs/`; nested records retain their immediate
+parent and share the root file. Writes batch per root; disposal detaches the listener and drains already
+accepted writes before returning. Failed whole-store loads suppress writes, and
+malformed individual records are quarantined. Previously
+running rows restore as `stopped` with uncertain status, never as confirmed
+running or terminal evidence. A positive `session.get` proves existence only.
+Only a typed v2 not-found result for the current generation proves deletion;
+failed reads preserve the mapping. Optional v2 `ctx.storage` continues to own
+separate launch identities, delivery markers, deletion epochs, suppression, and
+alias high-water marks; it is not a second board implementation.
+
+Retained queued input persists its exact prompt message identity. Generic busy,
+idle, or historical terminal observations cannot acknowledge that input or
+reset its ownership. Attributable input/result evidence confirms admission;
+exact-input aborted evidence is normalized through the release terminal gate
+to `stopped`. A failed relaunch restores only its captured predecessor while
+its exact lease still owns the unchanged launch, preventing late rollbacks from
+clobbering replacement work. Snapshot restoration never reconstructs process-local
+scheduler queues, dependencies, callbacks, or live leases.
+
 Specialist outputs are inputs, not final truth. The orchestrator reconciles them
 against each other and the original user goal.
 ### 5. Verify
@@ -462,9 +643,11 @@ rendered into a prompt (issue #1647); `task_status` is the read surface.
 
 ### Orchestrator wake scheduler
 
-When an orchestrator parent stays continuously idle, the plugin may send a
-periodic internal wake prompt so incomplete TODOs are not abandoned. This is
-**enabled by default** with a **5-minute** interval:
+On v1, when an orchestrator parent stays continuously idle, the plugin may send
+a periodic internal wake prompt so incomplete TODOs are not abandoned. This is
+**enabled by default** with a **5-minute** interval. On v2, no plugin wake
+scheduler is created; native notifications own terminal delivery and
+`task_status` is the pull channel.
 
 ```jsonc
 {
@@ -505,7 +688,8 @@ Behavior:
 - `session.time.archived` is authoritative when available. Archived sessions do
   not receive periodic or stopped-job-recovery wakes; archive updates cancel
   timers and stale evaluations, while an unarchive permits future lifecycle
-  activity. v2 hosts without `session.get()` use observed session updates.
+  activity. When `session.get()` is unavailable, observed session updates
+  provide the archive-state signal.
 - One in-flight evaluation/wake per session. Status/waits/generation are
   rechecked immediately before `promptAsync`. Cooldown/reservation is recorded
   before the call so a failed `promptAsync` cannot storm retries.
@@ -518,8 +702,7 @@ Behavior:
   prompt text is static and does **not** include a fingerprint or snapshot.
   The no-progress caps live in a process-global wake gate that the plugin's
   dispose hook clears on instance teardown, so a recreated plugin generation
-  (for example after `opencode reload` on v2 hosts) starts with fresh caps
-  instead of inheriting the previous generation's.
+  starts with fresh caps instead of inheriting the previous generation's.
 - Static wake text (internal initiator part via `promptAsync` only — no message
   transform injection or history rewrite):
 
@@ -603,6 +786,24 @@ machine-side projection: dedupe by objective, alias authority, stall tracking,
 the terminal gate, session adoption, and generations keep working, but no
 prompt surface lists them. There is no switch to turn the render back on; the
 `backgroundJobs.boardInjection` key was removed with the render.
+
+The authoritative retained task/session records live in the Background Job
+Board, with best-effort project-local snapshots at
+`<project>/.local/.slim/background-jobs/<sha256(root-session-id)>.json`.
+There is one versioned JSON file per top-level root session; nested tasks stay
+in that root's file while retaining their immediate parent session ID. V1 and
+V2 use the same plugin-owned filesystem store. This is local to the checkout:
+it is not a cross-checkout, cross-host, or host-independent liveness service.
+Read/validation and write/lock failures do not block in-memory task operations;
+a failed whole-store load suppresses writes so prior snapshots are not
+overwritten. Invalid individual snapshots are skipped and protected against
+replacement by a mutation. Files may be
+removed when the board's retention or deletion policy leaves no records for a
+root. A successful write does not guarantee durability across machine loss.
+
+These filesystem snapshots are distinct from optional V2 `ctx.storage`
+lifecycle metadata and TUI display projections; neither replaces the live
+in-memory board.
 
 Terminal facts travel as one-shot pushes instead:
 

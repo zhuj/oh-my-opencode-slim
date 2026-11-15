@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { BackgroundJobBoard, BackgroundTaskConcurrency } from '../../utils';
 import { createTaskSessionManagerHook } from './index';
+import { testSnapshotStore } from './test-snapshot-store';
 
 const LM_NEXUS_MODEL = 'lm-nexus/Qwen3.8-27B';
 const SATELLITE_MODEL = 'opencode/muse';
@@ -28,10 +29,11 @@ function createHook(options?: IntegrationHookOptions) {
           status: mock(async () => ({ data: {} })),
         },
       },
-      directory: '/tmp',
-      worktree: '/tmp',
+      directory: process.cwd(),
+      worktree: process.cwd(),
     } as never,
     {
+      backgroundJobSnapshotStore: testSnapshotStore,
       maxSessionsPerAgent: 2,
       backgroundJobBoard: options?.backgroundJobBoard,
       backgroundTaskConcurrency: options?.backgroundTaskConcurrency,

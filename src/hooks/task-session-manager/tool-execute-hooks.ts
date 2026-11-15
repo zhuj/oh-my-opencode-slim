@@ -23,8 +23,14 @@ import {
 import type { BackgroundJobRecord } from '../../utils/background-job-board';
 import { getBackgroundJobLifecycleLedger } from '../../utils/background-job-board';
 import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
+import { waitForAdmission } from '../../utils/background-task-admission-wait';
+import {
+  TaskDependencyError,
+  taskDependencyFieldsSchema,
+} from '../../utils/background-task-dependencies';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
+import { parseModelReference } from '../../utils/session';
 import { controlParamName } from '../../v2/adapters';
 import {
   type DelegationWording,
@@ -36,6 +42,7 @@ import type { PendingTaskCall } from './pending-call-tracker';
 import { convertSameProviderBackgroundTask } from './same-provider-policy';
 import {
   appendChildRefSuffix,
+  appendSchedulerMetadata,
   type CanonicalTaskReference,
   noteExactSessionAlias,
   pluginDisposedMessage,
@@ -48,14 +55,6 @@ import {
   filterStaleContextFiles,
 } from './task-context-tracker';
 
-interface TaskArgs {
-  description?: unknown;
-  prompt?: unknown;
-  subagent_type?: unknown;
-  task_id?: unknown;
-  background?: unknown;
-}
-
 interface ResumeRefusalJob {
   taskID: string;
   alias: string;
@@ -63,9 +62,49 @@ interface ResumeRefusalJob {
   state: string;
   terminalUnreconciled: boolean;
 }
-
 function normalizeObjectiveKey(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function parseTaskModelReference(
+  args: Record<string, unknown>,
+): ReturnType<typeof parseModelReference> | undefined {
+  const rawModel = args.model;
+  const rawProvider = args.provider;
+  const rawVariant = args.variant;
+
+  if (rawModel === undefined) return undefined;
+  if (typeof rawModel !== 'string') return null;
+  if (rawProvider !== undefined && typeof rawProvider !== 'string') {
+    return null;
+  }
+  if (rawVariant !== undefined && typeof rawVariant !== 'string') {
+    return null;
+  }
+
+  const providerID = rawProvider;
+  const variant = rawVariant;
+  if (providerID !== undefined) {
+    const qualified = parseModelReference(`${providerID}/${rawModel}`);
+    if (
+      qualified?.providerID !== providerID ||
+      qualified.modelID !== rawModel ||
+      qualified.variant !== undefined
+    )
+      return null;
+    return {
+      providerID,
+      modelID: rawModel,
+      ...(variant !== undefined ? { variant } : {}),
+    };
+  }
+
+  const parsed = parseModelReference(rawModel);
+  if (!parsed) return null;
+  return {
+    ...parsed,
+    ...(variant !== undefined ? { variant } : {}),
+  };
 }
 
 function refuseExplicitTaskId(
@@ -155,6 +194,36 @@ function refuseKnownTaskResume(
   );
 }
 
+/**
+ * v2 hosts name the delegation tool `subagent` and use `sessionID` as the
+ * resume parameter. The handler below is `task`-only, so its own v2 branch is
+ * unreachable on a real v2 host: a placeholder or host-injected `undefined`
+ * resume param reaches host validation and is rejected there (`Expected
+ * string`) instead of starting a new session. Strip it first.
+ */
+function stripPlaceholderResumeParam(
+  input: { tool: string },
+  output: { args?: unknown },
+  hostFlavor: string | undefined,
+): void {
+  if (hostFlavor !== 'v2') return;
+  const toolName = input.tool.toLowerCase();
+  if (toolName !== 'task' && toolName !== 'subagent') return;
+  if (!isObjectRecord(output.args)) return;
+  const { resumeParam } = delegationWording(hostFlavor);
+  const resumeID = output.args[resumeParam];
+  if (typeof resumeID === 'string' && resumeID.trim() === '') {
+    refuseExplicitTaskId(
+      resumeID,
+      `${toolName}() received an empty ${resumeParam}. It was not treated as omitted; no new session was created. Omit ${resumeParam} on a separate call to start a new session.`,
+      { empty: true },
+    );
+  }
+  if (isNewSessionPlaceholder(resumeID)) {
+    delete output.args[resumeParam];
+  }
+}
+
 export async function handleToolExecuteBefore(
   input: { tool: string; sessionID?: string; callID?: string },
   output: { args?: unknown },
@@ -164,6 +233,7 @@ export async function handleToolExecuteBefore(
     backgroundJobBoard: BackgroundJobBoard;
     pendingCallTracker: {
       add(call: PendingTaskCall): void;
+      remove(call: PendingTaskCall): void;
       take(
         callID: string | undefined,
         sessionID: string,
@@ -210,12 +280,24 @@ export async function handleToolExecuteBefore(
       requested: string,
       agent: string,
     ) => Promise<'adopted' | 'unchecked' | 'rejected'>;
+    /**
+     * Host-truth probe: does the parent conversation have a running child
+     * session that the in-memory board does not track (e.g. after a plugin
+     * restart)? Used to refuse unknown-alias drops that could duplicate
+     * live work. Fail-closed: implementers should return true on errors.
+     */
+    hasUntrackedRunningChild?: (parentSessionID?: string) => Promise<boolean>;
+    /** Explicit invocation seam: current host before-hook contracts omit cancellation. */
+    signal?: AbortSignal;
   },
 ): Promise<void> {
+  stripPlaceholderResumeParam(input, output, deps.hostFlavor);
   const toolName = input.tool.toLowerCase();
   if (toolName !== 'task') return;
   if (!input.sessionID) return;
   const delegation = delegationWording(deps.hostFlavor);
+  if (deps.signal?.aborted)
+    throw new TaskDependencyError('Task admission wait aborted');
   if (!deps.shouldManageSession(input.sessionID)) {
     // ponytail: no agent-identity guard here — at tool.execute.before
     // time there's no message to inspect. Only orchestrators call `task`
@@ -229,7 +311,7 @@ export async function handleToolExecuteBefore(
   }
   if (!isObjectRecord(output.args)) return;
 
-  const args = output.args as TaskArgs;
+  const args = output.args;
   // Background-default flip (v2 only): the native `subagent` schema has no
   // default, so an omitted `background` silently blocks the parent turn —
   // measured 2:1 foreground habit even in orchestration sessions. Flip the
@@ -256,6 +338,19 @@ export async function handleToolExecuteBefore(
       });
     }
   }
+  if (deps.hostFlavor === 'v2' && isNewSessionPlaceholder(args.task_id)) {
+    delete args.task_id;
+  }
+  const dependencyFields = taskDependencyFieldsSchema.parse(args);
+  if (
+    !deps.backgroundTaskConcurrency &&
+    (dependencyFields.id !== undefined ||
+      dependencyFields.depends_on !== undefined)
+  ) {
+    throw new TaskDependencyError('Task dependency scheduler is unavailable');
+  }
+  delete args.id;
+  delete args.depends_on;
   if (typeof args.task_id === 'string' && args.task_id.trim() === '') {
     refuseExplicitTaskId(
       args.task_id,
@@ -293,7 +388,17 @@ export async function handleToolExecuteBefore(
     }
     if (canonical?.kind === 'exact') args.task_id = canonical.taskID;
   }
+  const isManagedTask = deps.backgroundJobBoard.taskIDs().has(input.sessionID);
   let background = args.background === true;
+  const modelReference = parseTaskModelReference(args);
+  if (args.model !== undefined && !modelReference) {
+    throw new Error(
+      'Invalid model reference: expected [provider/]model[#variant]',
+    );
+  }
+  const model = modelReference?.providerID
+    ? `${modelReference.providerID}/${modelReference.modelID}`
+    : undefined;
   if (background) {
     const conversion = convertSameProviderBackgroundTask({
       agentType,
@@ -301,7 +406,8 @@ export async function handleToolExecuteBefore(
       args,
       policy: deps.sameProviderPolicy,
       getParentModel: (id) => deps.getSessionModel?.(id),
-      getChildModel: (agent, parent) => deps.getModelForAgent?.(agent, parent),
+      getChildModel: (agent, parent) =>
+        model ?? deps.getModelForAgent?.(agent, parent),
     });
     if (conversion.converted) {
       background = false;
@@ -333,6 +439,7 @@ export async function handleToolExecuteBefore(
     agentType,
     label,
     background,
+    ...(model ? { model } : {}),
     lifecycleEpoch: deps.getLifecycleEpoch?.() ?? 0,
     releaseLease: (lease) => deps.backgroundJobBoard.releaseLease(lease),
   };
@@ -660,41 +767,38 @@ export async function handleToolExecuteBefore(
   }
   try {
     deps.pendingCallTracker.add(pendingCall);
-    if (pendingCall.background && deps.backgroundTaskConcurrency) {
+    if (deps.backgroundTaskConcurrency && !isSteeredCall(pendingCall)) {
       // Nested orchestration exemption: a session that is itself a managed
       // task already holds an admission slot. Waiting for another one while
       // the queue is saturated would deadlock — this session could never
-      // finish, so its own slot could never be released. A native steer of
-      // a running child adds no run either: the child owns its slot, and
-      // queueing the steer behind it would deadlock the amendment.
-      const isManagedTask = deps.backgroundJobBoard
-        .taskIDs()
-        .has(input.sessionID);
-      if (!isManagedTask && !isSteeredCall(pendingCall)) {
-        const ticket = deps.backgroundTaskConcurrency.acquire({
-          model: deps.getModelForAgent?.(
-            agentType,
-            pendingCall.parentSessionId,
-          ),
-        });
-        pendingCall.concurrencyTicket = ticket;
-        await ticket.ready;
-        if (deps.isDisposed?.()) {
-          throw new Error(`${pluginDisposedMessage()} No session was created.`);
-        }
+      // finish, so its own slot could never be released. Native steers bypass
+      // admission entirely: they amend a running child that already owns its
+      // slot, rather than creating a second scheduler record for that run.
+      const ticket = deps.backgroundTaskConcurrency.acquire({
+        retainRecord: true,
+        id: dependencyFields.id,
+        dependsOn: dependencyFields.depends_on,
+        background,
+        bypassCapacity: isManagedTask,
+        model:
+          pendingCall.model ??
+          deps.getModelForAgent?.(agentType, pendingCall.parentSessionId),
+        parentSessionID: pendingCall.parentSessionId,
+        ...(pendingCall.resumedTaskId
+          ? { previousSessionID: pendingCall.resumedTaskId }
+          : {}),
+      });
+      pendingCall.concurrencyTicket = ticket;
+      await waitForAdmission(ticket.ready, deps.signal);
+      if (deps.isDisposed?.()) {
+        throw new Error(`${pluginDisposedMessage()} No session was created.`);
       }
     }
   } catch (error) {
-    const tracked = deps.pendingCallTracker.take(
-      pendingCall.callId,
-      pendingCall.parentSessionId,
-      undefined,
-      {
-        recordConsumed: false,
-      },
-    );
-    if (tracked) deps.pendingCallTracker.release?.(tracked);
-    else pendingCall.concurrencyTicket?.releaseIfUnbound();
+    // This wait may reject after the same parent/call ID was replaced. Only
+    // detach and release the admission object this callback actually owns.
+    deps.pendingCallTracker.remove(pendingCall);
+    deps.pendingCallTracker.release?.(pendingCall);
     throw error;
   }
   log(
@@ -703,10 +807,26 @@ export async function handleToolExecuteBefore(
       callId: pendingCall.callId,
       parentSessionId: pendingCall.parentSessionId,
       agentType: pendingCall.agentType,
-      label: pendingCall.label,
+      labelLength: pendingCall.label.length,
       inputCallID: input.callID,
       inputSessionID: input.sessionID,
     },
+  );
+}
+
+function isNewSessionPlaceholder(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== 'string') return false;
+  // Optional host arguments and named new-session sentinels may be omitted.
+  // Explicit empty strings retain the release's refusal: a malformed resume
+  // request must not silently launch replacement work.
+  const trimmed: string = value.trim();
+  return (
+    trimmed === 'ses:new' ||
+    trimmed === 'ses_new' ||
+    trimmed === 'ses_<<new>>' ||
+    trimmed === 'ses_' ||
+    /^ses\?*$/.test(trimmed)
   );
 }
 
@@ -861,10 +981,8 @@ export async function handleToolExecuteAfter(
     sessionID: input.sessionID,
     hasPending: !!pending,
     outputType: typeof output.output,
-    outputPreview:
-      typeof output.output === 'string'
-        ? output.output.slice(0, 120)
-        : undefined,
+    outputLength:
+      typeof output.output === 'string' ? output.output.length : undefined,
   });
 
   if (!pending) return;
@@ -937,7 +1055,7 @@ export async function handleToolExecuteAfter(
         alias: record.alias,
         parentSessionID: record.parentSessionID,
         agent: record.agent,
-        description: record.description,
+        descriptionLength: record.description.length,
         state: record.state,
       });
       return;
@@ -1085,6 +1203,13 @@ export async function handleToolExecuteAfter(
     );
     deps.taskContextTracker.prune(deps.backgroundJobBoard);
   } finally {
+    if (pending.concurrencyTicket && typeof output.output === 'string') {
+      const record = pending.concurrencyTicket.snapshot();
+      output.output = appendSchedulerMetadata(output.output, {
+        logicalID: record.logicalID,
+        admissionID: record.id,
+      });
+    }
     deps.pendingCallTracker.release?.(pending);
     if (pending.relaunchLease) {
       deps.backgroundJobBoard.releaseLease(pending.relaunchLease);
@@ -1275,7 +1400,7 @@ function registerTaskOutputLaunch(
     log('[task-session-manager] refused task output launch registration', {
       taskID,
       callID: pending.callId,
-      error: error instanceof Error ? error.message : String(error),
+      errorLength: error instanceof Error ? error.message.length : undefined,
     });
     return undefined;
   }

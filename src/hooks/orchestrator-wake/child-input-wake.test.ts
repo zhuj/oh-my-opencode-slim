@@ -18,6 +18,7 @@ import {
   noteChildInputWait,
   resetChildInputWaitForTests,
 } from '../task-session-manager/child-input-wait';
+import { testSnapshotStore } from '../task-session-manager/test-snapshot-store';
 import { resetUserWaitGateForTests } from '../task-session-manager/user-wait-gate';
 import {
   CHILD_INPUT_OVERFLOW_TEXT,
@@ -603,6 +604,7 @@ describe('child input-wait wake', () => {
         maxSessionsPerAgent: 2,
         maxRetainedSnapshots: 20,
         backgroundJobBoard: board,
+        backgroundJobSnapshotStore: testSnapshotStore,
         shouldManageSession: (sessionID: string) => sessionID === 'parent-1',
         idleReconcileDelayMs: 0,
         runtimeStatusReconcileDelayMs: 0,

@@ -513,6 +513,100 @@ function rememberSyntheticTerminalOccurrence(
   order.push(key);
 }
 
+/** Candidate count produced by one host-message ledger scan. */
+interface SyntheticTerminalCandidateScan {
+  count: number;
+  /** The single candidate; present exactly when `count === 1`. */
+  sole?: SyntheticTerminalOccurrenceOrigin;
+}
+
+/**
+ * Memoized host-message candidate scans, keyed by the ledger Map itself.
+ *
+ * One request replays every eligible completion part in the transcript, so C
+ * historical parts over an L-entry ledger rescanned all L entries C times
+ * (O(C*L)). The candidate set for a (taskID, generation) pair depends only on
+ * entries' `taskID` / `generationAtObservation` — both fixed at insert — and on
+ * insertion order, so the result is reusable until the ledger changes.
+ *
+ * Invalidation is conservative: the WeakMap key makes a rehydrated state with a
+ * fresh ledger start empty, and both the entry count and the occurrence-order
+ * length are re-checked per lookup, so an insertion or an external truncation
+ * drops the memo before it can answer. `phase` is the only field mutated after
+ * insert (`rememberProcessedSyntheticTerminal`) and no candidate predicate
+ * reads it.
+ */
+const occurrenceCandidateScans = new WeakMap<
+  Map<string, SyntheticTerminalOccurrenceOrigin>,
+  {
+    occurrenceCount: number;
+    orderLength: number;
+    scansByGeneration: Map<
+      string,
+      Map<number | undefined, SyntheticTerminalCandidateScan>
+    >;
+  }
+>();
+
+let occurrenceLedgerScans = 0;
+
+/** Test-only: count of full-ledger candidate scans performed. */
+export function occurrenceLedgerScanCountForTests(): number {
+  return occurrenceLedgerScans;
+}
+
+/** Test-only: reset the full-ledger candidate scan counter. */
+export function resetOccurrenceLedgerScanCountForTests(): void {
+  occurrenceLedgerScans = 0;
+}
+
+function currentGenerationHostMessageCandidates(
+  occurrences: Map<string, SyntheticTerminalOccurrenceOrigin>,
+  occurrenceOrder: string[] | undefined,
+  taskID: string,
+  currentGeneration: number | undefined,
+): SyntheticTerminalCandidateScan {
+  const orderLength = occurrenceOrder?.length ?? -1;
+  let memo = occurrenceCandidateScans.get(occurrences);
+  if (
+    !memo ||
+    memo.occurrenceCount !== occurrences.size ||
+    memo.orderLength !== orderLength
+  ) {
+    memo = {
+      occurrenceCount: occurrences.size,
+      orderLength,
+      scansByGeneration: new Map(),
+    };
+    occurrenceCandidateScans.set(occurrences, memo);
+  }
+
+  let scans = memo.scansByGeneration.get(taskID);
+  if (!scans) {
+    scans = new Map();
+    memo.scansByGeneration.set(taskID, scans);
+  }
+  const cached = scans.get(currentGeneration);
+  if (cached) return cached;
+
+  occurrenceLedgerScans += 1;
+  let count = 0;
+  let sole: SyntheticTerminalOccurrenceOrigin | undefined;
+  for (const [key, origin] of occurrences) {
+    if (
+      hasProvenanceKind(key, taskID, 'host-message') &&
+      origin.taskID === taskID &&
+      origin.generationAtObservation === currentGeneration
+    ) {
+      count += 1;
+      if (count === 1) sole = origin;
+    }
+  }
+  const scan: SyntheticTerminalCandidateScan = { count, sole };
+  scans.set(currentGeneration, scan);
+  return scan;
+}
+
 function findSyntheticTerminalOccurrence(
   state: InjectionState,
   taskID: string,
@@ -543,24 +637,20 @@ function findSyntheticTerminalOccurrence(
       return direct ? { kind: 'matched', origin: direct } : undefined;
     }
 
-    const candidates = [...occurrences.entries()]
-      .filter(
-        ([key, origin]) =>
-          hasProvenanceKind(key, taskID, 'host-message') &&
-          origin.taskID === taskID &&
-          origin.generationAtObservation === currentGeneration,
-      )
-      .map(([, origin]) => origin);
-    if (
-      candidates.length === 1 &&
-      candidates[0].occurrenceID === occurrenceID
-    ) {
-      return { kind: 'matched', origin: candidates[0] };
+    const candidates = currentGenerationHostMessageCandidates(
+      occurrences,
+      state.syntheticTerminalOccurrenceOrder,
+      taskID,
+      currentGeneration,
+    );
+    const sole = candidates.count === 1 ? candidates.sole : undefined;
+    if (sole?.occurrenceID === occurrenceID) {
+      return { kind: 'matched', origin: sole };
     }
-    if (candidates.length > 1) {
+    if (candidates.count > 1) {
       return {
         kind: 'ambiguous',
-        reason: `multiple current-generation host message.part.updated origins (${candidates.length}) could not be uniquely matched`,
+        reason: `multiple current-generation host message.part.updated origins (${candidates.count}) could not be uniquely matched`,
       };
     }
 
@@ -845,7 +935,7 @@ export async function updateFromInjectedCompletion(
           );
         loggedMissingTaskStatus.add(key);
         log('[task-session-manager] synthetic part missing task status', {
-          textPreview: part.text.slice(0, 120),
+          textLength: part.text.length,
         });
       }
     }
@@ -1026,7 +1116,7 @@ export async function updateFromInjectedCompletion(
       parsedState: status.state,
       boardState: existing?.state,
       terminalState: existing?.terminalState,
-      result: status.result,
+      resultLength: status.result?.length,
     });
     rememberProcessedInjectedCompletion(
       state,

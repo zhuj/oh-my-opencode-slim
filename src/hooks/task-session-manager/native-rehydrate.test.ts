@@ -11,6 +11,7 @@ import {
   recordPersistedBackgroundChild,
 } from '../../utils/background-job-persistence';
 import { createTaskSessionManagerHook } from './index';
+import { testSnapshotStore } from './test-snapshot-store';
 
 const PARENT = 'parent-1';
 
@@ -125,6 +126,7 @@ function createHook(
     {
       maxSessionsPerAgent: 2,
       backgroundJobBoard: board,
+      backgroundJobSnapshotStore: testSnapshotStore,
       backgroundTaskConcurrency: concurrency,
       shouldManageSession: () => true,
       runtimeStatusReconcileDelayMs: 60_000,

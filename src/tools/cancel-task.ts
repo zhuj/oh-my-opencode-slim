@@ -692,7 +692,7 @@ function assertLease(
  * Validate that admission here; each caller then resolves the requested child
  * against this parent. Tool permissions remain the host's responsibility. */
 export function assertManagedSession(
-  options: TaskControlToolOptions,
+  options: Pick<TaskControlToolOptions, 'shouldManageSession'>,
   toolContext: { sessionID?: string; agent?: string } | undefined,
   toolName: string,
 ): string {

@@ -12,6 +12,7 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils/background-job-fixture';
 import { createTaskSessionManagerHook } from './index';
+import { testSnapshotStore } from './test-snapshot-store';
 
 const SESSION = 'ses_08f6be16dffednbwYD8dNDIfOI';
 const BASE_TIME = 1752968000000;
@@ -157,10 +158,11 @@ function createHook(board: BackgroundJobBoard, hostFlavor?: string) {
   return createTaskSessionManagerHook(
     {
       client: { session: { status: mock(async () => ({ data: {} })) } },
-      directory: '/tmp',
-      worktree: '/tmp',
+      directory: process.cwd(),
+      worktree: process.cwd(),
     } as never,
     {
+      backgroundJobSnapshotStore: testSnapshotStore,
       maxSessionsPerAgent: 4,
       hostFlavor,
       backgroundJobBoard: board,
