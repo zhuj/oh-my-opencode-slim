@@ -18,6 +18,7 @@ import { isCommandEnabled } from '../hooks/command-hook-utils';
 import { PANE_VIEWER_ENV } from '../multiplexer/shared';
 import type { TuiRouteView } from '../tui';
 import omoTui, {
+  createSerializedRefresh,
   readTuiGates,
   renderUpdateBadge,
   resolveRouteSessionId,
@@ -28,6 +29,10 @@ import {
   killAllRunningSubagents,
   killAllSummaryMessage,
 } from '../tui-kill';
+import {
+  createV2QueueController,
+  type V2QueueController,
+} from '../tui-queue-v2';
 import { readTuiSnapshot } from '../tui-state';
 import { isPluginDisabledByEnv } from '../utils/env';
 import { log } from '../utils/logger';
@@ -55,7 +60,7 @@ export interface V2KeymapCommand {
 /** A `ui.slot` render runs under the host's Keymap.Provider. */
 type V2SlotApi = (claim: {
   append: string;
-  render: () => null;
+  render: () => unknown;
 }) => (() => void) | undefined;
 
 /**
@@ -171,6 +176,7 @@ export async function runPresetFlow(
 function buildPresetLayer(
   ctx: V2PresetTuiContext,
   gates: V2CommandGates,
+  queueController?: V2QueueController,
 ): () => { mode: string; commands: V2KeymapCommand[] } {
   return () => ({
     mode: 'global',
@@ -189,6 +195,9 @@ function buildPresetLayer(
         : []),
       ...(gates.killall ? [buildKillAllCommand(ctx)] : []),
       ...(gates.subagent ? [buildOpenSubagentCommand(ctx)] : []),
+      ...(queueController
+        ? [{ id: 'omo.queue', ...queueController.command }]
+        : []),
     ],
   });
 }
@@ -351,12 +360,62 @@ export async function runSetup(
     log('[v2][tui] ui.slot unavailable; /preset disabled on this build');
   } else {
     try {
+      const queueController =
+        typeof ctx.keymap?.layer === 'function' &&
+        gatesRead.gates.sidebarEnabled &&
+        gatesRead.gates.managedJobsEnabled &&
+        isCommandEnabled('queue', {
+          disabledCommands: gatesRead.gates.disabledCommands,
+        })
+          ? createV2QueueController({
+              getDirectory: () => ctx.location?.directory ?? process.cwd(),
+              getSessionID: () => currentSessionID(ctx),
+              requestRender: () => ctx.renderer.requestRender(),
+              theme: () => ({
+                accent:
+                  ctx.theme.hue?.interactive[200] ?? ctx.theme.text.default,
+                text: ctx.theme.text.base ?? ctx.theme.text.default,
+                textMuted: ctx.theme.text.muted ?? ctx.theme.text.subdued,
+              }),
+            })
+          : undefined;
+      if (queueController) {
+        const disposeQueueSlot = slotApi({
+          append: 'sidebar.content',
+          render: () => queueController.render(),
+        });
+        const refreshQueue = createSerializedRefresh(() =>
+          queueController.refresh(),
+        );
+        const queueRefreshTimer = setInterval(refreshQueue, 1_000);
+        queueRefreshTimer.unref?.();
+        disposers.push(() => {
+          clearInterval(queueRefreshTimer);
+          queueController.dispose();
+          disposeQueueSlot?.();
+        });
+      }
+      let disposeLayer: (() => void) | undefined;
+      disposers.push(() => disposeLayer?.());
       const disposeSlot = slotApi({
         append: PRESET_APP_SLOT,
         render: () => {
           if (typeof ctx.keymap?.layer === 'function') {
             try {
-              ctx.keymap.layer(buildPresetLayer(ctx, gates));
+              disposeLayer?.();
+              disposeLayer = undefined;
+              const layer: unknown = ctx.keymap.layer(
+                buildPresetLayer(ctx, gates, queueController),
+              );
+              if (
+                layer &&
+                typeof layer === 'object' &&
+                'dispose' in layer &&
+                typeof layer.dispose === 'function'
+              ) {
+                const dispose = layer.dispose;
+                disposeLayer = () => dispose.call(layer);
+              }
             } catch (err) {
               log('[v2][tui] keymap.layer failed', String(err));
             }

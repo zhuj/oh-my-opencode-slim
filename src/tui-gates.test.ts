@@ -8,8 +8,8 @@ import {
   test,
 } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from './test-utils';
 import tuiPlugin, { readConfigState, readTuiGates } from './tui';
 
 interface TestEnvironment {
@@ -28,7 +28,7 @@ const ENV_KEYS = [
 ] as const;
 
 function makeTestEnvironment(): TestEnvironment {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-gates-'));
+  const root = createTmpDir();
   const projectDir = path.join(root, 'project');
   fs.mkdirSync(projectDir, { recursive: true });
   const original = Object.fromEntries(
@@ -168,7 +168,7 @@ describe('TUI feature gates', () => {
 
   afterEach(() => {
     env.restore();
-    fs.rmSync(env.root, { recursive: true, force: true });
+    removeTmpDir(env.root);
   });
 
   test('entry and unchanged polling share one parsed config snapshot', async () => {
@@ -321,11 +321,37 @@ describe('TUI feature gates', () => {
       expect(capture.commands.map((command) => command.value)).toEqual([
         'preset',
         'omo.kill_all',
+        'queue',
       ]);
     } finally {
       for (const dispose of disposers) await dispose();
     }
   });
+
+  test.each([
+    { label: 'native mode', config: { backgroundJobs: { mode: 'native' } } },
+    { label: 'off mode', config: { backgroundJobs: { mode: 'off' } } },
+    { label: 'disabled sidebar', config: { sidebar: false } },
+    {
+      label: 'disabled queue command',
+      config: { disabled_commands: ['queue'] },
+    },
+  ])(
+    'v1 queue follows $label without suppressing other commands',
+    async ({ config }) => {
+      writeUserConfig(config);
+      const { api, capture, disposers } = makeV1Api(env.projectDir);
+      try {
+        await runV1Entry(api);
+        expect(capture.commands.map((command) => command.value)).toEqual([
+          'preset',
+          'omo.kill_all',
+        ]);
+      } finally {
+        for (const dispose of disposers) await dispose();
+      }
+    },
+  );
 
   describe('sidebar polling intervals', () => {
     test('sidebar-on rendering keeps the fast 1s poll', async () => {

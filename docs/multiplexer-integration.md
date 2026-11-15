@@ -61,6 +61,11 @@ How it works:
    opencode attach <serverUrl> --session <childSessionId> --dir <directory>
    ```
 
+   That is the default `tui` viewer on v1. `multiplexer.viewer: "mini"` swaps in the
+   host's minimal interactive interface (`opencode attach <serverUrl> --session
+   <childSessionId> --dir <directory> --mini`) without changing which session the
+   pane attaches to; see [Pane viewer](#pane-viewer).
+
    No prompt or instruction is ever passed to the pane; the plugin pane flow
    never creates a session and never sends a prompt. A pane is a view of a
    child that already exists.
@@ -87,7 +92,7 @@ Pane behavior is fixed per host mode:
 | `opencode --port N` (or `--hostname` / `--mdns`) | single process, embedded server + listener | real | Supported (recommended single-machine path) |
 | `opencode serve` + N × `opencode attach <url>` | multiple processes | real | Supported (target deployment) |
 | `opencode run` | no TUI host | — | No pane (child runs in the host's native background mode) |
-| `opencode --mini` | TUI host does not load plugins | — | No pane |
+| `opencode --mini` (v1 host flag, unrelated to the `viewer` key below) | TUI host does not load plugins | — | No pane |
 | v2 host, shared background service (default) | TUI client of the user-level shared service | discovered via the service registration | Supported: default viewers run `opencode mini --session <id>` and rediscover the same service; `viewer: "tui"` uses `opencode --session <id> <dir>` |
 | v2 host, `--server <url>` | TUI client of an explicit server | `--server` URL | Supported: default viewers run `opencode mini --server <url> --session <id>`; `viewer: "tui"` uses `opencode --server <url> --session <id> <dir>`. The `OPENCODE_PASSWORD` secret comes from the parent process environment and is injected at pane creation through the multiplexer's spawn-time environment mechanism (see [Secret handling](#known-limitations)), never through the viewer's command line |
 | v2 host, `--standalone` | private stdio server (no registration, random password, exits with the parent) | ephemeral loopback | **Not supported**: fail-closed + exactly one diagnostic; `/subagent` navigates to the latest child session, or use the host's native subagent picker |
@@ -131,7 +136,8 @@ Edit `~/.config/opencode/oh-my-opencode-slim.json` (or `.jsonc`):
   "multiplexer": {
     "type": "auto",
     "layout": "main-vertical",
-    "main_pane_size": 60
+    "main_pane_size": 60,
+    "viewer": "tui"
   }
 }
 ```
@@ -287,7 +293,8 @@ inside that pane).
   "multiplexer": {
     "type": "auto",
     "layout": "main-vertical",
-    "main_pane_size": 60
+    "main_pane_size": 60,
+    "viewer": "tui"
   }
 }
 ```
@@ -303,6 +310,59 @@ inside that pane).
 
 All `multiplexer.*` values are read by the client only. An invalid value
 disables pane management (fail-closed) with a once-per-process diagnostic.
+
+### Pane viewer
+
+`multiplexer.viewer` selects which interface a child pane draws. It is
+independent of `multiplexer.type`: the viewer still attaches to the same child
+host session either way, only the interface differs. An invalid `viewer` value
+disables pane management exactly like any other invalid `multiplexer.*` value —
+the rest of the plugin config keeps loading.
+
+The pane command depends on both the **flavor** (how the viewer reaches the host
+session, decided by the host mode) and the **mode** (which interface it draws,
+configured by `viewer`):
+
+Defaults are host-specific: `tui` on v1 and `mini` on v2. An explicit value
+overrides the host default.
+
+| Flavor | `viewer: "tui"` | `viewer: "mini"` |
+|---|---|---|
+| v1 — host has no shared service; the pane connects to a reflected URL | `opencode attach <url> --session <id> --dir <dir>` | `opencode attach <url> --session <id> --dir <dir> --mini` |
+| v2 shared — the viewer rediscovers the shared background service | `opencode --session <id> <dir>` | `opencode mini --session <id>` |
+| v2 remote — an explicit `--server` URL | `opencode --server <url> --session <id> <dir>` | `opencode mini --server <url> --session <id>` |
+
+`mini` is the host's minimal interactive interface. It needs a TTY on stdout,
+which a multiplexer pane always provides.
+
+**Pane working directory.** `opencode mini` takes no directory argument (it has
+no positional directory and rejects `--dir`), so for the `mini` + v2 flavors the
+*pane's* working directory is the only way the project gets selected. Adapters
+therefore pass their native pane-cwd flag in exactly that case:
+
+| Adapter | Pane-cwd flag |
+|---|---|
+| tmux | `split-window -c <dir>` |
+| Zellij | `action new-pane --cwd <dir>` |
+| cmux-tui | `cd <dir> && <viewer command>` wrapper for POSIX shells and fish; other shells inherit the anchor pane's cwd |
+| Herdr | `pane split --cwd <dir>` (always, in every flavor and mode) |
+| kitty | `kitten @ launch --cwd=<dir>` (always, in every flavor and mode) |
+| WezTerm | `split-pane --cwd <dir>` (always, in every flavor and mode) |
+| Orca | Uses the release adapter's native workspace and pane lifecycle. |
+
+In `mini` + v1 the command still carries `--dir`, so no pane cwd is needed. The
+flag is deliberately *not* set unconditionally on tmux / Zellij / cmux-tui:
+setting it always is unsafe, because a nonexistent directory is not reliably
+rejected — tmux silently falls back to `$HOME` with exit code 0 and no warning —
+which would move panes for every existing `tui` user and hide a broken directory.
+Herdr and kitty already passed a pane cwd before `viewer` existed, so their
+behavior is unchanged. Zellij's `--cwd` flag is present at its minimum supported
+version (0.44.1). The cmux-tui shell wrapper selects the directory on supported
+shells. The wrapper keeps the release
+implementation and does not add an unverified cmux CLI flag.
+
+Removed `multiplexer.zellij_pane_mode` and top-level `tmux` settings are ignored
+with a warning, not migrated. See [Removed config keys](configuration.md#removed-config-keys).
 
 ## Layouts
 
@@ -641,6 +701,10 @@ removed or changed behavior, with migration guidance:
   a rebuild after the child turns busy follows the new position.
 - Missing anchor (`adapter-not-found`) means no multiplexer command was issued
   at all — the client could not resolve its own anchor from the environment.
+- Under `viewer: "mini"` on a v2 host the pane's working directory is what
+  selects the project (`opencode mini` takes no directory argument). If a pane
+  comes up on the wrong project, check the directory the child session was
+  recorded with; see [Pane viewer](#pane-viewer).
 
 **Zellij**
 

@@ -1111,6 +1111,9 @@ export function recordTuiSessionParent(
  * Root of a session according to an already-loaded snapshot. Used by the
  * render side: the visible route session (possibly a child) must be
  * compared against activity roots, not against itself (#1147).
+ *
+ * Roots are memoized per snapshot object, so a render pass and the activity
+ * tick cost one chain walk in total instead of one per session.
  */
 export function resolveTuiSnapshotRoot(
   snapshot: TuiSnapshot,
@@ -1120,13 +1123,65 @@ export function resolveTuiSnapshotRoot(
 }
 
 function resolveSnapshotRoot(snapshot: TuiSnapshot, sessionID: string): string {
+  const parent = snapshot.sessionParents[sessionID];
+  // No recorded parent, or a self-parent link: this session is its own
+  // conversation root, which is exactly where the walk below stops.
+  if (parent === undefined || parent === sessionID) return sessionID;
+  return resolveChainedRoot(snapshot, sessionID);
+}
+
+/**
+ * Root index per snapshot object. Root resolution is a chain walk, and the
+ * sidebar resolves the visible route session plus every active session and
+ * every reusable parent — several times per render and once per 100 ms
+ * activity tick — so an unindexed pass costs O(A*D) ancestor visits.
+ *
+ * Object identity is a sound memo key: a snapshot is immutable once
+ * published. Every reader parses a fresh object; the async reader's stat cache
+ * (readTuiSnapshotAsync) hands the same object back only while the state file
+ * is byte-identical, so a changed write always yields a new object; and every
+ * writer clones before mutating (updateSnapshot), so no snapshot that reached
+ * a consumer is ever changed underneath it. A new snapshot object therefore
+ * always carries a freshly read `sessionParents` and a late-learned link
+ * re-roots exactly as before. WeakMap: an index dies with its snapshot.
+ */
+const snapshotRootIndex = new WeakMap<TuiSnapshot, Map<string, string>>();
+
+function resolveChainedRoot(snapshot: TuiSnapshot, sessionID: string): string {
+  const parents = snapshot.sessionParents;
+  const known = snapshotRootIndex.get(snapshot);
+  const visited = new Set<string>();
   let current = sessionID;
-  const seen = new Set<string>();
-  while (!seen.has(current)) {
-    seen.add(current);
-    const parent = snapshot.sessionParents[current];
-    if (!parent || parent === current) break;
+  let root: string;
+  // A parent cycle has no entry-point-independent root, so nothing from such
+  // a walk may be memoized — resolution falls back to reporting the node the
+  // plain walk would stop on.
+  let indexable = true;
+  for (;;) {
+    const memoized = known?.get(current);
+    if (memoized !== undefined) {
+      root = memoized;
+      break;
+    }
+    if (visited.has(current)) {
+      root = current;
+      indexable = false;
+      break;
+    }
+    visited.add(current);
+    const parent = parents[current];
+    if (!parent || parent === current) {
+      root = current;
+      break;
+    }
     current = parent;
   }
-  return current;
+  if (!indexable) return root;
+
+  // Path compression: every node on this chain shares one root, so a later
+  // resolve of any of them is a single lookup.
+  const index = known ?? new Map<string, string>();
+  for (const id of visited) index.set(id, root);
+  snapshotRootIndex.set(snapshot, index);
+  return root;
 }

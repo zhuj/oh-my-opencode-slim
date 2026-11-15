@@ -12,11 +12,15 @@ type SpawnResult = {
 const logMock = mock(() => {});
 const crossSpawnMock = mock((_command: string[]) => createSpawnResult());
 
+const actualLogger = await import('../../utils/logger');
 mock.module('../../utils/logger', () => ({
+  ...actualLogger,
   log: logMock,
 }));
 
+const actualCompat = await import('../../utils/compat');
 mock.module('../../utils/compat', () => ({
+  ...actualCompat,
   crossSpawn: crossSpawnMock,
 }));
 
@@ -241,6 +245,105 @@ describe('KittyMultiplexer', () => {
     expect(shared).toContain('--session');
     expect(shared).not.toContain('--server');
     expect(shared).not.toContain('attach');
+  });
+
+  test('viewerSurface mini renders the minimal viewer with no directory argument', async () => {
+    const { KittyMultiplexer } = await importFreshKitty();
+    const kitty = new KittyMultiplexer();
+
+    await kitty.spawnPane(
+      'session-1',
+      'Mini worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+    );
+
+    // `mini` takes no directory argument; kitty's pre-existing `--cwd` (always
+    // present) is the only project selector.
+    const script = commandContaining('launch')?.at(-1) ?? '';
+    expect(script).toContain("opencode mini --session 'session-1'");
+    expect(commandContaining('launch')).toContain('--cwd=/repo');
+  });
+
+  test('viewerSurface mini keeps the v2-remote server flag and never the secret', async () => {
+    const { KittyMultiplexer } = await importFreshKitty();
+    const kitty = new KittyMultiplexer();
+
+    await kitty.spawnPane(
+      'session-1',
+      'Mini remote worker',
+      'http://localhost:4096',
+      '/repo',
+      {
+        viewerFlavor: 'v2-remote',
+        viewerSurface: 'mini',
+        viewerPassword: 'pw',
+      },
+    );
+
+    const launch = commandContaining('launch');
+    expect(launch?.at(-1)).toContain(
+      "opencode mini --server 'http://localhost:4096' --session 'session-1'",
+    );
+
+    const secretIndex = launch?.indexOf('OPENCODE_PASSWORD=pw') ?? -1;
+    expect(secretIndex).toBeGreaterThan(0);
+    expect(launch?.[secretIndex - 1]).toBe('--env');
+    expect((launch ?? []).filter((arg) => arg.includes('pw'))).toEqual([
+      'OPENCODE_PASSWORD=pw',
+    ]);
+  });
+
+  test('viewerSurface mini keeps the v1 attach form and the pre-existing cwd', async () => {
+    const { KittyMultiplexer } = await importFreshKitty();
+    const kitty = new KittyMultiplexer();
+
+    await kitty.spawnPane(
+      'session-1',
+      'Mini attach worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v1', viewerSurface: 'mini' },
+    );
+
+    // v1 carries `--dir` on the command line, so it needs no extra cwd flag;
+    // `--cwd=/repo` is the one kitty already always sent.
+    expect(commandContaining('launch')?.at(-1)).toContain(
+      "opencode attach 'http://localhost:4096' --session 'session-1' " +
+        "--dir '/repo' --mini",
+    );
+    expect(
+      commandContaining('launch')?.filter((arg) => arg.startsWith('--cwd=')),
+    ).toEqual(['--cwd=/repo']);
+  });
+
+  test('viewerSurface tui is byte-identical to omitting it', async () => {
+    const { KittyMultiplexer } = await importFreshKitty();
+    const kitty = new KittyMultiplexer();
+
+    // Same inputs, so any difference is attributable to `viewerSurface` alone.
+    await kitty.spawnPane(
+      'session-1',
+      'Shared worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared' },
+    );
+    const omitted = commandContaining('launch')?.at(-1);
+
+    await kitty.spawnPane(
+      'session-1',
+      'Shared worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared', viewerSurface: 'tui' },
+    );
+    const explicit = commandContaining('launch')?.at(-1);
+
+    // The shell wraps the command, so compare the command line itself.
+    expect(omitted).toContain("opencode --session 'session-1' '/repo'");
+    expect(explicit).toBe(omitted);
   });
 
   test('spawnPane parses integer window id from launch stdout', async () => {

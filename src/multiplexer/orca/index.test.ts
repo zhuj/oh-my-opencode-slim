@@ -15,7 +15,9 @@ type SpawnResult = {
 const logMock = mock((..._args: unknown[]) => {});
 const crossSpawnMock = mock((_command: string[]) => createSpawnResult());
 
+const actualLogger = await import('../../utils/logger');
 mock.module('../../utils/logger', () => ({
+  ...actualLogger,
   log: logMock,
 }));
 

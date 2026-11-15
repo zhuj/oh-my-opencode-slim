@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 import {
   collectPaneIds,
   equalizeAgentPanes,
@@ -214,7 +214,7 @@ async function startFakeHerdr(
     params: Record<string, unknown>;
   }) => unknown,
 ): Promise<FakeHerdr> {
-  const dir = mkdtempSync(join(tmpdir(), 'herdr-eq-'));
+  const dir = createTmpDir('herdr-eq-');
   const socketPath = join(dir, 'herdr.sock');
   const received: FakeHerdr['received'] = [];
 
@@ -242,7 +242,7 @@ async function startFakeHerdr(
     received,
     close: async () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     },
   };
 }
@@ -396,7 +396,7 @@ describe('equalizeAgentPanes (socket)', () => {
   });
 
   test('returns false on malformed JSON', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'herdr-eq-'));
+    const dir = createTmpDir('herdr-eq-');
     const socketPath = join(dir, 'herdr.sock');
     const server = createServer((socket) => {
       socket.on('data', () => socket.end('not json\n'));
@@ -413,7 +413,7 @@ describe('equalizeAgentPanes (socket)', () => {
       expect(ok).toBe(false);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     }
   });
 

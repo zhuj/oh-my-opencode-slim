@@ -35,6 +35,7 @@ export interface SidebarConfigState {
 export interface TuiGatesSnapshot extends SidebarConfigState {
   tuiEnabled: boolean;
   sidebarEnabled: boolean;
+  managedJobsEnabled: boolean;
   updateCheckerEnabled: boolean;
   disabledCommands: ReadonlySet<string>;
 }
@@ -72,6 +73,7 @@ function failOpenTuiGates(): TuiGatesSnapshot {
   return {
     tuiEnabled: true,
     sidebarEnabled: true,
+    managedJobsEnabled: true,
     configInvalid: false,
     compactSidebar: true,
     multiplexerType: 'none',
@@ -104,6 +106,7 @@ function deriveTuiGates(snapshot: PluginConfigSnapshot): TuiGatesSnapshot {
   return {
     tuiEnabled: featureGates.tui,
     sidebarEnabled: featureGates.sidebar,
+    managedJobsEnabled: featureGates.managedJobs,
     updateCheckerEnabled: featureGates.updateChecker,
     configInvalid: warningsMakeConfigInvalid(snapshot.warnings),
     compactSidebar: config.compactSidebar ?? true,

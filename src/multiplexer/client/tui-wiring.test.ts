@@ -8,12 +8,17 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   type MultiplexerConfig,
   MultiplexerConfigSchema,
 } from '../../config/schema';
+import {
+  createTmpDir,
+  removeTmpDir,
+  withTmpDir,
+  withTmpDirSync,
+} from '../../test-utils';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 import {
   createOnceGate,
@@ -310,9 +315,15 @@ function fakeHostClient(state: FakeClientState): unknown {
 
 function defaultConfig(
   type: MultiplexerConfig['type'] = 'auto',
+  viewer?: MultiplexerConfig['viewer'],
 ): LoadedPaneConfig {
   return {
-    multiplexer: { type, layout: 'main-vertical', main_pane_size: 60 },
+    multiplexer: {
+      type,
+      layout: 'main-vertical',
+      main_pane_size: 60,
+      viewer,
+    },
     invalid: false,
   };
 }
@@ -671,6 +682,59 @@ describe('v2 host seams (FR-2/FR-3)', () => {
     await h.wiring.dispose();
   });
 
+  // `multiplexer.viewer` is orthogonal to the host flavor: it comes from
+  // config alone and must reach the adapter even on v1 hosts, which pass no
+  // `viewerFlavor` at all.
+  test('multiplexer.viewer: mini reaches the adapter as viewerSurface', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      baseUrl: SERVER_URL,
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+      config: defaultConfig('tmux', 'mini'),
+    });
+
+    feed.emit('session.created', v2Created());
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns[0]?.viewerSurface).toBe('mini');
+
+    await h.wiring.dispose();
+  });
+
+  test('an explicit tui viewer never disturbs the flavor', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      baseUrl: SERVER_URL,
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+      viewers: { flavor: 'v2-remote', password: 'pw-2' },
+      config: defaultConfig('tmux', 'tui'),
+    });
+
+    feed.emit('session.created', v2Created());
+    await flush();
+    const spawn = h.adapters.get('tmux')?.spawns[0];
+    expect(spawn?.viewerSurface).toBe('tui');
+    expect(spawn?.viewerFlavor).toBe('v2-remote');
+    expect(spawn?.viewerPassword).toBe('pw-2');
+
+    await h.wiring.dispose();
+  });
+
+  test('a v1 host with no viewerFlavor still receives the configured mode', async () => {
+    const h = await createHarness({
+      config: defaultConfig('tmux', 'mini'),
+    });
+
+    h.bus.emit('session.created', createdEvent());
+    await flush();
+    const spawn = h.adapters.get('tmux')?.spawns[0];
+    // The v1 host sends no flavor; the wiring resolves it to the attach form
+    // instead of dropping the whole viewer block (which would ignore `viewer`).
+    expect(spawn?.viewerFlavor).toBe('v1');
+    expect(spawn?.viewerSurface).toBe('mini');
+
+    await h.wiring.dispose();
+  });
+
   test('feed disposal releases every v2 subscription', async () => {
     const feed = createV2EventFeed();
     const h = await createHarness({
@@ -884,12 +948,12 @@ describe('project config reading (FR-12)', () => {
   beforeEach(() => {
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
-    configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-pane-config-'));
+    configHome = createTmpDir();
     process.env.XDG_CONFIG_HOME = configHome;
   });
 
   afterEach(() => {
-    fs.rmSync(configHome, { recursive: true, force: true });
+    removeTmpDir(configHome);
     process.env = originalEnv;
   });
 
@@ -901,13 +965,17 @@ describe('project config reading (FR-12)', () => {
     return projectDir;
   }
 
-  test('reads multiplexer type/layout/main_pane_size from the project config', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-pane-project-'));
-    try {
+  test('reads multiplexer type/layout/main_pane_size/viewer from the project config', () => {
+    withTmpDirSync((root) => {
       const projectDir = writeProjectConfig(
         root,
         JSON.stringify({
-          multiplexer: { type: 'tmux', layout: 'tiled', main_pane_size: 70 },
+          multiplexer: {
+            type: 'tmux',
+            layout: 'tiled',
+            main_pane_size: 70,
+            viewer: 'tui',
+          },
         }),
       );
 
@@ -919,15 +987,13 @@ describe('project config reading (FR-12)', () => {
         layout: 'tiled',
         main_pane_size: 70,
         equalize_panes: true,
+        viewer: 'tui',
       });
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test('invalid project config forces admission off with one diagnostic', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-pane-project-'));
-    try {
+    await withTmpDir(async (root) => {
       const projectDir = writeProjectConfig(root, '{ not json');
       const h = await createHarness({
         loadConfig: () => loadPaneConfig(projectDir),
@@ -938,9 +1004,7 @@ describe('project config reading (FR-12)', () => {
         configInvalid: true,
       });
       expect(h.logger.reasons()).toEqual(['admission-unavailable']);
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 });
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { withTmpDir, withTmpDirSync } from '../test-utils';
 
 type SpawnResult = {
   exited: Promise<number>;
@@ -17,7 +17,9 @@ const crossSpawnMock = mock(
   }),
 );
 
+const actualCompat = await import('../utils/compat');
 mock.module('../utils/compat', () => ({
+  ...actualCompat,
   crossSpawn: crossSpawnMock,
 }));
 
@@ -361,19 +363,19 @@ describe('buildViewCommand', () => {
 
   test('defaults to the resolved absolute host executable (#514)', async () => {
     const { buildViewCommand } = await importShared();
-    const dir = mkdtempSync(join(tmpdir(), 'omos-514-'));
-    const bin = join(dir, 'opencode');
-    writeFileSync(bin, '');
-    const original = process.env.OPENCODE_BIN;
-    process.env.OPENCODE_BIN = bin;
-    try {
-      const cmd = buildViewCommand('sess', 'http://x', '/repo');
-      expect(cmd).toStartWith(`'${bin}' attach`);
-    } finally {
-      if (original === undefined) delete process.env.OPENCODE_BIN;
-      else process.env.OPENCODE_BIN = original;
-      rmSync(dir, { recursive: true, force: true });
-    }
+    withTmpDirSync((dir) => {
+      const bin = join(dir, 'opencode');
+      writeFileSync(bin, '');
+      const original = process.env.OPENCODE_BIN;
+      process.env.OPENCODE_BIN = bin;
+      try {
+        const cmd = buildViewCommand('sess', 'http://x', '/repo');
+        expect(cmd).toStartWith(`'${bin}' attach`);
+      } finally {
+        if (original === undefined) delete process.env.OPENCODE_BIN;
+        else process.env.OPENCODE_BIN = original;
+      }
+    });
   });
 
   test('falls back to bare opencode when no binary resolves (#514)', async () => {
@@ -533,6 +535,129 @@ describe('buildViewCommand', () => {
       });
     }
   });
+
+  // `mini` mode: the v2 flavors switch to the `opencode mini` subcommand,
+  // which takes no directory argument (verified against opencode v2.0.21:
+  // `mini` has no positional directory and rejects `--dir`).
+  test('mini + v1 keeps --dir and appends --mini', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand('ses_abc', 'http://x', '/repo', {
+        executable: 'opencode',
+        viewerFlavor: 'v1',
+        viewerSurface: 'mini',
+      }),
+    ).toBe(
+      "opencode attach 'http://x' --session 'ses_abc' --dir '/repo' --mini",
+    );
+  });
+
+  test('mini + v2-shared drops the directory and the URL', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand('ses_abc', 'http://unused', '/repo', {
+        executable: 'opencode',
+        viewerFlavor: 'v2-shared',
+        viewerSurface: 'mini',
+      }),
+    ).toBe("opencode mini --session 'ses_abc'");
+  });
+
+  test('mini + v2-remote keeps the server URL but drops the directory', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand('ses_abc', 'http://192.168.5.212:8192', '/repo', {
+        executable: 'opencode',
+        viewerFlavor: 'v2-remote',
+        viewerSurface: 'mini',
+      }),
+    ).toBe(
+      "opencode mini --server 'http://192.168.5.212:8192' --session 'ses_abc'",
+    );
+  });
+
+  test('mini never leaks the viewer secret into command text', async () => {
+    const { buildViewCommand } = await importShared();
+    const options = {
+      executable: 'opencode',
+      viewerFlavor: 'v2-remote' as const,
+      viewerSurface: 'mini' as const,
+      viewerPassword: 'pw-123',
+    };
+    const cmd = buildViewCommand('ses_abc', 'http://x', '/repo', options);
+    expect(cmd).not.toContain('pw-123');
+    expect(cmd).not.toContain('OPENCODE_PASSWORD');
+  });
+
+  test('mini quotes the executable and session id', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand("s'es s", 'http://x', '/repo', {
+        viewerFlavor: 'v2-shared',
+        viewerSurface: 'mini',
+        executable: "/opt/King's/opencode",
+      }),
+    ).toBe("'/opt/King'\\''s/opencode' mini --session 's'\\''es s'");
+  });
+
+  // `viewerSurface` is additive: every `tui` command must stay byte-identical
+  // when the option is absent, defaulting to `tui`.
+  test('an absent viewerSurface reproduces every tui command exactly', async () => {
+    const { buildViewCommand } = await importShared();
+    for (const flavor of ['v1', 'v2-shared', 'v2-remote'] as const) {
+      expect(
+        buildViewCommand('ses_abc', 'http://x', '/repo', {
+          viewerFlavor: flavor,
+          viewerSurface: 'tui',
+        }),
+      ).toBe(
+        buildViewCommand('ses_abc', 'http://x', '/repo', {
+          viewerFlavor: flavor,
+        }),
+      );
+    }
+  });
+});
+
+describe('viewerNeedsPaneCwd', () => {
+  // tmux `split-window -c <missing>` silently yields a $HOME pane at exit 0,
+  // so adapters may only set the pane cwd when the viewer truly needs it.
+  test('is true only for mini + v2 flavors', async () => {
+    const { viewerNeedsPaneCwd } = await importShared();
+    expect(
+      viewerNeedsPaneCwd({ viewerFlavor: 'v2-shared', viewerSurface: 'mini' }),
+    ).toBe(true);
+    expect(
+      viewerNeedsPaneCwd({ viewerFlavor: 'v2-remote', viewerSurface: 'mini' }),
+    ).toBe(true);
+    expect(
+      viewerNeedsPaneCwd({ viewerFlavor: 'v1', viewerSurface: 'mini' }),
+    ).toBe(false);
+    expect(
+      viewerNeedsPaneCwd({ viewerFlavor: 'v1', viewerSurface: 'tui' }),
+    ).toBe(false);
+    expect(
+      viewerNeedsPaneCwd({ viewerFlavor: 'v2-shared', viewerSurface: 'tui' }),
+    ).toBe(false);
+    expect(
+      viewerNeedsPaneCwd({ viewerFlavor: 'v2-remote', viewerSurface: 'tui' }),
+    ).toBe(false);
+  });
+
+  test('agrees with the directory actually present in the built command', async () => {
+    const { buildViewCommand, viewerNeedsPaneCwd } = await importShared();
+    const flavors = ['v1', 'v2-shared', 'v2-remote'] as const;
+    const surfaces = ['tui', 'mini'] as const;
+    for (const flavor of flavors) {
+      for (const surface of surfaces) {
+        const options = { viewerFlavor: flavor, viewerSurface: surface };
+        const cmd = buildViewCommand('ses_abc', 'http://x', '/repo', options);
+        // The directory is single-quoted on the command line whenever the
+        // command carries it; so pane cwd is needed exactly when it does not.
+        expect(cmd.includes("'/repo'")).toBe(!viewerNeedsPaneCwd(options));
+      }
+    }
+  });
 });
 
 describe('isPosixShell', () => {
@@ -621,14 +746,12 @@ describe('withParentEnvPassword', () => {
 
   test('v1 export ignores OPENCODE_PASSWORD in the parent environ', async () => {
     const { withParentEnvPassword } = await importShared();
-    const dir = `/tmp/opencode/omo-shared-v1-test-${process.pid}`;
-    mkdirSync(dir, { recursive: true });
-    const environPath = `${dir}/environ`;
-    writeFileSync(
-      environPath,
-      'OPENCODE_PASSWORD=v2-value\0OPENCODE_SERVER_PASSWORD=v1-value\0',
-    );
-    try {
+    await withTmpDir(async (dir) => {
+      const environPath = `${dir}/environ`;
+      writeFileSync(
+        environPath,
+        'OPENCODE_PASSWORD=v2-value\0OPENCODE_SERVER_PASSWORD=v1-value\0',
+      );
       const script = withParentEnvPassword(
         'printf %s "$OPENCODE_SERVER_PASSWORD"',
         'OPENCODE_SERVER_PASSWORD',
@@ -640,9 +763,7 @@ describe('withParentEnvPassword', () => {
       });
       expect(await proc.exited).toBe(0);
       expect(await new Response(proc.stdout).text()).toBe('v1-value');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test('runs the wrapped command in a POSIX shell', async () => {
@@ -667,11 +788,9 @@ async function expectExtractedPassword(
   expected: string,
 ): Promise<void> {
   const { withParentEnvPassword } = await importShared();
-  const dir = `/tmp/opencode/omo-shared-test-${process.pid}`;
-  mkdirSync(dir, { recursive: true });
-  const environPath = `${dir}/environ`;
-  writeFileSync(environPath, environContents);
-  try {
+  await withTmpDir(async (dir) => {
+    const environPath = `${dir}/environ`;
+    writeFileSync(environPath, environContents);
     const script = withParentEnvPassword(
       'printf %s "$OPENCODE_PASSWORD"',
     ).replaceAll(`/proc/${process.pid}/environ`, environPath);
@@ -684,9 +803,7 @@ async function expectExtractedPassword(
     });
     expect(await proc.exited).toBe(0);
     expect(await new Response(proc.stdout).text()).toBe(expected);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  });
 }
 
 describe('redactViewerSecretArgs', () => {

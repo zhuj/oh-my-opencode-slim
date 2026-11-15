@@ -43,6 +43,10 @@ import {
 } from './tui-kill';
 import { fetchModelNameMap, openPresetManager } from './tui-preset';
 import {
+  createV1QueueController,
+  type V1QueueController,
+} from './tui-queue-v1';
+import {
   readTuiSnapshot,
   readTuiSnapshotAsync,
   resolveTuiSnapshotRoot,
@@ -263,13 +267,31 @@ export function splitSidebarModelId(model: string): {
   };
 }
 
-export function getSidebarAgentNames(snapshot: TuiSnapshot): string[] {
-  const configuredAgents = Object.keys(snapshot.agentModels).filter(
+function mergeSidebarAgentNames(
+  snapshot: TuiSnapshot,
+  activeAgentNames: ReadonlySet<string>,
+): string[] {
+  const names = Object.keys(snapshot.agentModels).filter(
     (agent) => !isCouncilSidebarAgent(agent),
   );
-  return configuredAgents.length > 0
-    ? configuredAgents
-    : FALLBACK_SIDEBAR_AGENTS;
+  if (names.length === 0) names.push(...FALLBACK_SIDEBAR_AGENTS);
+  const seen = new Set(names);
+  for (const agent of activeAgentNames) {
+    if (seen.has(agent) || isCouncilSidebarAgent(agent)) continue;
+    seen.add(agent);
+    names.push(agent);
+  }
+  return names;
+}
+
+export function getSidebarAgentNames(
+  snapshot: TuiSnapshot,
+  visibleRootID?: string,
+): string[] {
+  return mergeSidebarAgentNames(
+    snapshot,
+    getActiveSidebarAgentNames(snapshot, visibleRootID),
+  );
 }
 
 type AgentListFn = (
@@ -562,8 +584,9 @@ export function getActiveSidebarAgentNames(
     snapshot.activeSessions,
   )) {
     if (
-      root === undefined ||
-      resolveTuiSnapshotRoot(snapshot, sessionID) === root
+      !isCouncilSidebarAgent(agentName) &&
+      (root === undefined ||
+        resolveTuiSnapshotRoot(snapshot, sessionID) === root)
     ) {
       names.add(agentName);
     }
@@ -577,12 +600,43 @@ export function getActiveSidebarAgentNames(
     }
     for (const [agentName, entries] of Object.entries(byAgent)) {
       // The projection prepends running jobs ahead of terminal history.
-      if (entries[0]?.running === true) {
+      if (entries[0]?.running === true && !isCouncilSidebarAgent(agentName)) {
         names.add(agentName);
       }
     }
   }
   return names;
+}
+
+/**
+ * Memoized "does this window show any spinner?" answer for the activity
+ * tick. Both inputs are compared by identity: the snapshot signal only
+ * advances when a section actually changed and the visible route session is
+ * a plain string, so a poll that changed nothing is answered without
+ * touching the session tree. Cadence is untouched — the caller still ticks
+ * every frame, it just stops re-deriving the answer.
+ */
+export function createSidebarActivityPredicate(
+  readSnapshot: () => TuiSnapshot,
+  readVisibleSession: () => string | undefined,
+): () => boolean {
+  let snapshot: TuiSnapshot | undefined;
+  let visible: string | undefined;
+  let active = false;
+  return () => {
+    const nextSnapshot = readSnapshot();
+    const nextVisible = readVisibleSession();
+    if (
+      snapshot === undefined ||
+      nextSnapshot !== snapshot ||
+      nextVisible !== visible
+    ) {
+      snapshot = nextSnapshot;
+      visible = nextVisible;
+      active = getActiveSidebarAgentNames(nextSnapshot, nextVisible).size > 0;
+    }
+    return active;
+  };
 }
 
 /** One clickable sidebar destination: an active subagent session. */
@@ -1223,7 +1277,7 @@ function agentHeaderCells({
         fg: agentColor(color, theme),
         wrapMode: 'none',
         truncate: true,
-        flexShrink: 1,
+        flexShrink: annotation === undefined ? 1 : 0,
       },
       [label],
     ),
@@ -1240,7 +1294,7 @@ function agentHeaderCells({
           ),
         ]
       : []),
-    ...(sessionCount !== undefined && sessionCount > 1
+    ...(sessionCount !== undefined && sessionCount > 0
       ? [
           text({ fg: theme.textMuted, wrapMode: 'none', flexShrink: 0 }, [
             ` ${expanded ? '▾' : '▸'}${sessionCount}`,
@@ -1330,7 +1384,9 @@ function compactAgentRow(options: AgentRowOptions): JSX.Element {
     [
       box(
         {
-          width: options.annotation !== undefined ? 24 : 16,
+          // Leave room for an unknown agent's full name and its task count.
+          // Nested attribution needs extra space; truncate it before the name.
+          width: options.annotation !== undefined ? 24 : 20,
           flexShrink: 0,
           flexDirection: 'row',
           shouldFill: false,
@@ -1626,6 +1682,7 @@ export function renderSidebar(
       )
     : null;
   const activeAgents = getActiveSidebarAgentNames(snapshot, visibleRootID);
+  const agentNames = mergeSidebarAgentNames(snapshot, activeAgents);
   const targetsByAgent = new Map(
     getSidebarAgentTargets(snapshot, visibleRootID).map((group) => [
       group.agentName,
@@ -1687,9 +1744,13 @@ export function renderSidebar(
       header,
       ...(sidebarOpen ? [configStatusRow, presetRowEl] : []),
       ...(sidebarOpen
-        ? getSidebarAgentNames(snapshot).flatMap((agentName) => {
-            const model = snapshot.agentModels[agentName] ?? 'pending';
-            const variant = snapshot.agentVariants[agentName];
+        ? agentNames.flatMap((agentName) => {
+            const model = Object.hasOwn(snapshot.agentModels, agentName)
+              ? (snapshot.agentModels[agentName] ?? 'pending')
+              : 'pending';
+            const variant = Object.hasOwn(snapshot.agentVariants, agentName)
+              ? snapshot.agentVariants[agentName]
+              : undefined;
             const active = activeAgents.has(agentName);
             const sessions = targetsByAgent.get(agentName) ?? [];
             const reusable = reusableByAgent.get(agentName) ?? [];
@@ -1718,22 +1779,36 @@ export function renderSidebar(
             );
             const clickable =
               interaction?.navigate !== undefined && mergedTargets.length > 0;
+            const runningTargets = [
+              ...sessions,
+              ...reusableTargets.filter((target) => target.status === 'busy'),
+            ];
+            // Live rows show current runs, while stopped runs remain available
+            // for inspection/revival without inflating the running count.
+            const disclosedTargets =
+              runningTargets.length > 0
+                ? [
+                    ...runningTargets,
+                    ...reusableTargets.filter(
+                      (target) => target.status === 'stopped',
+                    ),
+                  ]
+                : mergedTargets;
+            const canExpand =
+              runningTargets.length > 0 || disclosedTargets.length > 1;
             const expanded =
-              mergedTargets.length > 1 &&
-              clickable &&
-              expandedAgents.has(agentName);
-            // Only annotate when the rows are actually rendered: a collapsed
-            // agent row never reaches sessionTargetRow, so computing the
-            // sibling/via annotation there is wasted work on every tick.
-            const allTargets = expanded
-              ? annotateSiblingAttribution(snapshot, mergedTargets)
-              : mergedTargets;
+              canExpand && clickable && expandedAgents.has(agentName);
+            // Only annotate disclosed rows. Terminal history never joins the
+            // running sibling count, but nested rows retain their via marker.
+            const annotatedTargets = expanded
+              ? annotateSiblingAttribution(snapshot, disclosedTargets)
+              : disclosedTargets;
             const onAgentClick = clickable
               ? () => {
-                  if (allTargets.length === 1) {
-                    interaction?.navigate?.(allTargets[0].sessionID);
-                  } else if (allTargets.length > 1) {
+                  if (canExpand) {
                     interaction?.toggleAgent(agentName);
+                  } else if (mergedTargets.length > 0) {
+                    interaction?.navigate?.(mergedTargets[0].sessionID);
                   }
                 }
               : undefined;
@@ -1745,15 +1820,24 @@ export function renderSidebar(
               // Label only: every lookup below stays keyed by the canonical
               // agent ID so models, activity, expansion and history keep
               // resolving.
-              label: snapshot.agentDisplayNames?.[agentName] || agentName,
-              color: snapshot.agentColors?.[agentName],
+              label:
+                snapshot.agentDisplayNames &&
+                Object.hasOwn(snapshot.agentDisplayNames, agentName)
+                  ? snapshot.agentDisplayNames[agentName] || agentName
+                  : agentName,
+              color:
+                snapshot.agentColors &&
+                Object.hasOwn(snapshot.agentColors, agentName)
+                  ? snapshot.agentColors[agentName]
+                  : undefined,
               model,
               modelName: modelNames?.get(model),
               variant,
               active,
               now,
               theme,
-              sessionCount: clickable ? allTargets.length : undefined,
+              sessionCount:
+                runningTargets.length > 0 ? runningTargets.length : undefined,
               expanded,
               onClick: onAgentClick,
               hoverBackground,
@@ -1767,7 +1851,7 @@ export function renderSidebar(
             if (!expanded) return [agentRowEl];
             return [
               agentRowEl,
-              ...allTargets.map((target) =>
+              ...annotatedTargets.map((target) =>
                 sessionTargetRow(
                   target,
                   theme,
@@ -2093,6 +2177,7 @@ interface SidebarRuntimeAdapter {
    * orchestrator row so the picker's choice shows before the first turn
    * on the new model commits it to tui-state. Receives the snapshot being
    * overlaid so the orchestrator's displayName identity is honored. */
+  refreshQueue?: () => Promise<void>;
   getSelectedRootModel?: (
     snapshot: TuiSnapshot,
   ) => { model: string; variant?: string | undefined } | undefined;
@@ -2283,6 +2368,7 @@ function createSidebarRuntime(
     const currentDirectory = adapter.getDirectory();
     const currentSession = adapter.getVisibleSession();
     let nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
+    await adapter.refreshQueue?.();
     if (disposed || !isRefreshCurrent(currentDirectory, adapter.getDirectory()))
       return;
     const directoryChanged = updateConfigDirectory(currentDirectory);
@@ -2416,13 +2502,13 @@ function createSidebarRuntime(
     sidebarEnabled ? scheduleRefresh : pollConfigOnly,
     sidebarEnabled ? (envRefreshMs ?? 1000) : (envRefreshMs ?? 5000),
   );
+  const hasActiveSpinners = createSidebarActivityPredicate(
+    snapshot,
+    adapter.getVisibleSession,
+  );
   const animationTimer = sidebarEnabled
     ? setInterval(() => {
-        if (
-          !disposed &&
-          getActiveSidebarAgentNames(snapshot(), adapter.getVisibleSession())
-            .size > 0
-        ) {
+        if (!disposed && hasActiveSpinners()) {
           setAnimationNow(Date.now());
         }
       }, ACTIVITY_FRAME_MS)
@@ -2817,8 +2903,30 @@ const plugin: TuiDualContractModule = {
       return;
     }
 
+    const queueController: V1QueueController | undefined =
+      api.command &&
+      gatesRead.gates.sidebarEnabled &&
+      gatesRead.gates.managedJobsEnabled &&
+      isCommandEnabled('queue', {
+        disabledCommands: gatesRead.gates.disabledCommands,
+      })
+        ? createV1QueueController({
+            getDirectory: () => getTuiDirectory(api),
+            getSessionID: () => resolveRouteSessionId(api.route.current),
+            showDialog: (render, onClose) => {
+              api.ui.dialog.replace(() =>
+                api.ui.Dialog({ size: 'large', onClose, children: render() }),
+              );
+            },
+            closeDialog: () => api.ui.dialog.clear(),
+            requestRender: () => api.renderer.requestRender(),
+            theme: () => api.theme.current,
+          })
+        : undefined;
+
     const runtime = createSidebarRuntime(
       {
+        refreshQueue: queueController?.refresh,
         version: meta.version ?? (await readPackageVersion()) ?? 'dev',
         getDirectory: () => getTuiDirectory(api),
         getVisibleSession: () => resolveRouteSessionId(api.route.current),
@@ -2837,6 +2945,7 @@ const plugin: TuiDualContractModule = {
       gatesRead,
     );
     api.lifecycle.onDispose(runtime.dispose);
+    api.lifecycle.onDispose(() => queueController?.dispose());
 
     // `/preset` is a pure TUI slash command (like the built-in `/models`):
     // it opens a picker, switches the preset via on-disk state, and never
@@ -2869,6 +2978,7 @@ const plugin: TuiDualContractModule = {
           buildKillAllCommand(api, runtime.getDirectory, runtime.getSnapshot),
         );
       }
+      if (queueController) commands.push(queueController.command);
       const disposeCommands = api.command.register(() => commands);
       api.lifecycle.onDispose(disposeCommands);
     }

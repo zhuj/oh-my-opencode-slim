@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { RGBA } from '@opentui/core';
 import { testRender } from '@opentui/solid';
 import { createSignal } from 'solid-js';
 import type { PluginConfig } from '../config';
 import { TmuxMultiplexer } from '../multiplexer/tmux';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import baseTui, { readTuiGates } from '../tui';
 import {
   recordTuiAgentActivity,
@@ -74,8 +74,8 @@ describe('v2 tui preset plugin', () => {
 
   beforeEach(() => {
     originalEnv = { ...process.env };
-    configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui2-cfg-'));
-    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui2-proj-'));
+    configHome = createTmpDir();
+    projectDir = createTmpDir();
     process.env.OPENCODE_CONFIG_DIR = configHome;
   });
 
@@ -84,8 +84,8 @@ describe('v2 tui preset plugin', () => {
       if (!(key in originalEnv)) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
-    fs.rmSync(configHome, { recursive: true, force: true });
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    removeTmpDir(configHome);
+    removeTmpDir(projectDir);
   });
 
   describe('runPresetFlow', () => {
@@ -1187,7 +1187,7 @@ describe('v2 tui preset plugin', () => {
       }
     });
 
-    test('setup registers the sidebar slot and the /preset layer in the app slot render', async () => {
+    test('setup registers sidebar slots and the v2 command layer', async () => {
       const stub = makeSetupCtx();
       let cleanup: (() => void) | undefined;
       try {
@@ -1196,6 +1196,7 @@ describe('v2 tui preset plugin', () => {
         )) as (() => void) | undefined;
 
         expect(stub.slotClaims.map((slot) => slot.append)).toEqual([
+          'sidebar.content',
           'sidebar.content',
           'app',
         ]);
@@ -1212,12 +1213,17 @@ describe('v2 tui preset plugin', () => {
         expect(command?.group).toBe('System');
         expect(command?.palette).toBe(true);
         expect(command?.slash).toEqual({ name: 'preset', arguments: true });
-        expect(stub.keymapDisposed()).toBe(false);
+        expect(layer?.commands.map((command) => command.slash?.name)).toEqual([
+          'preset',
+          'killall',
+          'subagent',
+          'queue',
+        ]);
 
         cleanup?.();
         cleanup = undefined;
-        expect(stub.keymapDisposed()).toBe(false);
-        expect(stub.slotDisposeCalls()).toBe(2);
+        expect(stub.keymapDisposed()).toBe(true);
+        expect(stub.slotDisposeCalls()).toBe(3);
       } finally {
         cleanup?.();
       }
@@ -1235,6 +1241,7 @@ describe('v2 tui preset plugin', () => {
       expect(stub.layers[0]?.commands.map((command) => command.id)).toEqual([
         'omo.kill_all',
         'omo.open_subagent',
+        'omo.queue',
       ]);
       cleanup?.();
     });
@@ -1252,6 +1259,7 @@ describe('v2 tui preset plugin', () => {
 
         expect(stub.layers[0]?.commands.map((command) => command.id)).toEqual([
           'omo.preset',
+          'omo.queue',
         ]);
       } finally {
         cleanup?.();
@@ -1275,11 +1283,42 @@ describe('v2 tui preset plugin', () => {
           'omo.preset',
           'omo.kill_all',
           'omo.open_subagent',
+          'omo.queue',
         ]);
       } finally {
         cleanup?.();
       }
     });
+
+    test.each([
+      { label: 'native mode', config: { backgroundJobs: { mode: 'native' } } },
+      { label: 'off mode', config: { backgroundJobs: { mode: 'off' } } },
+      { label: 'disabled sidebar', config: { sidebar: false } },
+      {
+        label: 'disabled queue command',
+        config: { disabled_commands: ['queue'] },
+      },
+    ])(
+      'queue follows $label without suppressing other commands',
+      async ({ config }) => {
+        writeUserConfig(config);
+        const stub = makeSetupCtx();
+        const cleanup = await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        );
+        try {
+          stub.renderAppSlot();
+          expect(stub.layers[0]?.commands.map((command) => command.id)).toEqual(
+            ['omo.preset', 'omo.kill_all', 'omo.open_subagent'],
+          );
+          expect(
+            stub.slotClaims.filter((slot) => slot.append === 'sidebar.content'),
+          ).toHaveLength('sidebar' in config ? 0 : 1);
+        } finally {
+          await cleanup?.();
+        }
+      },
+    );
 
     test('setup registers nothing when the tui master switch is false', async () => {
       writeUserConfig({ tui: false });
@@ -1756,7 +1795,7 @@ describe('v2 tui preset plugin', () => {
 
     test('omo.kill_all run aborts visible-conversation running subagents and toasts', async () => {
       const originalDataHome = process.env.XDG_DATA_HOME;
-      const dataHome = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-kill2-'));
+      const dataHome = createTmpDir();
       const aborts: string[] = [];
       const toasts: string[] = [];
       let cleanup: (() => void) | undefined;
@@ -1809,7 +1848,7 @@ describe('v2 tui preset plugin', () => {
         expect(toasts[0]).toContain('Kill-all sent to 1 running subagent');
       } finally {
         cleanup?.();
-        fs.rmSync(dataHome, { recursive: true, force: true });
+        removeTmpDir(dataHome);
         if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
         else process.env.XDG_DATA_HOME = originalDataHome;
       }
