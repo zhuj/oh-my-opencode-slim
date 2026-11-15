@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { findOpenCode } from './system';
 
 test('finds and identifies OpenCode in ~/.opencode/bin', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'opencode-system-test-'));
+  const dir = createTmpDir('opencode-system-test-');
   try {
     const bin = join(dir, '.opencode', 'bin');
     const opencode = join(bin, 'opencode');
@@ -21,6 +21,6 @@ test('finds and identifies OpenCode in ~/.opencode/bin', () => {
       hostFlavor: 'v2',
     });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });

@@ -2,16 +2,9 @@
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   detectBackgroundSubagentsTarget,
   detectShellKind,
@@ -123,12 +116,12 @@ describe('background subagents writing', () => {
   let tempDir: string | undefined;
 
   afterEach(() => {
-    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+    if (tempDir) removeTmpDir(tempDir);
     tempDir = undefined;
   });
 
   test('writes managed block without duplicates', () => {
-    tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+    tempDir = createTmpDir();
     const target = join(tempDir, '.bashrc');
     writeFileSync(target, 'existing=true\n');
 
@@ -181,7 +174,7 @@ describe('parseArgs background subagents', () => {
   });
 
   test('v2 installation skips v1-only shell, TUI, and model refresh steps', () => {
-    const root = mkdtempSync(join(tmpdir(), 'omoo-v2-install-'));
+    const root = createTmpDir('omoo-v2-install-');
     try {
       const bin = join(root, 'bin');
       const config = join(root, 'config');
@@ -219,7 +212,7 @@ describe('parseArgs background subagents', () => {
       expect(result.stdout).not.toContain('opencode models --refresh');
       expect(result.stdout).toContain('opencode models');
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 });
@@ -246,7 +239,7 @@ describe('configureBackgroundSubagents', () => {
   const originalExperimental = process.env.OPENCODE_EXPERIMENTAL;
 
   afterEach(() => {
-    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+    if (tempDir) removeTmpDir(tempDir);
     tempDir = undefined;
     if (originalBackgroundEnv === undefined) {
       delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS;
@@ -265,7 +258,7 @@ describe('configureBackgroundSubagents', () => {
   });
 
   test('recognizes the v1 global experimental flag', async () => {
-    tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+    tempDir = createTmpDir('omoo-bg-');
     const target = join(tempDir, '.zshrc');
     process.env.OPENCODE_EXPERIMENTAL = 'true';
     delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS;
@@ -282,7 +275,7 @@ describe('configureBackgroundSubagents', () => {
   test.each(['true', '1', 'TRUE'])(
     'returns already enabled without writing the target when Exa is %s',
     async (exaValue) => {
-      tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+      tempDir = createTmpDir();
       const target = join(tempDir, '.zshrc');
       writeFileSync(target, 'preserve=true\n');
       process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = 'true';
@@ -311,7 +304,7 @@ describe('configureBackgroundSubagents', () => {
   test.each([undefined, 'yes', 'false'])(
     'writes Exa configuration when Exa is %s',
     async (exaValue) => {
-      tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+      tempDir = createTmpDir();
       const target = join(tempDir, '.zshrc');
       process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = 'true';
       if (exaValue === undefined) {
@@ -341,7 +334,7 @@ describe('configureBackgroundSubagents', () => {
   );
 
   test('writes shell config without prompting', async () => {
-    tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+    tempDir = createTmpDir();
     delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS;
     const log = spyOn(console, 'log').mockImplementation(() => undefined);
     const originalShell = process.env.SHELL;
@@ -374,9 +367,9 @@ describe('configureBackgroundSubagents', () => {
   });
 
   test('returns no configured target when writing shell config fails', async () => {
-    tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+    tempDir = createTmpDir();
     delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS;
-    rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     writeFileSync(tempDir, 'not a directory');
     const log = spyOn(console, 'log').mockImplementation(() => undefined);
     const originalShell = process.env.SHELL;

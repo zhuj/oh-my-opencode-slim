@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   checkForUpdate,
   compareVersions,
@@ -35,7 +35,7 @@ async function waitFor(
 
 /** A temp root, removed by the caller. */
 function makeTempRoot(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'omo-update-notice-'));
+  return createTmpDir('omo-update-notice-');
 }
 
 /**
@@ -303,7 +303,7 @@ describe('resolveInstalledVersion', () => {
         }),
       ).toBe('3.0.4');
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -333,7 +333,7 @@ describe('resolveInstalledVersion', () => {
         }),
       ).toBe('3.0.4');
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -365,7 +365,7 @@ describe('resolveInstalledVersion', () => {
         }),
       ).toBeUndefined();
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -389,7 +389,7 @@ describe('resolveInstalledVersion', () => {
         }),
       ).toBe('3.0.4');
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -423,7 +423,7 @@ describe('resolveInstalledVersion', () => {
         ),
       ).toBe('3.0.4');
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -447,7 +447,7 @@ describe('resolveInstalledVersion', () => {
         }),
       ).toBe('3.0.5');
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -469,7 +469,7 @@ describe('resolveInstalledVersion', () => {
         ),
       ).toBeUndefined();
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -490,7 +490,7 @@ describe('resolveInstalledVersion', () => {
         }),
       ).toBe('3.0.4');
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 });
@@ -541,7 +541,7 @@ describe('checkForUpdate', () => {
         notify: '3.0.5',
       });
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -558,7 +558,7 @@ describe('checkForUpdate', () => {
         ),
       ).toEqual({ installed: undefined, latest: undefined, notify: undefined });
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 });

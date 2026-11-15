@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 
 const originalTuiConfig = process.env.OPENCODE_TUI_CONFIG;
 
@@ -14,7 +14,9 @@ afterEach(() => {
 });
 
 // Mock logger to avoid noise
+const actualLogger = await import('../../utils/logger');
 mock.module('../../utils/logger', () => ({
+  ...actualLogger,
   log: mock(() => {}),
 }));
 
@@ -305,7 +307,7 @@ describe('auto-update-checker/checker', () => {
 
   describe('updateInstallerManagedVersions', () => {
     test('rolls back a symlink target when a later config update fails', async () => {
-      const root = fs.mkdtempSync(path.join(tmpdir(), 'managed-rollback-'));
+      const root = createTmpDir();
       const configDir = path.join(root, '.opencode');
       fs.mkdirSync(configDir);
       const target = path.join(root, 'dotfiles.json');
@@ -344,11 +346,11 @@ describe('auto-update-checker/checker', () => {
         ).toBe(false);
       } finally {
         spy.mockRestore();
-        fs.rmSync(root, { recursive: true, force: true });
+        removeTmpDir(root);
       }
     });
     test('keeps the recovery copy when a rollback rename fails', async () => {
-      const root = fs.mkdtempSync(path.join(tmpdir(), 'managed-restore-'));
+      const root = createTmpDir();
       const configDir = path.join(root, '.opencode');
       fs.mkdirSync(configDir);
       const first = path.join(configDir, 'opencode.json');
@@ -382,11 +384,11 @@ describe('auto-update-checker/checker', () => {
         ).toBe(original);
       } finally {
         spy.mockRestore();
-        fs.rmSync(root, { recursive: true, force: true });
+        removeTmpDir(root);
       }
     });
     test('updates a symlink target and refuses a dangling link', async () => {
-      const root = fs.mkdtempSync(path.join(tmpdir(), 'managed-config-'));
+      const root = createTmpDir();
       const configDir = path.join(root, '.opencode');
       fs.mkdirSync(configDir);
       const target = path.join(root, 'dotfiles.json');
@@ -412,7 +414,7 @@ describe('auto-update-checker/checker', () => {
         );
         expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
       } finally {
-        fs.rmSync(root, { recursive: true, force: true });
+        removeTmpDir(root);
       }
     });
     test('structurally rewrites managed tuples in OpenCode and TUI configs only', async () => {

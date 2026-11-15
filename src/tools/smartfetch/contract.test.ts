@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { withTmpDir } from '../../test-utils';
 import { buildCacheKey, CACHE } from './cache';
 import { createWebfetchTool } from './tool';
 import type { CachedFetch } from './types';
@@ -217,11 +217,8 @@ describe('smartfetch/contract', () => {
   });
 
   test('save_binary keeps the disk path and reports where the payload landed', async () => {
-    const directory = await mkdtemp(
-      path.join(tmpdir(), 'smartfetch-contract-'),
-    );
     const image = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10, 42);
-    try {
+    await withTmpDir(async (directory) => {
       globalThis.fetch = mock(
         async () =>
           new Response(image, { headers: { 'content-type': 'image/png' } }),
@@ -239,9 +236,7 @@ describe('smartfetch/contract', () => {
       expect(await readFile(path.join(directory, files[0]))).toEqual(
         Buffer.from(image),
       );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+    });
   });
 
   test('a blocked cross-origin redirect keeps its operator copy', async () => {

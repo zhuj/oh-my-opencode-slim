@@ -14,23 +14,21 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   generateBuildInfo,
   renderBuildInfoSource,
 } from '../../scripts/gen-build-info';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 
 const outputRelative = join('src', 'generated', 'build-info.ts');
 
 function createFixture(version = '9.9.99'): string {
-  const rootDir = mkdtempSync(join(tmpdir(), 'omo-gen-build-info-'));
+  const rootDir = createTmpDir();
   mkdirSync(join(rootDir, 'src', 'generated'), { recursive: true });
   writeFileSync(
     join(rootDir, 'package.json'),
@@ -46,9 +44,9 @@ afterEach(() => {
     try {
       chmodSync(join(dir, outputRelative), 0o644);
     } catch {
-      // Absent or already writable — rmSync below handles cleanup.
+      // Absent or already writable — removeTmpDir below handles cleanup.
     }
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });
 

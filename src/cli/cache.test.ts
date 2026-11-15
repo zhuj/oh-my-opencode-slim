@@ -1,7 +1,6 @@
 /// <reference types="bun-types" />
 
 import {
-  afterAll,
   afterEach,
   beforeEach,
   describe,
@@ -13,15 +12,17 @@ import {
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as pathsMod from '../config/paths';
+import { createTmpDir, removeTmpDir } from '../test-utils';
+import * as compatModule from '../utils/compat';
 import * as packageManagerModule from '../utils/package-manager';
+
+const realCompat = { ...compatModule };
 
 type SpawnResult = {
   exited: Promise<number>;
@@ -46,29 +47,17 @@ const NPM_INSTALL = {
 };
 let resolvedInstall: { command: string[] } | null = BUN_INSTALL;
 
-// bun's mock.module registry is process-global and test files run in
-// filesystem readdir order, so this file's package-manager mock would
-// otherwise leak into src/utils/package-manager.test.ts when cli/ is walked
-// before utils/. Capture the real exports (before mocking) and restore them
-// once this file's tests are done.
-const realPackageExports = { ...packageManagerModule };
-
 mock.module('../utils/compat', () => ({
+  ...realCompat,
   crossSpawn: crossSpawnMock,
 }));
-
-mock.module('../utils/package-manager', () => ({
-  resolvePackageInstallCommand: () => resolvedInstall,
-}));
-
-afterAll(() => {
-  mock.module('../utils/package-manager', () => realPackageExports);
-});
 
 const nonexistentPath = '/nonexistent/opencode.json';
 
 let importCounter = 0;
 let getExistingConfigPathSpy: ReturnType<typeof spyOn>;
+let resolveInstallSpy: ReturnType<typeof spyOn>;
+const tmpDirs = new Set<string>();
 
 function createSpawnResult(exitCode = 0): SpawnResult {
   return {
@@ -98,6 +87,10 @@ describe('warmOpenCodePluginCache', () => {
       },
     );
     resolvedInstall = BUN_INSTALL;
+    resolveInstallSpy = spyOn(
+      packageManagerModule,
+      'resolvePackageInstallCommand',
+    ).mockImplementation(() => resolvedInstall);
     delete process.env.XDG_CACHE_HOME;
     getExistingConfigPathSpy = spyOn(
       pathsMod,
@@ -113,6 +106,9 @@ describe('warmOpenCodePluginCache', () => {
       process.env.XDG_CACHE_HOME = originalXdgCacheHome;
     }
     getExistingConfigPathSpy.mockRestore();
+    resolveInstallSpy.mockRestore();
+    for (const tmpDir of tmpDirs) removeTmpDir(tmpDir);
+    tmpDirs.clear();
   });
 
   test('prewarms the @latest OpenCode cache for bunx @latest installs', async () => {
@@ -164,7 +160,7 @@ describe('warmOpenCodePluginCache', () => {
       },
     });
 
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('uses npm with audit/fund disabled when the resolver returns npm', async () => {
@@ -209,7 +205,7 @@ describe('warmOpenCodePluginCache', () => {
       `${expectedCacheDir}.staging-`,
     );
 
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('returns a failed result without spawning when no package manager is found', async () => {
@@ -252,7 +248,7 @@ describe('warmOpenCodePluginCache', () => {
     // cache dir nor the manifest may be created/rewritten.
     expect(existsSync(expectedCacheDir)).toBe(false);
 
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('repairs a stale OpenCode cache manifest', async () => {
@@ -303,7 +299,7 @@ describe('warmOpenCodePluginCache', () => {
       },
     });
 
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('fails when bun install does not create the cached plugin package', async () => {
@@ -339,7 +335,7 @@ describe('warmOpenCodePluginCache', () => {
       error: expect.stringContaining('Cached plugin package not found at '),
     });
 
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('returns a failed result when bun install fails', async () => {
@@ -378,7 +374,7 @@ describe('warmOpenCodePluginCache', () => {
       error: 'registry unavailable',
     });
 
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('returns a failed result when cache package.json cannot be written', async () => {
@@ -429,7 +425,7 @@ describe('warmOpenCodePluginCache', () => {
       expect(crossSpawnMock).not.toHaveBeenCalled();
     } finally {
       writeSpy.mockRestore();
-      rmSync(tmpDir, { recursive: true, force: true });
+      removeTmpDir(tmpDir);
     }
   });
 
@@ -500,7 +496,7 @@ describe('warmOpenCodePluginCache', () => {
     expect(result).toBeNull();
     expect(crossSpawnMock).not.toHaveBeenCalled();
 
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('uses pinned version in cache dir and manifest when config has a pinned version', async () => {
@@ -560,7 +556,7 @@ describe('warmOpenCodePluginCache', () => {
         },
       });
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      removeTmpDir(tmpDir);
     }
   });
 
@@ -607,7 +603,7 @@ describe('warmOpenCodePluginCache', () => {
       },
     });
 
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('uses pinned version from array-format plugin entry', async () => {
@@ -666,7 +662,7 @@ describe('warmOpenCodePluginCache', () => {
         },
       });
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      removeTmpDir(tmpDir);
     }
   });
 
@@ -727,13 +723,16 @@ describe('warmOpenCodePluginCache', () => {
         },
       });
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      removeTmpDir(tmpDir);
     }
   });
 });
 
 function mkdirTemp(): string {
-  return mkdtempSync(join(tmpdir(), 'opencode-cache-test-'));
+  const tmpDir = createTmpDir();
+  // afterEach owns cleanup even when a test assertion or setup throws.
+  tmpDirs.add(tmpDir);
+  return tmpDir;
 }
 
 function writeCachedPluginPackage(cacheDir?: string): void {

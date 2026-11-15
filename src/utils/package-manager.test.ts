@@ -1,19 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { isOnPath, resolvePackageInstallCommand } from './package-manager';
 
 const createdDirs: string[] = [];
 
 function dirWith(files: string[], mode = 0o755): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'pm-test-'));
+  const dir = createTmpDir();
   createdDirs.push(dir);
   for (const file of files) {
     const filePath = path.join(dir, file);
@@ -25,7 +19,7 @@ function dirWith(files: string[], mode = 0o755): string {
 
 afterEach(() => {
   for (const dir of createdDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });
 

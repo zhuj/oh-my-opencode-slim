@@ -1,17 +1,11 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 
 test('failed cache warm-up preserves the previously installed plugin', () => {
-  const root = mkdtempSync(join(tmpdir(), 'omos-cache-integration-'));
+  const root = createTmpDir();
   try {
     const packageRoot = join(
       root,
@@ -58,6 +52,6 @@ test('failed cache warm-up preserves the previously installed plugin', () => {
       JSON.parse(readFileSync(join(oldPlugin, 'package.json'), 'utf8')).version,
     ).toBe('0.9.0');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTmpDir(root);
   }
 }, 30000);

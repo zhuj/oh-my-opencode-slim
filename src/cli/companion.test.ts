@@ -1,26 +1,20 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { enableCompanionConfig, runCompanionCommand } from './companion';
 
 describe('enableCompanionConfig', () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'companion-cli-test-'));
+    tmpDir = createTmpDir('companion-cli-test-');
   });
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('enables companion and keeps existing settings', () => {
@@ -60,7 +54,7 @@ describe('runCompanionCommand', () => {
   const originalConfigDir = process.env.OPENCODE_CONFIG_DIR;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'companion-cli-test-'));
+    tmpDir = createTmpDir('companion-cli-test-');
     process.env.OPENCODE_CONFIG_DIR = tmpDir;
     spyOn(console, 'log').mockImplementation(() => {});
     spyOn(console, 'error').mockImplementation(() => {});
@@ -69,7 +63,7 @@ describe('runCompanionCommand', () => {
   afterEach(() => {
     if (originalConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
     else process.env.OPENCODE_CONFIG_DIR = originalConfigDir;
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
     (console.log as ReturnType<typeof spyOn>).mockRestore();
     (console.error as ReturnType<typeof spyOn>).mockRestore();
   });

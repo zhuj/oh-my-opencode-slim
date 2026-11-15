@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { flushLoggerForTesting, initLogger, log, resetLogger } from './logger';
 
 describe('logger', () => {
@@ -17,7 +17,7 @@ describe('logger', () => {
       );
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'logger-test-'));
+    tmpDir = createTmpDir();
     origLogDir = process.env.OPENCODE_LOG_DIR;
     process.env.OPENCODE_LOG_DIR = tmpDir;
     resetLogger();
@@ -30,7 +30,7 @@ describe('logger', () => {
     } else {
       process.env.OPENCODE_LOG_DIR = origLogDir;
     }
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    removeTmpDir(tmpDir);
   });
 
   test('log() silently no-ops before initLogger()', () => {
@@ -71,8 +71,10 @@ describe('logger', () => {
   });
 
   test('re-initializing in a changed log directory starts a new file', async () => {
-    const firstDir = fs.mkdtempSync(path.join(tmpDir, 'first-log-'));
-    const secondDir = fs.mkdtempSync(path.join(tmpDir, 'second-log-'));
+    const firstDir = path.join(tmpDir, 'first-log');
+    const secondDir = path.join(tmpDir, 'second-log');
+    fs.mkdirSync(firstDir);
+    fs.mkdirSync(secondDir);
     process.env.OPENCODE_LOG_DIR = firstDir;
     initLogger();
     log('first dir message');
@@ -204,8 +206,10 @@ describe('logger', () => {
   });
 
   test('does not let a stale failed write replace a newer file sink', async () => {
-    const oldLogDir = fs.mkdtempSync(path.join(tmpDir, 'old-log-'));
-    const newLogDir = fs.mkdtempSync(path.join(tmpDir, 'new-log-'));
+    const oldLogDir = path.join(tmpDir, 'old-log');
+    const newLogDir = path.join(tmpDir, 'new-log');
+    fs.mkdirSync(oldLogDir);
+    fs.mkdirSync(newLogDir);
     const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
 
     try {
