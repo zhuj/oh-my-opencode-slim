@@ -54,6 +54,71 @@ const LEVELS: NamedComparator[] = [
 const MAX_LCS_CHUNK_LINES = 48;
 const MAX_LCS_CANDIDATES = 64;
 
+type NormalizedLines = { source: string[]; values: string[] };
+const NORMALIZED_LINES = new WeakMap<
+  string[],
+  Map<NamedComparator['norm'], NormalizedLines>
+>();
+const normalizeEdgeLine = (line: string) => normalizeUnicode(line.trimEnd());
+
+function normalizedLines(
+  lines: string[],
+  norm: NamedComparator['norm'],
+  start = 0,
+): string[] {
+  let levels = NORMALIZED_LINES.get(lines);
+  if (!levels) {
+    levels = new Map();
+    NORMALIZED_LINES.set(lines, levels);
+  }
+  let cached = levels.get(norm);
+  if (!cached) {
+    cached = { source: [], values: [] };
+    levels.set(norm, cached);
+  }
+  // Callers splice and replace lines between chunks. Identity alone is unsafe;
+  // validate the examined suffix, only re-normalizing changed contents.
+  const length = lines.length;
+  for (let index = start; index < length; index += 1) {
+    const line = lines[index];
+    if (cached.source[index] !== line) {
+      cached.values[index] = norm(line);
+      cached.source[index] = line;
+    }
+  }
+  cached.source.length = length;
+  cached.values.length = length;
+  return cached.values;
+}
+
+// KMP preserves overlapping occurrences without re-scanning repeated prefixes.
+function* patternHits(
+  lines: string[],
+  pattern: string[],
+  start: number,
+): Generator<number> {
+  const fallback = Array<number>(pattern.length).fill(0);
+  for (let index = 1, matched = 0; index < pattern.length; index += 1) {
+    while (matched > 0 && pattern[index] !== pattern[matched]) {
+      matched = fallback[matched - 1];
+    }
+    if (pattern[index] === pattern[matched]) matched += 1;
+    fallback[index] = matched;
+  }
+  const length = lines.length;
+  for (let index = start, matched = 0; index < length; index += 1) {
+    const line = lines[index];
+    while (matched > 0 && line !== pattern[matched]) {
+      matched = fallback[matched - 1];
+    }
+    if (line === pattern[matched]) matched += 1;
+    if (matched === pattern.length) {
+      yield index - pattern.length + 1;
+      matched = fallback[matched - 1];
+    }
+  }
+}
+
 export function prepareAutoRescueTarget(
   target: string,
 ): PreparedAutoRescueTarget {
@@ -79,19 +144,27 @@ function tryMatch(
   pattern: string[],
   start: number,
   eof: boolean,
-  norm: (line: string) => string,
+  norm?: NamedComparator['norm'],
 ): number | undefined {
   const at = (index: number) => {
     for (let offset = 0; offset < pattern.length; offset += 1) {
-      if (norm(lines[index + offset]) !== pattern[offset]) return false;
+      const line = lines[index + offset];
+      if ((norm ? norm(line) : line) !== pattern[offset]) return false;
     }
     return true;
   };
   const last = lines.length - pattern.length;
   if (eof && last >= start && at(last)) return last;
-  for (let index = start; index <= last; index += 1) {
-    if (at(index)) return index;
+  if (last < start) return undefined;
+  // Preserve native access/throw behavior for negative starts, including the
+  // EOF preference before examining out-of-bounds indices.
+  if (start < 0) {
+    for (let index = start; index <= last; index += 1) {
+      if (at(index)) return index;
+    }
+    return undefined;
   }
+  for (const index of patternHits(lines, pattern, start)) return index;
   return undefined;
 }
 
@@ -101,12 +174,18 @@ export function seekMatch(
   start: number,
   eof = false,
 ): SeekHit | undefined {
-  if (pattern.length === 0) {
+  if (pattern.length === 0 || start > lines.length - pattern.length) {
     return undefined;
   }
 
   for (const { norm, exact } of LEVELS) {
-    const at = tryMatch(lines, pattern.map(norm), start, eof, norm);
+    const at = tryMatch(
+      exact || start < 0 ? lines : normalizedLines(lines, norm, start),
+      pattern.map(norm),
+      start,
+      eof,
+      start < 0 ? norm : undefined,
+    );
     if (at !== undefined) {
       return { index: at, exact };
     }
@@ -124,21 +203,36 @@ export function seek(
   return seekMatch(lines, pattern, start, eof)?.index ?? -1;
 }
 
-function lowerBound(values: number[], target: number): number {
-  let low = 0;
-  let high = values.length;
+export type EdgePairing =
+  | { kind: 'miss' }
+  | { kind: 'ambiguous' }
+  | { kind: 'match'; start: number; del: number };
 
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if (values[middle] < target) {
-      low = middle + 1;
-      continue;
-    }
-
-    high = middle;
+// Both hit lists are ascending. The right cursor never moves backwards, and
+// only two in-range pairs need inspecting to establish ambiguity.
+export function pairEdgeHits(
+  leftHits: number[],
+  rightHits: number[],
+  leftLength: number,
+  maxDeletion: number,
+): EdgePairing {
+  let hit: EdgePairing = { kind: 'miss' };
+  let right = 0;
+  const rightCount = rightHits.length;
+  for (const left of leftHits) {
+    const from = left + leftLength;
+    while (right < rightCount && rightHits[right] < from) right += 1;
+    if (right === rightCount) break;
+    const deletion = rightHits[right] - from;
+    if (deletion > maxDeletion) continue;
+    if (
+      hit.kind === 'match' ||
+      (right + 1 < rightCount && rightHits[right + 1] - from <= maxDeletion)
+    )
+      return { kind: 'ambiguous' };
+    hit = { kind: 'match', start: from, del: deletion };
   }
-
-  return low;
+  return hit;
 }
 
 export function sameRescueLine(a: string, b: string): boolean {
@@ -194,59 +288,26 @@ export function rescueByPrefixSuffix(
 
   // Only the unicode + trim-end level is safe for fuzzy edges. Full-trim
   // would bind stale patches across indentation depths.
-  const norm = (line: string) => normalizeUnicode(line.trimEnd());
+  const norm = normalizeEdgeLine;
   const left = old_lines.slice(0, prefixLength).map(norm);
   const right = old_lines.slice(old_lines.length - suffixLength).map(norm);
   const middle = new_lines.slice(prefixLength, new_lines.length - suffixLength);
   const maxDeletion = 2 * (old_lines.length - prefixLength - suffixLength) + 4;
-  const normalized = lines.map(norm);
-  const leftHits: number[] = [];
-  const rightHits: number[] = [];
-
-  for (let index = start; index < normalized.length; index += 1) {
-    if (
-      normalized[index] === left[0] &&
-      left.every((line, offset) => normalized[index + offset] === line)
-    ) {
-      leftHits.push(index);
-    }
-    if (
-      index > start &&
-      normalized[index] === right[0] &&
-      right.every((line, offset) => normalized[index + offset] === line)
-    ) {
-      rightHits.push(index);
-    }
+  const normalized = normalizedLines(lines, norm);
+  const leftHits = [...patternHits(normalized, left, start)];
+  const rightHits = [...patternHits(normalized, right, start + 1)];
+  const pairing = pairEdgeHits(leftHits, rightHits, left.length, maxDeletion);
+  switch (pairing.kind) {
+    case 'miss':
+      return { kind: 'miss' };
+    case 'ambiguous':
+      return { kind: 'ambiguous', phase: 'prefix_suffix' };
+    case 'match':
+      return {
+        kind: 'match',
+        hit: { start: pairing.start, del: pairing.del, add: [...middle] },
+      };
   }
-
-  if (leftHits.length === 0 || rightHits.length === 0) {
-    return { kind: 'miss' };
-  }
-
-  let hit: MatchHit | undefined;
-
-  for (const leftIndex of leftHits) {
-    const from = leftIndex + left.length;
-
-    for (
-      let index = lowerBound(rightHits, from);
-      index < rightHits.length;
-      index += 1
-    ) {
-      const rightIndex = rightHits[index];
-      if (rightIndex - from > maxDeletion) continue;
-      if (hit) {
-        return { kind: 'ambiguous', phase: 'prefix_suffix' };
-      }
-      hit = { start: from, del: rightIndex - from, add: [...middle] };
-    }
-  }
-
-  if (!hit) {
-    return { kind: 'miss' };
-  }
-
-  return { kind: 'match', hit };
 }
 
 function score(a: string[], b: string[]): number {

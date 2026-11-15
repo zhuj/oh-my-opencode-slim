@@ -1,15 +1,7 @@
 import { afterEach } from 'bun:test';
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rename,
-  rm,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
-import os from 'node:os';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 
 import { simulatePatch } from './execution-context';
 import { rewritePatch } from './rewrite';
@@ -17,13 +9,11 @@ import { rewritePatch } from './rewrite';
 const tempDirs: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(
-    tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
-  );
+  await Promise.all(tempDirs.splice(0).map((dir) => removeTmpDir(dir)));
 });
 
 export async function createTempDir(prefix = 'apply-patch-'): Promise<string> {
-  const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const dir = createTmpDir(prefix);
   tempDirs.push(dir);
   return dir;
 }
