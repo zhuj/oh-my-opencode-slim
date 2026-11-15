@@ -1,15 +1,8 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fsModule from 'node:fs';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   MarketplaceCompatibilityError,
   MarketplaceConflictError,
@@ -38,7 +31,7 @@ afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) {
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     }
   }
 });
@@ -76,7 +69,7 @@ function bundle(
 }
 
 function tempRoot(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'marketplace-service-'));
+  const dir = createTmpDir();
   tempDirs.push(dir);
   return dir;
 }
@@ -135,7 +128,7 @@ describe('MarketplaceService', () => {
       expect(status.livePackages?.map(({ id }) => id)).toEqual([packageId]);
       expect(status.reloadRequired).toBe(false);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -166,7 +159,7 @@ describe('MarketplaceService', () => {
       expect(desiredInspections[0]).toBe(inspectedSnapshots[0]);
       expect(desiredInspections[1]).toBe(inspectedSnapshots[1]);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -188,7 +181,7 @@ describe('MarketplaceService', () => {
       expect(service.show('community/example').manifest.version).toBe('2.0.0');
       expect(service.verify(' COMMUNITY/EXAMPLE ')[0]?.valid).toBe(true);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -208,7 +201,7 @@ describe('MarketplaceService', () => {
       });
       expect(service.list()).toHaveLength(1);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -255,7 +248,7 @@ describe('MarketplaceService', () => {
         ['community/example', '1.0.0'],
       ]);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -281,7 +274,7 @@ describe('MarketplaceService', () => {
         ),
       ).not.toThrow();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -316,7 +309,7 @@ describe('MarketplaceService', () => {
       );
       expect(service.list()).toEqual([]);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -352,7 +345,7 @@ describe('MarketplaceService', () => {
       );
       expect(service.show('community/example').manifest.version).toBe('1.0.0');
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -397,7 +390,7 @@ describe('MarketplaceService', () => {
       expect(v2Calls).toBe(0);
       expect(service.list()).toEqual([]);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -449,7 +442,7 @@ describe('MarketplaceService', () => {
           );
         }
       } finally {
-        rmSync(root, { recursive: true, force: true });
+        removeTmpDir(root);
       }
     },
   );
@@ -482,7 +475,7 @@ describe('MarketplaceService', () => {
       ).toBe('1.0.0');
       expect(calls).toEqual(['v3', 'v2']);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -514,7 +507,7 @@ describe('MarketplaceService', () => {
       ).toBe('1.0.0');
       expect(calls).toEqual(['v3', 'v2']);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -571,8 +564,8 @@ describe('MarketplaceService', () => {
         '1.0.0',
       );
     } finally {
-      rmSync(installRoot, { recursive: true, force: true });
-      rmSync(updateRoot, { recursive: true, force: true });
+      removeTmpDir(installRoot);
+      removeTmpDir(updateRoot);
     }
   });
 
@@ -606,7 +599,7 @@ describe('MarketplaceService', () => {
       expect(calls).toEqual(['v3 incompatible index', 'v2 incompatible index']);
       expect(service.list()).toEqual([]);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -659,7 +652,7 @@ describe('MarketplaceService', () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -719,7 +712,7 @@ describe('MarketplaceService', () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -794,7 +787,7 @@ describe('MarketplaceService', () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -873,7 +866,7 @@ describe('MarketplaceService', () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -917,7 +910,7 @@ describe('MarketplaceService', () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -1023,7 +1016,7 @@ describe('MarketplaceService', () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -1094,7 +1087,7 @@ describe('MarketplaceService', () => {
       if (previousOpenCodeConfigDir === undefined)
         delete process.env.OPENCODE_CONFIG_DIR;
       else process.env.OPENCODE_CONFIG_DIR = previousOpenCodeConfigDir;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 });

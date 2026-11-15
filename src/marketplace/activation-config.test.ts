@@ -1,16 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'jsonc-parser';
 import { mergePresetMaps, resolvePresetDefinition } from '../config/presets';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   disableMarketplacePackage,
   enableMarketplaceAgent,
@@ -61,7 +54,7 @@ function bundle(id: string, agentName: string) {
 }
 
 function setup() {
-  const root = mkdtempSync(join(tmpdir(), 'marketplace-activation-config-'));
+  const root = createTmpDir();
   const configHome = join(root, 'config');
   const project = join(root, 'project');
   const configDir = join(configHome, 'opencode');
@@ -94,7 +87,7 @@ function setup() {
       if (previousPreset === undefined)
         delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
       else process.env.OH_MY_OPENCODE_SLIM_PRESET = previousPreset;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     },
   };
   activeFixtures.push(handle);
@@ -160,7 +153,13 @@ describe('marketplace activation persistence', () => {
       });
       writeFileSync(fixture.projectConfig, shared);
       fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
-      const nested = join(fixture.project, '.slim', 'worktrees', 'feature');
+      const nested = join(
+        fixture.project,
+        '.local',
+        '.slim',
+        'worktrees',
+        'feature',
+      );
       mkdirSync(nested, { recursive: true });
 
       disableMarketplacePackage(nested, PACKAGE_A);

@@ -198,15 +198,18 @@ export function resolveMarketplaceActivation(
       );
     }
   }
+  const disabledSkills = new Set(options.disabledSkillNames);
+  const disabledMcps = new Set(options.disabledMcpNames);
   const skills = new Set(
     (options.availableSkillNames ?? []).filter(
-      (name) => !options.disabledSkillNames?.includes(name),
+      (name) => !disabledSkills.has(name),
     ),
   );
   const mcps = new Set(
-    options.availableMcpNames.filter(
-      (name) => !options.disabledMcpNames?.includes(name),
-    ),
+    options.availableMcpNames.filter((name) => !disabledMcps.has(name)),
+  );
+  const mcpNamespaces = new Map(
+    [...mcps].map((name) => [name, name.replace(/[^a-zA-Z0-9_-]/g, '_')]),
   );
   const claimed = new Set<string>();
   const reservedNames = new Set(
@@ -276,7 +279,7 @@ export function resolveMarketplaceActivation(
     const inheritedMcpSet = new Set(inheritedMcps);
     const missingSkills = manifest.skills.filter(
       (name) =>
-        options.disabledSkillNames?.includes(name) ||
+        disabledSkills.has(name) ||
         (options.availableSkillNames !== undefined && !skills.has(name)),
     );
     const missingMcps = requiredMcps.filter((name) => !mcps.has(name));
@@ -298,7 +301,11 @@ export function resolveMarketplaceActivation(
       continue;
     }
     const effectiveMcps = requiredMcps;
-    const ambiguous = ambiguousMcpNamespaces(effectiveMcps, mcps);
+    const ambiguous = ambiguousMcpNamespaces(
+      effectiveMcps,
+      mcps,
+      mcpNamespaces,
+    );
     if (ambiguous.length) {
       diagnostics.push(
         diagnostic(

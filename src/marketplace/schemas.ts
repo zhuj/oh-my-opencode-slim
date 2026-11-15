@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { SUPPORTED_SPECIALIST_ROLES } from '../config/agent-roles.js';
 import { AGENT_THEME_COLORS } from '../config/constants.js';
 import { ProviderModelIdSchema } from '../config/model-id-schema.js';
+import { isSupportedSkillIdentifier } from '../utils/skill-policy-validation.js';
 import { MARKETPLACE_TOOL_NAMES } from './capabilities.js';
 import { MarketplacePackageIdSchema } from './id-schema.js';
 
@@ -108,6 +109,18 @@ const UniqueSingleLineStringArraySchema = z
     message: 'Values must be unique',
   });
 
+const UniqueSkillNameArraySchema = z
+  .array(
+    SingleLineTextSchema(200).refine(
+      isSupportedSkillIdentifier,
+      'Unsupported skill identifier: integer-index IDs and IDs containing ? or * are not supported',
+    ),
+  )
+  .max(128)
+  .refine((values) => new Set(values).size === values.length, {
+    message: 'Values must be unique',
+  });
+
 const MarketplaceToolSchema = z.enum(MARKETPLACE_TOOL_NAMES);
 
 export const MarketplaceAuthorSchema = z
@@ -204,7 +217,7 @@ const ManifestFields = {
     .trim()
     .regex(/^[a-z][a-z0-9_-]{0,63}$/, 'Expected a valid agent name'),
   prompt: MarketplacePromptSchema,
-  skills: UniqueSingleLineStringArraySchema,
+  skills: UniqueSkillNameArraySchema,
   mcps: UniqueSingleLineStringArraySchema,
   tools: z
     .array(MarketplaceToolSchema)

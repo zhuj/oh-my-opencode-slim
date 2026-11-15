@@ -1,17 +1,11 @@
 import { describe, expect, jest, spyOn, test } from 'bun:test';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { acquireMarketplaceLease } from '../marketplace/lease';
 import { getMarketplacePaths } from '../marketplace/paths';
 import { MarketplaceService } from '../marketplace/service';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   createMarketplaceTools,
   resolveFinalizedOrchestratorIdentities,
@@ -70,7 +64,7 @@ function fixture() {
 
 describe('marketplace tools', () => {
   test('list and mutation results omit prompts while show retains them', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-tool-summary-'));
+    const root = createTmpDir();
     const service = new MarketplaceService({
       rootDir: join(root, 'store'),
       projectDir: root,
@@ -135,12 +129,12 @@ describe('marketplace tools', () => {
         version: '1.1.0',
       });
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('retries a busy store without blocking the host event loop', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-host-wait-'));
+    const root = createTmpDir();
     const service = new MarketplaceService({
       rootDir: join(root, 'store'),
       projectDir: root,
@@ -221,12 +215,12 @@ describe('marketplace tools', () => {
     } finally {
       if (!released) owner.release();
       jest.useRealTimers();
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('retries local update leases without downloading the package again', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-remote-lease-'));
+    const root = createTmpDir();
     const bundle = (version: string) => ({
       manifest: {
         schemaVersion: 2,
@@ -318,7 +312,7 @@ describe('marketplace tools', () => {
       read.mockRestore();
       update.mockRestore();
       jest.useRealTimers();
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RuntimeConfig } from '../config/runtime';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { loadMergedOpenCodeConfig } from './preflight';
 
 const ENV_KEYS = [
@@ -35,7 +35,7 @@ function setConfigHome(path: string): void {
 
 describe('marketplace host preflight', () => {
   test('merges user and project config with JSONC precedence within each layer', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     const project = join(root, 'project');
     const userDir = join(root, 'xdg', 'opencode');
     try {
@@ -67,12 +67,12 @@ describe('marketplace host preflight', () => {
       expect(mcp.inherited).toBeDefined();
       expect(mcp.winner.url).toBe('https://jsonc');
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('current project MCP settings override ancestor settings', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     const project = join(root, 'project');
     try {
       setConfigHome(root);
@@ -120,12 +120,12 @@ describe('marketplace host preflight', () => {
       expect(mcps.projectEnables.enabled).toBe(true);
     } finally {
       RuntimeConfig.reset(project);
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('parses JSONC environment content and ignores malformed content', () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-preflight-'));
+    const root = createTmpDir();
     try {
       setConfigHome(root);
       process.env.OPENCODE_CONFIG_CONTENT =
@@ -135,7 +135,7 @@ describe('marketplace host preflight', () => {
       expect(loadMergedOpenCodeConfig(root).mcp).toBeUndefined();
     } finally {
       RuntimeConfig.reset(root);
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { runMarketplaceCommand } from './marketplace';
 
 function fakeService() {
@@ -45,7 +45,7 @@ function fakeService() {
 
 describe('marketplace CLI', () => {
   test('v2 status and disable use inherited config above the git root', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-cli-v2-'));
+    const root = createTmpDir();
     const project = join(root, 'repo', 'app');
     const previousData = process.env.XDG_DATA_HOME;
     const previousConfig = process.env.XDG_CONFIG_HOME;
@@ -130,7 +130,7 @@ describe('marketplace CLI', () => {
       else process.env.XDG_DATA_HOME = previousData;
       if (previousConfig === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfig;
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 

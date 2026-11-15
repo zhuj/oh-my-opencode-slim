@@ -3,15 +3,14 @@ import * as fs from 'node:fs';
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { parse } from 'jsonc-parser';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { withMarketplaceConfigReferencesRemoved } from './config-references';
 import { acquireMarketplaceLease } from './lease';
 import { getMarketplacePaths } from './paths';
@@ -43,7 +42,7 @@ afterEach(() => {
 });
 
 function createConfigs() {
-  const root = mkdtempSync(join(tmpdir(), 'marketplace-config-references-'));
+  const root = createTmpDir();
   const project = join(root, 'project');
   const configDir = join(root, 'config', 'opencode');
   const userPath = join(configDir, 'oh-my-opencode-slim.jsonc');
@@ -88,7 +87,7 @@ describe('marketplace config reference cleanup', () => {
       expect(existsSync(`${fixture.userPath}.bak`)).toBe(false);
       expect(existsSync(`${fixture.projectPath}.bak`)).toBe(false);
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -119,7 +118,7 @@ describe('marketplace config reference cleanup', () => {
         ),
       ).toBe(content);
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -156,7 +155,7 @@ describe('marketplace config reference cleanup', () => {
       );
       expect(existsSync(secondPath)).toBe(true);
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -218,7 +217,7 @@ describe('marketplace config reference cleanup', () => {
       expect(readFileSync(fixture.userPath, 'utf8')).toBe(userBefore);
       expect(existsSync(`${fixture.userPath}.bak`)).toBe(false);
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -285,7 +284,7 @@ describe('marketplace config reference cleanup', () => {
         unlinkSpy.mockRestore();
       }
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -312,7 +311,7 @@ describe('marketplace config reference cleanup', () => {
         presets: { work: { marketplace: { agents: [] } } },
       });
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -361,7 +360,7 @@ describe('marketplace config reference cleanup', () => {
         agents_remove: [],
       });
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -381,7 +380,7 @@ describe('marketplace config reference cleanup', () => {
       expect(existsSync(fixture.userPath)).toBe(false);
       expect(existsSync(fixture.projectPath)).toBe(false);
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -444,7 +443,7 @@ describe('marketplace config reference cleanup', () => {
         mkdirSpy.mockRestore();
       }
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -514,7 +513,7 @@ describe('marketplace config reference cleanup', () => {
         accessSpy.mockRestore();
       }
     } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
+      removeTmpDir(fixture.root);
     }
   });
 
@@ -592,7 +591,7 @@ withMarketplaceConfigReferencesRemoved(project, id, (onCommitted) => {
       } finally {
         if (!released) heldLease.release();
         if (worker) await worker.exited;
-        rmSync(fixture.root, { recursive: true, force: true });
+        removeTmpDir(fixture.root);
       }
     },
   );

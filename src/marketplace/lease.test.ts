@@ -6,7 +6,6 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -17,6 +16,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   MarketplaceBusyError,
   MarketplaceLockfileError,
@@ -53,7 +53,7 @@ const UUIDS = {
 };
 
 function tempRoot(): string {
-  return mkdtempSync(join(tmpdir(), 'marketplace-lease-'));
+  return createTmpDir();
 }
 
 function entryPath(
@@ -248,7 +248,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       expect(readFileSync(target, 'utf8')).toBe('{"value":1}');
       expect(readdirSync(join(root, 'nested'))).toEqual(['state.json']);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -277,7 +277,7 @@ describe('marketplace synchronous lease lifecycle', () => {
         );
       }
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -321,7 +321,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       const owner = acquireMarketplaceLease(paths, LOCK);
       owner.release();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -341,7 +341,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       lease.release();
       expect(lockEntries(paths.lockDir)).toEqual([]);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -358,7 +358,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       expect(() => lease.assertCurrent()).not.toThrow();
       expect(() => lease.release()).not.toThrow();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -376,7 +376,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       );
       expect(() => lease.release()).toThrow(MarketplaceLockOwnershipError);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -393,7 +393,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       expect(() => owner.assertCurrent()).not.toThrow();
       owner.release();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -409,7 +409,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       expect(existsSync(stale)).toBe(false);
       owner.release();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -431,7 +431,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       ).toThrow(MarketplaceBusyError);
       expect(existsSync(stale)).toBe(true);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -450,7 +450,7 @@ describe('marketplace synchronous lease lifecycle', () => {
       expect(existsSync(candidate)).toBe(false);
       owner.release();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -542,7 +542,7 @@ try {
       await Promise.all(
         workers.map(({ process: child }) => child.exited.catch(() => -1)),
       );
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -584,7 +584,7 @@ try {
       const nextOwner = acquireMarketplaceLease(paths, LOCK);
       nextOwner.release();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -654,8 +654,8 @@ try {
       );
       nextOwner.release();
     } finally {
-      rmSync(root, { recursive: true, force: true });
-      rmSync(otherRoot, { recursive: true, force: true });
+      removeTmpDir(root);
+      removeTmpDir(otherRoot);
     }
   });
 
@@ -685,7 +685,7 @@ try {
       successor.assertCurrent();
       successor.release();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -718,7 +718,7 @@ try {
       owner.release();
       expect(existsSync(leasePath)).toBe(false);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -765,7 +765,7 @@ try {
         owner.release();
         expect(lockEntries(paths.lockDir)).toEqual([]);
       } finally {
-        rmSync(root, { recursive: true, force: true });
+        removeTmpDir(root);
       }
     }
   });
@@ -795,7 +795,7 @@ try {
           MarketplaceLockfileError,
         );
       } finally {
-        rmSync(root, { recursive: true, force: true });
+        removeTmpDir(root);
       }
     }
   });
@@ -838,7 +838,7 @@ try {
         lstat.mockRestore();
       }
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -867,7 +867,7 @@ try {
         lstat.mockRestore();
       }
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -882,7 +882,7 @@ try {
       expect(lockEntries(paths.lockDir)).toHaveLength(1);
       owner.release();
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 });
