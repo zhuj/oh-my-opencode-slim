@@ -6,6 +6,14 @@ Complete reference for all configuration files and options in oh-my-opencode-sli
 
 ## Config Files
 
+Task dependencies require no configuration flag. `id` and `depends_on` are
+per-call native `task`/v2 `subagent` arguments consumed by the plugin's
+execute-before hook, not configuration properties. See
+[Scheduler-enforced dependencies](background-orchestration.md#scheduler-enforced-dependencies)
+for ordering, foreground fast-fail behavior, dependency mutation, and
+managed-parent `task_wait`. These dependency fields are not plugin
+configuration properties.
+
 | File | Purpose |
 |------|---------|
 | `~/.config/opencode/opencode.json` | OpenCode core settings (plugin registration, providers) |
@@ -100,9 +108,14 @@ The TUI sidebar uses the compact layout by default. Set `compactSidebar` to
 ```
 
 Click the `OMO-Slim` heading to collapse or expand its sidebar section. It
-starts expanded; the choice lasts for the current TUI window only. An idle
-agent has a `•` before its name. While an agent session reports `busy` or
-`retry`, an animated Braille indicator replaces the bullet in the same spot.
+starts expanded; the choice lasts for the current TUI window only. The sidebar
+shows configured agents and also includes agents with active live sessions,
+even when they are not configured. In a selected conversation, these live-only
+rows include nested sub-sessions and exclude other conversations; the home
+route shows active agents across the project.
+
+An idle agent has a `•` before its name. While an agent session reports `busy`
+or `retry`, an animated Braille indicator replaces the bullet in the same spot.
 The bullet returns after every active session for that agent becomes idle or
 is deleted.
 
@@ -265,13 +278,14 @@ and [Council](council.md) for what remains.
 | `preset` | string | - | Active preset name (e.g. `"openai"`, `"best"`) |
 | `setDefaultAgent` | boolean | `true` | When `true`, sets OpenCode's `default_agent` to the orchestrator if unset or pointing at a subagent; `false` leaves it untouched |
 | `sidebar` | boolean | `true` | Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When `false`, the plugin never registers or renders the sidebar and writes no sidebar state; the native host sidebar is untouched, and pane management keeps following `multiplexer` config changes. `tui: false` implies this off. |
-| `tui` | boolean | `true` | Master switch for all OMOS TUI surfaces: the sidebar and its server-side state, `/preset`, `/killall`, `/subagent`, and the update notice. When `false`, the TUI entry registers nothing and never loads the TUI render stack, and the server writes no sidebar state; server-side agents, council, observer, hooks, and tools remain active. |
+| `tui` | boolean | `true` | Master switch for all OMOS TUI surfaces: the sidebar and its server-side state, `/preset`, `/killall`, `/subagent`, `/queue`, and the update notice. When `false`, the TUI entry registers nothing and never loads the TUI render stack, and the server writes no sidebar state; server-side agents, council, observer, hooks, and tools remain active. |
 | `liveConfigRefresh` | boolean | `true` | v2 only: master switch for the live config-file watcher that reloads runtime model/preset profiles when `oh-my-opencode-slim.json(c)` changes on disk. When `false`, v2 does not watch config files and file edits apply only after a restart; explicit `/preset` writes still refresh the current generation where applicable |
+| `resource_prefixes` | string[] | `[".local", ".local/.slim", ".opencode"]` | Ordered relative directory prefixes for plugin-owned project rules and extra skills. An explicit list replaces defaults; project config replaces a user list, and `[]` disables prefix-based discovery. See [Project-local resource roots](project-local-customization.md#project-local-resource-roots). |
 | `stripOrchestratorModel` | boolean | `false` | Preserve a runtime `/model` selection for the orchestrator after subagent dispatch by omitting its configured model from the SDK config. A selected preset's explicit `orchestrator.model` is retained. Without a runtime selection, this opt-in delegates the initial orchestrator choice to OpenCode's session default. |
 | `routingBlock` | boolean | `true` | When false, removes the `<Agents>` routing block from the built-in orchestrator prompt. The host's native delegation-tool roster still lists every enabled agent with its one-line description, but it carries no Delegate/Don't routing criteria — the block's routing guidance (~300 tokens) has no roster equivalent, so `false` trades routing quality for tokens, or drops stock routing claims that drift against custom agent prompts (`agents.<name>.prompt`). Applies on v1 and v2 hosts. No effect when an orchestrator.md override already replaces the whole prompt. |
 | `presets` | object | - | Named preset configurations. New preset names are limited to letters, digits, `-`, and `_`; `__omo_*` and JavaScript reserved property names (`__proto__`, `constructor`, `prototype`) are rejected for new presets (pre-existing entries with other names stay visible and applicable) |
 | `presets.<name>.extends` | string | - | Optional single parent preset. The parent is resolved before the child; multiple parents are not supported |
-| `presets.<name>.<agent>.model` | string \| array | - | Model ID in `provider/model` format, or a non-empty ordered fallback chain (array of IDs or `{ id, variant }`) |
+| `presets.<name>.<agent>.model` | string \| array \| object | - | `provider/model[#variant]`, a nonempty fallback chain (IDs or `{ id, variant }`), or `{ "dynamic": "selected" }` for session selection. Model IDs retain nested slashes and literal colons. |
 | `marketplace.enabled` | boolean | `true` | Kill switch for the marketplace subsystem: when `false`, any selected package IDs (`presets.<name>.marketplace` activation lists) are ignored and the marketplace manager, store, and `marketplace_inspect`/`marketplace_manage` tools are not initialized. Distinct from an empty preset activation list, which simply activates no agents while the service/store and tool factories still initialize See [Marketplace](marketplace.md). |
 | `presets.<name>.marketplace` | object | - | Marketplace activation: `agents`, `agents_add`, `agents_remove` (package IDs). See [Marketplace](marketplace.md) |
 | `presets.<name>.<agent>.temperature` | number | - | Optional temperature (0–2); when omitted, OpenCode chooses its default |
@@ -281,13 +295,15 @@ and [Council](council.md) for what remains.
 | `presets.<name>.<agent>.skills` | string[] | - | Skills the agent can use (`"*"`, `"!item"`, explicit list) |
 | `presets.<name>.<agent>.skills_add` | string[] | - | Skill names added to the effective skills list at config resolution (applies to `agents.<agent>` entries too). Removal via `skills_remove` wins. Folded into `skills` and stripped; see [Skills Assignment](skills.md#adding-or-removing-skills-on-top-of-an-inherited-list) |
 | `presets.<name>.<agent>.skills_remove` | string[] | - | Skill names removed from the effective skills list at config resolution (applies to `agents.<agent>` entries too). Wins over `skills_add`. Folded into `skills` and stripped; see [Skills Assignment](skills.md#adding-or-removing-skills-on-top-of-an-inherited-list) |
+| `presets.<name>.<agent>.skills_include_local` | boolean | `false` | Opt in to automatically grant discovered project skill names. Does not load native host skill content; explicit permission and removal/deny policy still applies. See [Project-local Customization](project-local-customization.md#including-all-project-local-skills-automatically) |
 | `presets.<name>.<agent>.mcps` | string[] | - | MCPs the agent can use (`"*"`, `"!item"`, explicit list) |
 | `presets.<name>.<agent>.options` | object | - | Provider-specific model options passed to the AI SDK (e.g., `textVerbosity`, `thinking` budget) |
-| `agents.<customAgent>.model` | string\|array | - | Required for custom agents inferred from unknown `agents` keys |
+| `agents.<customAgent>.model` | string \| array \| object | - | Model reference, fallback chain, or `{ "dynamic": "selected" }`; required for custom agents unless `inheritModelFrom` is configured |
 | `agents.<customAgent>.prompt` | string | - | Full execution prompt for a custom agent |
 | `agents.<customAgent>.orchestratorPrompt` | string | - | Exact `@agent` block injected into the orchestrator prompt; must start with `@<agent-name>` |
 | `agents.<agent>.permission` | object \| string | - | Tool-level permission rules enforced by the SDK. See [Agent Permissions](#agent-permissions) |
 | `agents.<agent>.mcps` | string[] | - | Plugin MCP allow-list (`"*"`, `"!item"`, explicit list); this is plugin configuration, not a host agent `mcps` field |
+| `agents.<agent>.skills_include_local` | boolean | `false` | Opt in to automatically grant discovered project skill names. Does not load native host skill content; explicit permission and removal/deny policy still applies. See [Project-local Customization](project-local-customization.md#including-all-project-local-skills-automatically) |
 | `agents.<agent>.displayName` | string | - | Custom user-facing alias for the agent in the active config |
 | `agents.<agent>.color` | string | - | Agent display color as `#RRGGBB` or a theme color: `primary`, `secondary`, `accent`, `success`, `warning`, `error`, or `info` |
 | `agents.<agent>.description` | string | generated | Description shown to OpenCode and the orchestrator; defaults to `Custom subagent '<name>'` for custom agents and `Primary orchestrator '<name>'` for primary ones |
@@ -338,8 +354,9 @@ and [Council](council.md) for what remains.
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
 | `disabled_tools` | string[] | `[]` | Slim tool names to disable globally. Disabled Slim tools are not registered with OpenCode and cannot be used by agents; OpenCode built-in tools are not affected |
 | `disabled_skills` | string[] | `[]` | Skill names to disable globally. Disabled skills are not granted to agents, and disabled bundled skills are not registered; listing `reflect` here also disables the `/reflect` command |
+| `skillCommandMode` | `"none"` \| `"full"` \| `"reference"` | `"full"` | Optional root setting for generic skill commands: skip generation, inline the body, or request loading through the skill tool. Per-skill `SKILL.md` frontmatter `slim.command` overrides it. Reload the plugin after changing this setting. See [Skill Slash-Command Mode](#skill-slash-command-mode). |
 | `disabled_hooks` | string[] | `[]` | Hook names to disable globally: `phase-reminder`, `foreground-fallback`, `deepwork-goal`, `chat-headers`, `cache-monitor`, `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch`, `council-inject`, `auto-update-checker`. Either `auto-update-checker` here or `autoUpdate: false` turns the whole update feature off (check, notice, install); the hook entry also keeps the hook off if the feature switch is later re-enabled. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies. See [Hooks](#hooks) |
-| `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `interview`, `implement`, `deepwork`, `reflect`, `preset`, `killall`, `subagent`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. See [Slash Commands](#slash-commands) |
+| `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `interview`, `implement`, `deepwork`, `reflect`, `preset`, `killall`, `subagent`, `queue`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. See [Slash Commands](#slash-commands) |
 | `webfetch.enabled` | boolean | `true` | When `false`, the enhanced `webfetch` is not registered and OpenCode's built-in is used. See [Webfetch](webfetch.md) |
 | `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. On **v2 hosts** the replay path (abort + re-prompt) stays disabled — the v2 `switchModel` has no per-turn/atomic conditional form, so an in-flight replay could commit after a newer user turn has taken over — while the retry-hook steering path runs: host retry events are absorbed up to `fallback.maxRetries`, then the model is switched in place via the host `session.switchModel` and the host retries the current turn on the new model. The same switch disables both paths. |
 | `fallback.maxRetries` | integer | `3` | Number of host retry events Slim absorbs before advancing the foreground model chain. The budget stays spent across model switches. Recovery re-arms it: a completed successful assistant response on v1, or a raw `session.step.ended` with `finish` `stop`, `tool-calls` or `length`, or `session.execution.succeeded` on v2. A confirmed new v1 user turn, an observed return to the configured primary outside our committed fallback for a fresh descent, or session deletion also re-arms it. A new v2 user turn alone does not reset the budget; an explicit model change is recorded so returning to the configured primary can re-arm the descent. Landing on the configured head through a committed fallback does not re-arm this budget, including for inherit+chain agents. Terminal `session.error` and `message.updated` failures advance immediately without charging it. On v1, three distinct consecutive completed, error-free `finish: 'unknown'` messages with verified tool-free parts also trigger request-scoped abort and replay without charging retries. `0` advances on the first retry event. This does not configure OpenCode provider or background subagent retries. |
@@ -354,7 +371,7 @@ and [Council](council.md) for what remains.
 | — | — | — | *Timeouts, retries, and bounded waits are handled by the orchestrator's injected Council Mode procedure (`src/hooks/council-inject/index.ts`); execution modes are no longer configured.* |
 | `interview.enabled` | boolean | `true` | Master switch for the interview subsystem. When `false`, the `/interview` command is not intercepted, the interview server and dashboard never start, and no interview state or output machinery runs; the native host is untouched See [Interview configuration](interview.md). |
 | `interview.maxQuestions` | integer | `2` | Max questions per interview round (1–10) See [Interview configuration](interview.md). |
-| `interview.outputFolder` | string | `"interview"` | Directory where interview markdown files are written relative to the project root; absolute paths and `..` traversal are rejected See [Interview configuration](interview.md). |
+| `interview.outputFolder` | string | `"interview"` | Relative output folder, resolved beneath `.local/` in the project directory (default `.local/interview/`); an existing `.local/` prefix is preserved. Absolute paths and `..` traversal are rejected. Existing project-root files are not automatically moved; see [output folders and existing projects](interview.md#output-folders-and-existing-projects). |
 | `interview.autoOpenBrowser` | boolean | `true` | Automatically open the interview UI in your default browser during interactive runs; suppressed in tests and CI See [Interview configuration](interview.md). |
 | `interview.port` | integer | `0` | Interview server port (0–65535). `0` = OS-assigned random port (per-session mode). Any value > 0 enables [dashboard mode](interview.md#dashboard-mode) See [Interview configuration](interview.md). |
 | `interview.dashboard` | boolean | `false` | Enable [dashboard mode](interview.md#dashboard-mode) on the default port (43211). Setting `port` > 0 also enables dashboard mode. If both are set, `port` takes precedence See [Interview configuration](interview.md). |
@@ -731,10 +748,12 @@ without periodic wake prompts. See the
 [Background Orchestration](background-orchestration.md) guide for the concept,
 defaults, and examples.
 
-`concurrency` limits only native background tasks with
-`task(..., background: true)`. Foreground tasks are unchanged. A task waits
-for admission before OpenCode creates its child session, so queued work does
-not consume a provider request. `0` means unlimited.
+`concurrency` limits only native tasks whose effective mode is background. On v1,
+top-level calls with `background` omitted default to background and managed
+subsessions default to foreground. On v2, the same defaults apply after the
+native tool description/schema update is verified. Explicit values win. A background task waits
+for admission before OpenCode creates its child session, so queued work does not
+consume a provider request. `0` means unlimited.
 
 Only the most specific configured cap applies to a task, matching the
 reference implementation's priority: a model cap for the task's model wins
@@ -798,10 +817,10 @@ Two behaviors to know about when concurrency is enabled:
 `backgroundJobs.continueOnIdle` was removed: it is ignored with a warning and
 its value is not migrated. Use `orchestratorWake.enabled`.
 
-`wallClockTimeoutMs` is a hard deadline that only supervises explicitly
-background native task calls; foreground calls or calls with `background`
-omitted are not supervised. It is independent from OpenCode's external
-task-wait timeout. When it expires, the plugin sends one host session abort —
+`wallClockTimeoutMs` supervises native task calls whose effective mode is
+background, including calls defaulted to background by the managed admission
+hook. Foreground calls are not supervised. It is independent from OpenCode's
+external task-wait timeout. When it expires, the plugin sends one host session abort —
 the same primitive `task_cancel` uses — and the host's own terminal report
 publishes the result; no local terminal is fabricated for the deadline.
 If another control operation holds the child's lease, the watchdog retries
@@ -1018,6 +1037,12 @@ not the latest global default. Captured profiles remain frozen for later turns.
 
 Model selection follows these rules:
 
+- `model: { "dynamic": "selected" }` clears the agent factory's model and
+  fallback chain, leaving the model unset for host session selection. An
+  explicit nonempty agent `variant` is retained; an empty variant is treated as
+  absent, so a variant tied to the cleared factory model is removed. This
+  documents Slim's agent configuration, not native execution behavior across
+  host versions.
 - If the same effective agent override contains both a scalar `model` and
   `inheritModelFrom`, the explicit `model` wins.
 - If `model` is omitted, `inheritModelFrom` is an explicit higher-layer
@@ -1331,11 +1356,73 @@ Keys marked "string or object" accept pattern-based rules (e.g. `bash: { "git st
 When a user supplies `permission` and also uses the `skills` or `mcps` arrays on the same agent, the plugin merges them:
 
 1. **User-supplied `permission` is the base layer.**
-2. **Plugin-generated rules from the `skills` array override `permission.skill`** — the `skills` array is authoritative for skill gating.
+2. **An explicit `skills` array and surviving deliberate `skills_add` entries override `permission.skill`.** This includes an explicit empty base list. Automatic/default grants are not deliberate entries: `skills_add` alone keeps inherited defaults but does not promote them past an explicit ask/deny. Repeating a default name in `skills_add` deliberately selects that grant.
 3. **Plugin-generated rules from the `mcps` array fill the `permission.<mcp>_*` keys you have not set** — an explicit `<mcp>_*` entry in `permission` wins over the `mcps` array.
 4. **User-supplied keys for standard tools** (`edit`, `bash`, `webfetch`, `task`, etc.) survive the merge untouched.
 
-Use the `skills`/`mcps` arrays for skill and MCP gating. Use `permission` for everything else (file access, bash, web, task delegation).
+Automatic defaults and `skills_include_local` cannot override explicit scalar
+`permission.skill: "ask"` / `"deny"` or ordered exact/wildcard skill rules.
+Selection and authorization are separate: an automatically selected local skill
+may remain listed/admitted while permission still requires consent or denies it.
+Removals, exclusions, and disabled skills keep their existing precedence.
+
+Marketplace skill admission comes from the resolved selection, not the final
+authorization effect. A wildcard ask does not admit unselected skills. Later
+explicit native host rules may allow an admitted skill, but package capability
+ceilings still deny unadmitted resources for canonical and display-name agents
+and their child sessions.
+
+Use explicit `skills`/`mcps` arrays for deliberate capability selection and
+`permission.skill` to bound automatic skill grants. Other `permission` keys
+control file access, bash, web, task delegation, and similar tools. Top-level
+scalar `permission` shorthand retains its existing all-tools behavior.
+
+#### Unsupported Integer-Index Skill Identifiers
+
+Exact canonical decimal skill IDs from `0` through `4294967294` are unsupported.
+JavaScript reorders these array-index object keys ahead of other keys, which
+could reverse an ordered permission decision. The plugin rejects them with
+`InvalidSkillPolicyError` before config-layer schema fallback, normalization,
+merging, or permission construction. A bad skill policy rejects the layer/load;
+it is not filtered or dropped to expose a lower wildcard grant. An unrelated
+schema error does not downgrade this rejection into a warning-and-fallback.
+
+The check does not trim or canonicalize inputs beyond each existing intake's
+normalization. Non-index spellings such as `01`, `00`, `-0`, `+1`, `1.0`, `1e2`,
+`4294967295`, and larger non-index strings remain valid.
+
+Actual skill IDs additionally cannot contain the wildcard metacharacters `?`
+or `*` anywhere in the name. This applies to plugin-owned frontmatter and
+registration, marketplace skill dependencies, package/bundled defaults,
+discovered local IDs, and `disabled_skills` (a list of actual IDs). These names
+must not accidentally become permission patterns. Literal IDs containing `!`,
+including `!123`, remain supported: internal selection preserves their identity
+through admission and permission compilation instead of treating them as
+exclusion directives.
+
+Config directive arrays (`skills`, `skills_add`, `skills_remove`) retain their
+existing syntax, including `*`, `?review`, `!blocked`, and supported pattern
+tokens. They interpret one `?` or `!` prefix first, so directive tokens `?123`
+and `!123` are rejected because their target is an integer-index ID. A literal
+`!123` default/discovered ID is distinct from that directive token; no escaping
+or new config keys are introduced. Permission-map keys and native rule resources
+are not prefix-parsed: wildcard patterns such as `*`, `?`, `123*`, `*123`, and
+`123?` remain valid policy syntax, though exact integer-index skill resources
+are rejected. Numeric resources for non-skill actions, such as
+`read: { "123": "deny" }`, are unaffected.
+
+The guard covers plugin policy inputs, plugin-owned skill registration, and
+observed finalized child policies, including exact resources generated during
+compilation. An invalid child policy blocks prompt admission without installing
+an empty/filtered policy, latching success, or substituting registered rules.
+Ordinary transient host-read failures retain their existing fallback behavior.
+
+Host-owned catalogs cannot be universally enumerated or unregistered by this
+plugin. This is not a global restriction on host-native wildcard access to
+unknown or independently registered native/global skill IDs. Policy wildcard
+patterns are not treated as actual-ID registrations. Invalid exact rules or
+selections supplied through the plugin's guarded boundaries are rejected, never
+turned into allows.
 
 ### Hooks
 
@@ -1369,9 +1456,53 @@ Disable built-in commands via `disabled_commands`:
 { "disabled_commands": ["interview", "deepwork"] }
 ```
 
-Available commands: `interview`, `implement`, `deepwork`, `reflect`, `preset`, `killall`, `subagent`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. `/killall` and `/subagent` are TUI commands; `tui: false` removes the whole TUI surface, while `disabled_commands` removes only the named command.
+Available commands: `interview`, `implement`, `deepwork`, `reflect`, `preset`, `killall`, `subagent`, `queue`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. `/killall`, `/subagent`, and `/queue` are TUI commands; `tui: false` removes the whole TUI surface, while `disabled_commands` removes only the named command.
 
 Invalid entries are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies — it is not an explicit empty override.
+
+#### Skill Slash-Command Mode
+
+Set the optional root `skillCommandMode` in your plugin configuration to control
+generic `/<skill-id>` commands:
+
+```json
+{
+  "skillCommandMode": "reference"
+}
+```
+
+The effective default is `full`, which preserves the existing inline body
+template unchanged. `reference` sends an instruction to load and follow the
+exact skill ID using the `skill` tool, then the original arguments in a
+`<user-request>` block, without inlining the skill body. It relies on the model
+and normal tool permissions; it does not guarantee a tool call or bypass a
+denial. `none` skips generic command generation, not skill availability.
+
+To override the global mode for one skill, add a nested `slim.command` field
+to its `SKILL.md` YAML frontmatter, alongside its other metadata:
+
+```yaml
+---
+name: release-review
+description: Review a release plan
+slim:
+  command: reference
+---
+```
+
+Valid overrides are `none`, `full`, and `reference`. Missing or invalid
+overrides inherit the global mode. A per-skill `full` or `reference` override
+can opt in even when the global mode is `none`. Explicit/user/workflow commands,
+collision precedence, `disabled_skills`, and permissions are unchanged.
+
+On V2, the setting covers the plugin's generic bridge for all inventoried
+skills. On V1, it covers only plugin-bundled templates, not the host's native
+non-bundled skill conversion. The global mode is read at startup; reload the
+plugin or restart OpenCode after changing it. V2 resolves per-skill metadata
+on skill/plugin inventory refreshes, using inline metadata or the global mode
+when the skill file cannot be read. See
+[Skill Slash Commands](skills.md#skill-slash-commands) for path handling,
+permission implications, and refresh limits.
 
 ### Multiplexer
 

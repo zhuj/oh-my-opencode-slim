@@ -28,7 +28,7 @@ Each agent is a **prompt-driven specialist** with a factory function that create
 - **Agent colors**: Optional per-agent hex or theme-color overrides; no defaults (colorless agents get the host TUI's distinct palette colors)
 - **Permission wildcards**: Applied via `applyDefaultPermissions()` in `index.ts`
 - **Model resolution**: Supports string models, explicit `inheritModelFrom` policies, and priority-ordered arrays (`_modelArray`) for runtime fallback
-- **Skill permissions**: Per-agent MCP and tool access controlled via `getSkillPermissionsForAgent()`
+- **Skill permissions**: The config projection compiles selection, admission, and authorization together; agent registration and routing summaries consume the same ordered skill rules. Marketplace child policies bound host overrides to admitted capabilities.
 - **Council synthesis**: Uses `createSynthesisOnlyPermission()` to block tool calls while allowing synthesis from councillor responses
 
 ### Pass-local Resolution
@@ -39,6 +39,24 @@ and agent construction arrive through `marketplace.implementation`, loaded by
 the asynchronous composition root only after its existing enabled gate; the
 registry remains synchronous. Permission policies and host precedence do not
 change. Shared capabilities/ID schemas do not load the full manifest graph.
+
+Read-only construction uses `RuntimeConfig.agentProjection()` directly rather
+than cloning the public `agents()` view. Model fallback arrays remain cached
+per config generation. Inference-only construction skips prompt templates and
+base-layer assembly.
+
+### Prompt Layers and Templates
+
+`prompt-layers.ts` prepends one static role, evidence, and output contract to
+constructed agents. Prompts marked with `<!-- slim-prompt-template:v1 -->`
+expand the registered `{{slim.section.*}}` placeholders from
+`prompt-sections.ts`; unmarked prompts remain literal. Unknown or malformed
+section tokens fail with their source. Inline prompts keep precedence over
+replacement files, and append files are rendered separately. Primary agents'
+`agents` section uses the same normalized `subagents` scope as the release's
+routing catalog; an explicit task permission that overrides the scope also
+suppresses that scoped inventory. All sections depend only on configuration
+and host capabilities, keeping construction deterministic.
 
 ### Agent Lifecycle
 
@@ -107,6 +125,7 @@ The council agent is a synthesis-only specialist:
 ### Model Resolution and Fallback
 
 - **Priority arrays**: When `model` is configured as an array in user config, it's stored as `_modelArray`
+- **Selected-model references**: `{ dynamic: "selected" }` clears the factory model and fallback chain, retaining only an explicitly nonempty variant. `firstModelId` shares scalar/array lookup across configuration and factories.
 - **Explicit inheritance**: `inheritModelFrom: "session"` and `"orchestrator"` leave the agent model unset so OpenCode follows the live parent/orchestrator model, including later runtime fallback switches
 - **Runtime fallback**: ForegroundFallbackManager resolves models at runtime when API errors occur; independent specialist chains follow a real parent fallback through v2's per-call model/variant override or v1 prompt-claimed intentions: host state validates new children, while `task_id` and `task_revive` identify resumes; v1 resumes pin the newest valid transcript selection rather than stale session metadata
 - **Preset overrides**: Runtime presets can override model/variant/temperature per agent

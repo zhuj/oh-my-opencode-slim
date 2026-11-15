@@ -1,6 +1,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { stripComments } from 'jsonc-parser';
+import {
+  assertSkillPolicyConfig,
+  InvalidSkillPolicyError,
+} from '../utils/skill-policy-validation';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
 import { COUNCIL_CONFIG_KEYS } from './council-schema';
 import { parseJsonConfigText } from './jsonc';
@@ -462,6 +466,7 @@ export function loadRawPluginConfigFromPath(
       }
       return null;
     }
+    assertSkillPolicyConfig(rawConfig, configPath);
     // Every non-fatal fix is reported the same way: onWarning first, then the
     // console unless this read asked for silence.
     const emitWarning = (
@@ -565,6 +570,7 @@ export function loadRawPluginConfigFromPath(
 
     return layerConfig;
   } catch (error) {
+    if (error instanceof InvalidSkillPolicyError) throw error;
     // File doesn't exist or isn't readable - this is expected and fine
     if (
       error instanceof Error &&

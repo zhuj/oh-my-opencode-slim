@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MarketplacePackageIdSchema } from '../marketplace/id-schema';
+import { SkillCommandModeSchema } from '../skill-command-mode';
 import {
   AGENT_THEME_COLORS,
   DEFAULT_CHILD_INPUT_WAKE_KINDS,
@@ -8,7 +9,7 @@ import {
 import { CouncilConfigSchema } from './council-schema';
 import { ProviderModelIdSchema } from './model-id-schema';
 
-export { ProviderModelIdSchema } from './model-id-schema';
+export { ProviderModelIdSchema };
 
 // Permission schemas — mirror the SDK's PermissionConfig type with shallow
 // validation. Action values are validated; unknown tool keys pass through.
@@ -58,22 +59,28 @@ export const AgentColorSchema = z.union([
 // Agent override configuration (distinct from SDK's AgentConfig)
 export const ModelInheritanceSourceSchema = z.enum(['session', 'orchestrator']);
 
+// Agent configs also accept bare IDs and the legacy dynamic sentinel.
+const AgentModelIdSchema = z
+  .string()
+  .refine((value) => !value.includes('$'), 'Use provider/model[#variant]');
+
 export const AgentOverrideConfigSchema = z
   .object({
     model: z
       .union([
-        z.string(),
+        AgentModelIdSchema,
         z
           .array(
             z.union([
-              z.string(),
+              AgentModelIdSchema,
               z.object({
-                id: z.string(),
+                id: AgentModelIdSchema,
                 variant: z.string().optional(),
               }),
             ]),
           )
           .min(1),
+        z.object({ dynamic: z.enum(['selected']) }),
       ])
       .optional(),
     inheritModelFrom: ModelInheritanceSourceSchema.optional(),
@@ -370,6 +377,10 @@ export const PresetAgentsSchema = z.record(
   AgentOverrideConfigSchema,
 );
 
+/** Dynamic model reference resolved at runtime (e.g. the UI-selected model).
+ *  `dynamic` is an enum so additional strategies can be added later. */
+export type DynamicModelRef = { dynamic: 'selected' };
+
 export type Preset = z.infer<typeof PresetAgentsSchema>;
 
 const MarketplacePackageIdsSchema = z
@@ -495,6 +506,13 @@ export const InterviewOutputFolderSchema = z
   .regex(
     /^(?![\\/])(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/,
     'outputFolder must be a relative path without parent-directory traversal',
+  );
+
+const ResourcePrefixSchema = z
+  .string()
+  .regex(
+    /^(?![\\/])(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/,
+    'resource prefixes must be relative paths without parent-directory traversal',
   );
 
 export const InterviewConfigSchema = z.object({
@@ -1027,6 +1045,7 @@ export const DISABLED_COMMANDS_VALUES = [
   'preset',
   'killall',
   'subagent',
+  'queue',
 ] as const;
 
 export const RawPluginConfigSchema = z
@@ -1037,8 +1056,11 @@ export const RawPluginConfigSchema = z
       .boolean()
       .optional()
       .describe(
-        'Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, update notice). When false, the TUI entry registers nothing and the server records no sidebar state; other server-side features are untouched. Defaults to true.',
+        'Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, /queue, update notice). When false, the TUI entry registers nothing and the server records no sidebar state; other server-side features are untouched. Defaults to true.',
       ),
+    skillCommandMode: SkillCommandModeSchema.optional().describe(
+      'Mode for plugin-generated skill slash commands: "full" (default) inlines the skill body, "reference" asks the skill tool to load the exact skill ID, and "none" omits the generated command. SKILL.md slim.command overrides this value, including when it is "none". Does not disable skills or explicit commands. Reload required for global changes.',
+    ),
     compactSidebar: z
       .boolean()
       .optional()
@@ -1049,7 +1071,7 @@ export const RawPluginConfigSchema = z
       .boolean()
       .optional()
       .describe(
-        'Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When false, the plugin never registers or renders the sidebar and writes no sidebar state; the other OMOS TUI surfaces (/preset, /killall, /subagent, update notice) are unaffected, and the native host sidebar is untouched. Defaults to true.',
+        'Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When false, the plugin never registers or renders the sidebar and writes no sidebar state; the other OMOS TUI surfaces (/preset, /killall, /subagent, /queue, update notice) are unaffected, and the native host sidebar is untouched. Defaults to true.',
       ),
     liveConfigRefresh: z
       .boolean()
@@ -1152,6 +1174,12 @@ export const RawPluginConfigSchema = z
     tmux: z
       .never({ error: 'tmux config was removed; use multiplexer.*' })
       .optional(),
+    resource_prefixes: z
+      .array(ResourcePrefixSchema)
+      .optional()
+      .describe(
+        'Ordered project-local resource roots. Defaults to .local, .local/.slim, and .opencode; [] disables discovery.',
+      ),
   })
   .superRefine((value, ctx) => {
     if (value.agents) {

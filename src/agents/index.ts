@@ -1,8 +1,5 @@
 import type { AgentConfig as SDKAgentConfig } from '@opencode-ai/sdk/v2';
-import {
-  getSkillPermissionsForAgent,
-  summarizeSkillGrants,
-} from '../cli/skills';
+import { summarizeSkillGrants } from '../cli/skills';
 import {
   AGENT_ALIASES,
   type AgentOverrideConfig,
@@ -14,6 +11,11 @@ import {
   SUBAGENT_NAMES,
 } from '../config';
 import { getAgentMcpList } from '../config/agent-mcps';
+import {
+  composeAgentSkillPermissions,
+  type SkillPermissions,
+} from '../config/effective-agent-overrides';
+import { firstModelId, isDynamicModelRef } from '../config/model-sentinel';
 import type { HostAgentConfig, RuntimeConfig } from '../config/runtime';
 import { hostLegacyAgent } from '../config/runtime';
 import { applyOrchestratorModelConfig } from '../config/strip-orchestrator-model';
@@ -43,6 +45,9 @@ import {
   resolvePrompt,
 } from './orchestrator';
 import { mergeTaskStance, TASK_NO_NESTED_DISPATCH } from './permissions';
+import { prependBaseAgentPrompt } from './prompt-layers';
+import { buildPromptSections, type PromptSections } from './prompt-sections';
+import { renderPromptTemplate } from './prompt-template';
 import { type AgentSkillGrants, renderScopedAgentsBlock } from './role-routing';
 import {
   appendObserverDispatchInstruction,
@@ -103,7 +108,7 @@ export function resolvePrimaryModelValue(value: unknown): string | undefined {
 function getPrimaryModelFromOverride(
   override: AgentOverrideConfig | undefined,
 ): string | undefined {
-  return resolvePrimaryModelValue(override?.model);
+  return firstModelId(override?.model);
 }
 
 /**
@@ -177,13 +182,22 @@ function isSafeDisplayName(displayName: string): boolean {
  * and selects its primary entry for ephemeral subagents. The orchestrator leaves
  * config.model unset so its live runtime selection is not overwritten.
  */
-function applyOverrides(
+export function applyOverrides(
   agent: AgentDefinition,
   override: AgentOverrideConfig,
   inferenceOnly = false,
 ): void {
   if (override.model) {
-    if (Array.isArray(override.model)) {
+    if (isDynamicModelRef(override.model)) {
+      // The factory may have received the active preset's primary model.
+      // Dynamic selection must remove that pin and any chain derived from it
+      // so the host can use the session-selected model.
+      delete agent.config.model;
+      delete agent._modelArray;
+      if (!override.variant) {
+        delete agent.config.variant;
+      }
+    } else if (Array.isArray(override.model)) {
       agent._modelArray = override.model.map((m) =>
         typeof m === 'string' ? { id: m } : m,
       );
@@ -298,7 +312,7 @@ export function applyModelInheritanceToConfig(
   /** Pass-local merged agents record, when the caller already derived it. */
   mergedAgents?: Record<string, AgentOverrideConfig>,
 ): void {
-  const overrides = mergedAgents ?? runtime.agents();
+  const overrides = mergedAgents ?? runtime.agentProjection().agents;
   for (const agentName of Object.keys(configAgent)) {
     const override = getOverrideFromAgents(overrides, agentName);
     if (!override) continue;
@@ -433,7 +447,11 @@ export function resolveAgentInference<T extends Record<string, unknown>>(
     if (models[0].variant) result.variant = models[0].variant;
   }
   if (override) {
-    if (typeof override.model === 'string') result.model = override.model;
+    if (isDynamicModelRef(override.model)) {
+      delete result.model;
+      if (override.variant === undefined) delete result.variant;
+    } else if (typeof override.model === 'string')
+      result.model = override.model;
     else if (Array.isArray(override.model) && override.model.length > 0) {
       const first = override.model[0];
       result.model = typeof first === 'string' ? first : first.id;
@@ -481,7 +499,7 @@ export function projectAgentRuntimeState(input: {
   // One merged-override derivation for the whole pass. The sidebar probe,
   // the inheritance pass, and the profile loop below all read this
   // pass-local copy so `agents()` is never re-derived per agent.
-  const mergedAgents = runtime.agents();
+  const mergedAgents = runtime.agentProjection().agents;
 
   // 1. Array-primary pass. One `modelArrays` derivation per pass; the
   // sidebar chain-head probe below reuses this pass-local copy instead of
@@ -709,20 +727,65 @@ function normalizeSubagentScope(
   return [...known];
 }
 
+interface PromptResolutionInputs {
+  readonly agentName: string;
+  readonly inlinePrompt: string | undefined;
+  readonly filePrompt: string | undefined;
+  readonly fallbackPrompt: string;
+  readonly appendPrompt: string | undefined;
+  readonly sections: PromptSections;
+}
+
+function resolvePromptWithSections(inputs: PromptResolutionInputs): string {
+  const prompt = renderPromptTemplate(
+    resolvePrompt(
+      inputs.agentName,
+      inputs.inlinePrompt,
+      inputs.filePrompt,
+      inputs.fallbackPrompt,
+    ),
+    inputs.sections,
+    `${inputs.agentName}.md`,
+  );
+  if (inputs.appendPrompt === undefined) return prompt;
+
+  const appendPrompt = renderPromptTemplate(
+    inputs.appendPrompt,
+    inputs.sections,
+    `${inputs.agentName}_append.md`,
+  );
+  return `${prompt}\n\n${appendPrompt}`;
+}
+
+interface CustomAgentDefinitionInputs {
+  readonly name: string;
+  readonly override: AgentOverrideConfig;
+  readonly filePrompt: string | undefined;
+  readonly fileAppendPrompt: string | undefined;
+  readonly fallbackModel: string | undefined;
+  readonly promptSections: PromptSections;
+  readonly catalogBlock?: string;
+}
+
 function buildCustomAgentDefinition(
-  name: string,
-  override: AgentOverrideConfig,
-  filePrompt?: string,
-  fileAppendPrompt?: string,
-  fallbackModel?: string,
-  catalogBlock?: string,
+  inputs: CustomAgentDefinitionInputs,
 ): AgentDefinition {
+  const {
+    name,
+    override,
+    filePrompt,
+    fileAppendPrompt,
+    fallbackModel,
+    promptSections,
+    catalogBlock,
+  } = inputs;
   // A declared primary orchestrates (delegates); a plain custom agent is a
   // specialist and must not spawn nested work (task-rejection stance).
   const isPrimary = override.primary === true;
   const defaultPrompt = isPrimary
     ? `You are ${name}, a primary orchestrator. Plan, delegate to your specialists, monitor, and reconcile their results.${catalogBlock ? `\n\n${catalogBlock}` : ''}`
     : appendTaskRejectionInstruction(`You are the ${name} specialist.`);
+
   const primaryModel = getPrimaryModelFromOverride(override);
   const description =
     override.description ??
@@ -736,38 +799,16 @@ function buildCustomAgentDefinition(
     ...(isPrimary ? { primary: true } : {}),
     config: {
       model: primaryModel ?? fallbackModel ?? DEFAULT_MODELS.oracle,
-      prompt: resolvePrompt(
-        name,
-        override.prompt,
+      prompt: resolvePromptWithSections({
+        agentName: name,
+        inlinePrompt: override.prompt,
         filePrompt,
-        defaultPrompt,
-        fileAppendPrompt,
-      ),
+        fallbackPrompt: defaultPrompt,
+        appendPrompt: fileAppendPrompt,
+        sections: promptSections,
+      }),
     },
   } as AgentDefinition;
-}
-
-/**
- * Final `permission.skill` record for an agent: user-authored skill rules
- * first, then the resolved grants (which own `'*'` and every named grant).
- * Shared by the enforced permissions and the orchestrator's routing lines.
- */
-function resolveSkillRules(
-  agentName: string,
-  permission: unknown,
-  configuredSkills?: readonly string[],
-  disabledSkills?: readonly string[],
-): Record<string, 'ask' | 'allow' | 'deny'> {
-  const existing =
-    typeof permission === 'object' && permission !== null
-      ? (permission as { skill?: unknown }).skill
-      : undefined;
-  return {
-    ...(typeof existing === 'object'
-      ? (existing as Record<string, 'ask' | 'allow' | 'deny'>)
-      : {}),
-    ...getSkillPermissionsForAgent(agentName, configuredSkills, disabledSkills),
-  };
 }
 
 /**
@@ -784,7 +825,7 @@ function resolveSkillRules(
  */
 function applyDefaultPermissions(
   agent: AgentDefinition,
-  configuredSkills?: readonly string[],
+  compiledSkills?: SkillPermissions,
   disabledSkills?: readonly string[],
   hostFlavor?: string,
   isPrimary = false,
@@ -807,6 +848,13 @@ function applyDefaultPermissions(
   // restriction (issue #1591).
   const grantable = (toolName: string) =>
     isPrimary || !ORCHESTRATOR_GUARDED_TOOL_NAMES.has(toolName);
+  const skillPermissions =
+    compiledSkills ??
+    composeAgentSkillPermissions(
+      agent.name,
+      { permission: existing },
+      { disabledSkills },
+    );
 
   // Subagents don't ask the human by default: a parked child question
   // has no headless answerer. Explicit config wins.
@@ -883,13 +931,7 @@ function applyDefaultPermissions(
     interview_submit_state: interviewSubmitPermission,
     wait_for_user: waitForUserPerm,
     ...marketplacePermissions,
-    // Apply skill permissions as nested object under 'skill' key
-    skill: resolveSkillRules(
-      agent.name,
-      existing,
-      configuredSkills,
-      disabledSkills,
-    ),
+    skill: { ...skillPermissions },
   } as SDKAgentConfig['permission'];
 }
 
@@ -989,7 +1031,7 @@ function createAgentViews(
   // Native delegation vocabulary for the host flavor ('v2' → subagent/agent,
   // v1/default → task/subagent_type). Construction-time constant — cache-safe.
   const vocab = delegationVocabulary(options?.hostFlavor);
-  const mergedAgents = runtime.agents();
+  const { agents: mergedAgents, skillPermissions } = runtime.agentProjection();
   const disabled = new Set(runtime.disabledAgents);
   // Skill grants as the routing block shows them: same resolver as the
   // enforced permissions, so the orchestrator never briefs a skill the
@@ -999,12 +1041,11 @@ function createAgentViews(
       names.flatMap((name) => {
         const override = getOverrideFromAgents(mergedAgents, name);
         if (typeof override?.permission === 'string') return [];
-        const rules = resolveSkillRules(
-          name,
-          override?.permission,
-          override?.skills,
-          runtime.disabledSkills,
-        );
+        const rules =
+          skillPermissions[name] ??
+          composeAgentSkillPermissions(name, override ?? {}, {
+            disabledSkills: runtime.disabledSkills,
+          });
         return [[name, summarizeSkillGrants(rules)]];
       }),
     );
@@ -1025,6 +1066,31 @@ function createAgentViews(
   if (disabled.has('council')) {
     disabled.add('councillor');
   }
+
+  let defaultPromptSections: PromptSections | undefined;
+  const getPromptSections = (scope?: readonly string[]): PromptSections => {
+    if (scope === undefined && defaultPromptSections) {
+      return defaultPromptSections;
+    }
+    const sections = buildPromptSections({
+      agentNames:
+        scope ??
+        [
+          'orchestrator',
+          ...Object.keys(SUBAGENT_FACTORIES),
+          ...runtime.customAgentNames,
+          ...Object.keys(runtime.acpAgents),
+        ].filter(
+          (name) => !disabled.has(name) && SAFE_AGENT_ALIAS_RE.test(name),
+        ),
+      wakeSchedulerEnabled:
+        options?.hostFlavor !== 'v2' &&
+        runtime.backgroundJobsEnabled &&
+        runtime.backgroundJobs.orchestratorWake.enabled,
+    });
+    if (scope === undefined) defaultPromptSections = sections;
+    return sections;
+  };
 
   const primaryModel = runtime.primaryModel;
   const orchestratorOverride = getOverrideFromAgents(
@@ -1053,13 +1119,7 @@ function createAgentViews(
         mergedAgents,
         'explorer',
       )?.model;
-      let explorerModel: string | undefined;
-      if (Array.isArray(explorerOverride)) {
-        const first = explorerOverride[0];
-        explorerModel = typeof first === 'string' ? first : first?.id;
-      } else {
-        explorerModel = explorerOverride;
-      }
+      const explorerModel = firstModelId(explorerOverride);
       return (
         explorerModel ?? primaryModel ?? (DEFAULT_MODELS.explorer as string)
       );
@@ -1120,13 +1180,14 @@ function createAgentViews(
         ),
       );
 
-      agent.config.prompt = resolvePrompt(
-        name,
+      agent.config.prompt = resolvePromptWithSections({
+        agentName: name,
         inlinePrompt,
-        customPrompts.prompt,
-        defaultPrompt,
-        customPrompts.appendPrompt,
-      );
+        filePrompt: customPrompts.prompt,
+        fallbackPrompt: defaultPrompt,
+        appendPrompt: customPrompts.appendPrompt,
+        sections: getPromptSections(),
+      });
       if (name === 'council') {
         // resolvePrompt above may have replaced the generated prompt with
         // an inline or council.md override; re-apply the idempotent
@@ -1261,23 +1322,25 @@ function createAgentViews(
     }
 
     return [
-      buildCustomAgentDefinition(
+      buildCustomAgentDefinition({
         name,
         override,
-        customPrompts.prompt,
-        customPrompts.appendPrompt,
+        filePrompt: customPrompts.prompt,
+        fileAppendPrompt: customPrompts.appendPrompt,
         fallbackModel,
-        scope && !explicitTask
-          ? renderScopedAgentsBlock(
-              scope,
-              Object.fromEntries(
-                scope.map((n) => [n, mergedAgents[n]?.description]),
-              ),
-              disabled,
-              skillGrants(scope),
-            )
-          : undefined,
-      ),
+        promptSections: getPromptSections(scope && explicitTask ? [] : scope),
+        catalogBlock:
+          scope && !explicitTask
+            ? renderScopedAgentsBlock(
+                scope,
+                Object.fromEntries(
+                  scope.map((n) => [n, mergedAgents[n]?.description]),
+                ),
+                disabled,
+                skillGrants(scope),
+              )
+            : undefined,
+      }),
     ];
   });
 
@@ -1330,7 +1393,7 @@ function createAgentViews(
     if (!inferenceOnly) {
       applyDefaultPermissions(
         agent,
-        override?.skills,
+        skillPermissions[agent.name],
         runtime.disabledSkills,
         options?.hostFlavor,
       );
@@ -1347,7 +1410,7 @@ function createAgentViews(
     if (!inferenceOnly) {
       applyDefaultPermissions(
         agent,
-        override?.skills,
+        skillPermissions[agent.name],
         runtime.disabledSkills,
         options?.hostFlavor,
         override?.primary === true,
@@ -1419,7 +1482,7 @@ function createAgentViews(
   // DEFAULT_MODELS.orchestrator is undefined; model is resolved via override or
   // left unset so the runtime chat.message hook can pick it from _modelArray.
   const orchestratorModel =
-    orchestratorOverride?.model ?? DEFAULT_MODELS.orchestrator;
+    firstModelId(orchestratorOverride?.model) ?? DEFAULT_MODELS.orchestrator;
   const orchestratorPrompts = loadAgentPrompt('orchestrator', {
     preset: runtime.preset,
     projectDirectory: options?.projectDirectory,
@@ -1481,13 +1544,16 @@ function createAgentViews(
 
   const inlineOrchestratorPrompt = orchestratorOverride?.prompt;
   if (!inferenceOnly) {
-    orchestrator.config.prompt = resolvePrompt(
-      'orchestrator',
-      inlineOrchestratorPrompt,
-      orchestratorPrompts.prompt,
-      orchestrator.config.prompt ?? '',
-      orchestratorPrompts.appendPrompt,
-    );
+    orchestrator.config.prompt = resolvePromptWithSections({
+      agentName: 'orchestrator',
+      inlinePrompt: inlineOrchestratorPrompt,
+      filePrompt: orchestratorPrompts.prompt,
+      fallbackPrompt: orchestrator.config.prompt ?? '',
+      appendPrompt: orchestratorPrompts.appendPrompt,
+      sections: getPromptSections(
+        orchestratorScope && orchestratorExplicitTask ? [] : orchestratorScope,
+      ),
+    });
   } else if (
     inlineOrchestratorPrompt !== undefined &&
     orchestratorPrompts.prompt !== undefined
@@ -1507,7 +1573,7 @@ function createAgentViews(
   if (!inferenceOnly) {
     applyDefaultPermissions(
       orchestrator,
-      orchestratorOverride?.skills,
+      skillPermissions.orchestrator,
       runtime.disabledSkills,
       options?.hostFlavor,
       true,
@@ -1670,6 +1736,12 @@ function createAgentViews(
 
   orchestrator.config.prompt = updatedPrompt;
 
+  if (!inferenceOnly) {
+    for (const agent of [orchestrator, ...allSubAgents]) {
+      agent.config.prompt = prependBaseAgentPrompt(agent.config.prompt ?? '');
+    }
+  }
+
   return [orchestrator, ...allSubAgents];
 }
 
@@ -1697,8 +1769,8 @@ export function getAgentConfigsFromDefinitions(
 ): Record<string, SDKAgentConfig> {
   // One merged-override derivation for the whole projection pass: every
   // agent's MCP list reads this pass-local copy instead of re-deriving
-  // `runtime.agents()` per agent.
-  const mergedAgents = runtime.agents();
+  // `runtime.agentProjection().agents` per agent.
+  const mergedAgents = runtime.agentProjection().agents;
   // Primary agents: the canonical orchestrator plus any custom agent the
   // user explicitly marked with `primary: true`. Classified from the
   // definition flag (set only by custom-agent construction), never from

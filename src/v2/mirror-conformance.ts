@@ -211,6 +211,9 @@ type _sessionUpdatePermissions = Expect<
     ? true
     : false
 >;
+type _permissionHookSurface = Expect<
+  PermissionDomain extends { readonly hook: unknown } ? true : false
+>;
 /** The hand-mirrored rule element must equal the official element exactly —
  * mirror-side drift fails typecheck here too. */
 type _permissionRuleMirrorPinned = Expect<

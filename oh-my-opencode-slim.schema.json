@@ -9,15 +9,24 @@
       "type": "boolean"
     },
     "tui": {
-      "description": "Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, update notice). When false, the TUI entry registers nothing and the server records no sidebar state; other server-side features are untouched. Defaults to true.",
+      "description": "Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, /queue, update notice). When false, the TUI entry registers nothing and the server records no sidebar state; other server-side features are untouched. Defaults to true.",
       "type": "boolean"
+    },
+    "skillCommandMode": {
+      "description": "Mode for plugin-generated skill slash commands: \"full\" (default) inlines the skill body, \"reference\" asks the skill tool to load the exact skill ID, and \"none\" omits the generated command. SKILL.md slim.command overrides this value, including when it is \"none\". Does not disable skills or explicit commands. Reload required for global changes.",
+      "type": "string",
+      "enum": [
+        "none",
+        "full",
+        "reference"
+      ]
     },
     "compactSidebar": {
       "description": "Use the compact TUI sidebar layout. Defaults to true; set false to use the expanded layout.",
       "type": "boolean"
     },
     "sidebar": {
-      "description": "Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When false, the plugin never registers or renders the sidebar and writes no sidebar state; the other OMOS TUI surfaces (/preset, /killall, /subagent, update notice) are unaffected, and the native host sidebar is untouched. Defaults to true.",
+      "description": "Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When false, the plugin never registers or renders the sidebar and writes no sidebar state; the other OMOS TUI surfaces (/preset, /killall, /subagent, /queue, update notice) are unaffected, and the native host sidebar is untouched. Defaults to true.",
       "type": "boolean"
     },
     "liveConfigRefresh": {
@@ -87,6 +96,20 @@
                               }
                             ]
                           }
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "dynamic": {
+                              "type": "string",
+                              "enum": [
+                                "selected"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "dynamic"
+                          ]
                         }
                       ]
                     },
@@ -344,6 +367,20 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "dynamic": {
+                                "type": "string",
+                                "enum": [
+                                  "selected"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "dynamic"
+                            ]
                           }
                         ]
                       },
@@ -533,6 +570,20 @@
                           }
                         ]
                       }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "dynamic": {
+                          "type": "string",
+                          "enum": [
+                            "selected"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "dynamic"
+                      ]
                     }
                   ]
                 },
@@ -751,6 +802,20 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "dynamic": {
+                                "type": "string",
+                                "enum": [
+                                  "selected"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "dynamic"
+                            ]
                           }
                         ]
                       },
@@ -937,6 +1002,20 @@
                           }
                         ]
                       }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "dynamic": {
+                          "type": "string",
+                          "enum": [
+                            "selected"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "dynamic"
+                      ]
                     }
                   ]
                 },
@@ -1129,6 +1208,20 @@
                     }
                   ]
                 }
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "dynamic": {
+                    "type": "string",
+                    "enum": [
+                      "selected"
+                    ]
+                  }
+                },
+                "required": [
+                  "dynamic"
+                ]
               }
             ]
           },
@@ -1339,7 +1432,7 @@
       }
     },
     "disabled_commands": {
-      "description": "Slash-command names to disable completely. Valid values: implement, interview, deepwork, reflect, preset, killall, subagent. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
+      "description": "Slash-command names to disable completely. Valid values: implement, interview, deepwork, reflect, preset, killall, subagent, queue. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
       "type": "array",
       "items": {
         "type": "string",
@@ -1350,7 +1443,8 @@
           "reflect",
           "preset",
           "killall",
-          "subagent"
+          "subagent",
+          "queue"
         ]
       }
     },
@@ -1873,7 +1967,7 @@
           },
           "wrapperModel": {
             "type": "string",
-            "pattern": "^[^/\\s]+\\/.+$"
+            "description": "Provider-qualified model reference: provider/model[#variant]. The first slash separates the provider; remaining slashes and all colons belong to the model ID. Only # separates the variant."
           },
           "timeoutMs": {
             "default": 0,
@@ -1917,6 +2011,14 @@
     },
     "tmux": {
       "not": {}
+    },
+    "resource_prefixes": {
+      "description": "Ordered project-local resource roots. Defaults to .local, .local/.slim, and .opencode; [] disables discovery.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+      }
     }
   },
   "title": "oh-my-opencode-slim",

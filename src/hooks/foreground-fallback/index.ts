@@ -1552,8 +1552,8 @@ export class ForegroundFallbackManager {
 
   constructor(
     /**
-     * Ordered fallback chains per agent.
-     * e.g. { orchestrator: ['anthropic/claude-opus-4-5', 'openai/gpt-4o'] }
+     * Ordered fallback chains per agent. Entries accept legacy
+     * `[provider/]model[#variant]`, with literal model colons.
      * Scan from the head, skipping tried models and providers abandoned by
      * this session or its parent.
      */
@@ -2452,6 +2452,13 @@ export class ForegroundFallbackManager {
       const selected = this.selectFallbackModel(sessionID, error);
       if (!selected || selected === 'exhausted') return;
       const { agentName, nextModel, ref, variant } = selected;
+      if (!ref.providerID) {
+        log('[foreground-fallback] fallback model requires a provider', {
+          sessionID,
+          nextModel,
+        });
+        return;
+      }
       picked = nextModel;
       detail = { agentName, variant };
       switchRequest = switchModel(sessionID, {
@@ -2638,19 +2645,20 @@ export class ForegroundFallbackManager {
         }));
       if (!agent || !this.isCurrentTurn(sessionID, epoch)) return;
       const current = isRecord(data.model) ? data.model : undefined;
+      const currentModelID = current?.modelID ?? current?.id;
       const failure =
         noRouteModel(error.message) ??
         (typeof current?.providerID === 'string' &&
-        typeof current.id === 'string'
-          ? `${current.providerID}/${current.id}`
+        typeof currentModelID === 'string'
+          ? `${current.providerID}/${currentModelID}`
           : this.sessionModel.get(sessionID));
       const ref = failure ? parseModelReference(failure) : undefined;
-      const model = ref
+      const model = ref?.providerID
         ? {
             providerID: ref.providerID,
             id: ref.modelID,
             ...(current?.providerID === ref.providerID &&
-            current.id === ref.modelID &&
+            currentModelID === ref.modelID &&
             typeof current.variant === 'string'
               ? { variant: current.variant }
               : {}),
@@ -2734,7 +2742,7 @@ export class ForegroundFallbackManager {
           step.model !== undefined &&
           (!isRecord(current) ||
             current.providerID !== step.model.providerID ||
-            current.id !== step.model.id ||
+            (current.modelID ?? current.id) !== step.model.id ||
             (current.variant ?? 'default') !==
               (step.model.variant ?? 'default')))
       )
@@ -3549,7 +3557,7 @@ export class ForegroundFallbackManager {
     // Never charge the budget for a model reference that cannot replay, but
     // block the promise until a retryable error with a good model arrives.
     const ref = parseModelReference(currentModel);
-    if (!ref) {
+    if (!ref?.providerID) {
       this.deterministicTerminal.add(sessionID);
       return;
     }
@@ -3626,26 +3634,31 @@ export class ForegroundFallbackManager {
       } else {
         this.retryAttempt.delete(sessionID);
       }
-      const variant = agentName
-        ? this.pinnedChains(sessionID)
-            [agentName]?.map((entry) =>
-              typeof entry === 'string' ? { id: entry } : entry,
-            )
-            .find((entry) => entry.id === currentModel)?.variant
-        : undefined;
+      const variant =
+        (agentName
+          ? this.pinnedChains(sessionID)
+              [agentName]?.map((entry) =>
+                typeof entry === 'string' ? { id: entry } : entry,
+              )
+              .find((entry) => entry.id === currentModel)?.variant
+          : undefined) ?? ref.variant;
       log('[foreground-fallback] same-model retry', {
         sessionID,
         model: currentModel,
         attempt: tried + 1,
         remaining: this.maxRetries - tried - 1,
       });
-      const delivered = await this.replayWithModel(sessionID, ref, {
-        agentName,
-        ...(variant ? { variant } : {}),
-        trailerText: SAME_MODEL_RETRY_TRAILER,
-        epoch: opts.epoch,
-        charged,
-      });
+      const delivered = await this.replayWithModel(
+        sessionID,
+        { providerID: ref.providerID, modelID: ref.modelID },
+        {
+          agentName,
+          ...(variant ? { variant } : {}),
+          trailerText: SAME_MODEL_RETRY_TRAILER,
+          epoch: opts.epoch,
+          charged,
+        },
+      );
       this.restoreDeterministicTerminal(
         sessionID,
         opts.epoch,
@@ -3861,7 +3874,8 @@ export class ForegroundFallbackManager {
       });
       return;
     }
-    const variant = entries.find((entry) => entry.id === nextModel)?.variant;
+    const variant =
+      entries.find((entry) => entry.id === nextModel)?.variant ?? ref.variant;
     return { agentName, currentModel, nextModel, ref, variant };
   }
 
@@ -3908,6 +3922,17 @@ export class ForegroundFallbackManager {
         this.sessionAgent.get(sessionID) ??
         (await this.ensureSessionAgent(sessionID));
       if (!agentName || !this.isCurrentTurn(sessionID, expectedEpoch)) return;
+      if (!ref.providerID) {
+        log('[foreground-fallback] fallback model requires a provider', {
+          sessionID,
+          nextModel,
+        });
+        return;
+      }
+      const fallbackModel = {
+        providerID: ref.providerID,
+        modelID: ref.modelID,
+      };
 
       // Confirm there is a user turn before sending the replay reminder.
       // Fence captured BEFORE any await in the preparation: a board
@@ -4009,7 +4034,7 @@ export class ForegroundFallbackManager {
               "<system-reminder>\nThe previous model request failed and is being retried with a fallback model. Continue processing the user's original request above. Do not respond to this reminder.\n</system-reminder>",
             ),
           ],
-          model: ref,
+          model: fallbackModel,
           ...(variant ? { variant } : {}),
           agent: agentName,
         },

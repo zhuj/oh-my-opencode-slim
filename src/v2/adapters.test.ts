@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createReadOnlyAgentPermission } from '../agents/permissions';
 import { PermissionConfigSchema } from '../config/schema';
+import { createGetSessionIdTool } from '../tools/get-session-id';
 import { createWebfetchTool } from '../tools/smartfetch/tool';
 import {
   adaptPermissions,
@@ -39,6 +40,22 @@ describe('parseModelRef', () => {
     });
   });
 
+  test('preserves nested model paths and a final variant suffix', () => {
+    expect(parseModelRef('openrouter/openai/gpt-5.6-sol#high')).toEqual({
+      providerID: 'openrouter',
+      id: 'openai/gpt-5.6-sol',
+      variant: 'high',
+    });
+  });
+
+  test('keeps colons literal when parsing a qualified reference', () => {
+    expect(parseModelRef('openrouter/openai/gpt-5.6-sol:free#high')).toEqual({
+      providerID: 'openrouter',
+      id: 'openai/gpt-5.6-sol:free',
+      variant: 'high',
+    });
+  });
+
   test('undefined for non-string', () => {
     expect(parseModelRef(undefined)).toBeUndefined();
     expect(parseModelRef(42)).toBeUndefined();
@@ -46,6 +63,7 @@ describe('parseModelRef', () => {
 
   test('undefined when no provider separator', () => {
     expect(parseModelRef('claude')).toBeUndefined();
+    expect(parseModelRef('claude#high')).toBeUndefined();
   });
 
   test('undefined for degenerate slashes', () => {
@@ -437,6 +455,33 @@ describe('applyAgentToDraft', () => {
     });
   });
 
+  test('preserves an inline variant when config has no variant', () => {
+    const { draft, calls } = recorder();
+    applyAgentToDraft(draft, 'a', {
+      model: 'anthropic/claude#inline',
+    });
+
+    expect(calls[0].agent.model).toEqual({
+      id: 'claude',
+      providerID: 'anthropic',
+      variant: 'inline',
+    });
+  });
+
+  test('explicit config variant overrides the inline variant', () => {
+    const { draft, calls } = recorder();
+    applyAgentToDraft(draft, 'a', {
+      model: 'anthropic/claude#inline',
+      variant: 'configured',
+    });
+
+    expect(calls[0].agent.model).toEqual({
+      id: 'claude',
+      providerID: 'anthropic',
+      variant: 'configured',
+    });
+  });
+
   test('omits an unspecified temperature from request settings', () => {
     const { draft, calls } = recorder();
     applyAgentToDraft(draft, 'a', {});
@@ -605,5 +650,26 @@ describe('applyAgentToDraft', () => {
     );
     expect(toolsAllowIdx).toBeGreaterThanOrEqual(0);
     expect(denyIdx).toBeGreaterThan(toolsAllowIdx); // deny wins under findLast
+  });
+});
+
+describe('adaptTool', () => {
+  test('passes the v2 invocation session ID to the v1 tool', async () => {
+    const { get_session_id } = createGetSessionIdTool();
+    const adapted = adaptTool('get_session_id', get_session_id, '/project', {
+      type: 'object',
+      properties: {},
+    });
+    const execute = adapted.execute;
+    if (typeof execute !== 'function') {
+      throw new Error('adapted tool has no execute function');
+    }
+
+    const result = await Reflect.apply(execute, undefined, [
+      {},
+      { sessionID: 'opaque/v2 session' },
+    ]);
+
+    expect(result).toEqual({ content: 'opaque/v2 session' });
   });
 });

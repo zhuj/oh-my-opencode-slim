@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { parse } from 'jsonc-parser';
 import type { PluginConfig } from '../config';
 import { loadPluginConfig } from '../config/loader';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   buildPresetSummary,
   clearProjectPresetOnDisk,
@@ -33,7 +33,7 @@ beforeEach(() => {
   previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
   previousOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
   previousPresetEnv = process.env.OH_MY_OPENCODE_SLIM_PRESET;
-  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-preset-switch-'));
+  tempDir = createTmpDir();
   process.env.XDG_DATA_HOME = tempDir;
   process.env.XDG_CONFIG_HOME = path.join(tempDir, 'xdg-config');
   delete process.env.OPENCODE_CONFIG_DIR;
@@ -69,7 +69,7 @@ afterEach(() => {
     process.env.OH_MY_OPENCODE_SLIM_PRESET = previousPresetEnv;
   }
 
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeTmpDir(tempDir);
 });
 
 test('lists inherited presets without writing ancestor project configs', () => {

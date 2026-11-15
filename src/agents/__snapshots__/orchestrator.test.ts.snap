@@ -137,8 +137,8 @@ don't stall on decisions you can make and revisit.
 - After dispatching, do non-overlapping work, then end the turn with a one-line
   launch summary; completion notifications resume you.
 - Don't echo task lists or notification contents back to the user.
-- Set \`model\` only when the user asks; look up IDs with the models tool
-  first.
+- Set \`model\` when the user or delegation instructions select a model or
+  variant; look up IDs with the models tool first.
 
 ## File operations
 - Prefer dedicated file tools for code work: glob/grep for discovery, read

@@ -89,20 +89,58 @@ export function sessionAbortFailure(result: unknown): string | null {
   return null;
 }
 
-/**
- * Parse a model reference string into provider and model IDs.
- * @param model - Model string in format "provider/model"
- * @returns Object with providerID and modelID, or null if invalid
- */
+export interface ParsedModelReference {
+  readonly providerID?: string;
+  readonly modelID: string;
+  readonly variant?: string;
+}
+
+const MODEL_REFERENCE_METADATA_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/** Parse `[provider/]model[#variant]`, preserving model slashes and colons. */
 export function parseModelReference(
   model: string,
-): { providerID: string; modelID: string } | null {
-  const slashIndex = model.indexOf('/');
-  if (slashIndex <= 0 || slashIndex >= model.length - 1) {
+): ParsedModelReference | null {
+  if (model.length === 0 || model.trim() !== model || model.includes('$')) {
     return null;
   }
+
+  const providerDelimiter = model.indexOf('/');
+  const variantDelimiter = model.indexOf('#');
+
+  if (
+    variantDelimiter !== model.lastIndexOf('#') ||
+    (providerDelimiter >= 0 &&
+      variantDelimiter >= 0 &&
+      providerDelimiter > variantDelimiter)
+  ) {
+    return null;
+  }
+
+  const providerID =
+    providerDelimiter >= 0 ? model.slice(0, providerDelimiter) : undefined;
+  const modelStart = providerDelimiter >= 0 ? providerDelimiter + 1 : 0;
+  const modelEnd = variantDelimiter >= 0 ? variantDelimiter : model.length;
+  const modelID = model.slice(modelStart, modelEnd);
+  const variant =
+    variantDelimiter >= 0 ? model.slice(variantDelimiter + 1) : undefined;
+
+  if (
+    (providerID !== undefined &&
+      !MODEL_REFERENCE_METADATA_PATTERN.test(providerID)) ||
+    (variant !== undefined &&
+      !MODEL_REFERENCE_METADATA_PATTERN.test(variant)) ||
+    modelID.length === 0 ||
+    modelID
+      .split('/')
+      .some((segment) => segment.length === 0 || segment.trim() !== segment)
+  ) {
+    return null;
+  }
+
   return {
-    providerID: model.slice(0, slashIndex),
-    modelID: model.slice(slashIndex + 1),
+    ...(providerID ? { providerID } : {}),
+    modelID,
+    ...(variant ? { variant } : {}),
   };
 }

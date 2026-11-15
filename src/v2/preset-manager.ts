@@ -1277,7 +1277,11 @@ function inheritedModelRef(
 ): string {
   const model = ownPresetValue(resolveBaseAgents(run, base), agentName)?.model;
   const first = Array.isArray(model) ? model[0] : model;
-  return typeof first === 'string' ? first : (first?.id ?? '');
+  return typeof first === 'string'
+    ? first
+    : first && 'id' in first
+      ? first.id
+      : '';
 }
 
 async function pickModel(

@@ -2,8 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { readPluginConfigSnapshot } from './snapshot';
 
 let tempDir: string;
@@ -26,7 +26,7 @@ function writeUserConfig(content: unknown, extension = '.json'): string {
 }
 
 beforeEach(() => {
-  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-snapshot-'));
+  tempDir = createTmpDir();
   userConfigDir = path.join(tempDir, 'xdg-config', 'opencode');
   projectDir = path.join(tempDir, 'project');
   fs.mkdirSync(userConfigDir, { recursive: true });
@@ -39,7 +39,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const spy of spies.splice(0)) spy.mockRestore();
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeTmpDir(tempDir);
   for (const key of Object.keys(process.env)) {
     if (!(key in originalEnv)) delete process.env[key];
   }

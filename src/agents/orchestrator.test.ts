@@ -6,6 +6,7 @@ import {
   buildOrchestratorPrompt,
   createOrchestratorAgent,
 } from './orchestrator';
+import { prependBaseAgentPrompt } from './prompt-layers';
 import { ROLE_ROUTING_SLIM_LINES } from './role-routing';
 
 const v1 = (options = {}) => buildOrchestratorPrompt(options);
@@ -38,6 +39,12 @@ describe('orchestrator prompt: host vocabulary', () => {
     for (const prompt of [v1(), v2()]) {
       expect(prompt).not.toContain('task_result');
     }
+  });
+
+  test('v2 follows model selections from the user or delegation instructions', () => {
+    expect(v2()).toContain('user or delegation instructions select');
+    expect(v2()).toContain('look up IDs with the models tool');
+    expect(v1()).not.toContain('models tool');
   });
 
   test('unknown flavors render the v1 vocabulary', () => {
@@ -319,11 +326,13 @@ describe('createAgents orchestrator prompt gates', () => {
       const prompt = agents.find((a) => a.name === 'orchestrator')?.config
         .prompt as string;
       expect(prompt).toBe(
-        buildOrchestratorPrompt({
-          disabledAgents: new Set(['observer', 'council', 'councillor']),
-          agentSkills: { oracle: 'simplify, requesting-code-review' },
-          hostFlavor,
-        }),
+        prependBaseAgentPrompt(
+          buildOrchestratorPrompt({
+            disabledAgents: new Set(['observer', 'council', 'councillor']),
+            agentSkills: { oracle: 'simplify, requesting-code-review' },
+            hostFlavor,
+          }),
+        ),
       );
     }
   });

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { createAgents } from '../agents';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { discoverProjectLocalSkillNames } from './project-skills';
 import { RuntimeConfig } from './runtime';
 import { PluginConfigSchema } from './schema';
@@ -10,9 +10,7 @@ import { PluginConfigSchema } from './schema';
 const tempDirs: string[] = [];
 
 function makeProject(): string {
-  const projectDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'omo-local-skills-'),
-  );
+  const projectDir = createTmpDir();
   tempDirs.push(projectDir);
   return projectDir;
 }
@@ -34,7 +32,7 @@ function writeSkill(
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     RuntimeConfig.reset(dir);
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });
 
@@ -42,7 +40,13 @@ describe('discoverProjectLocalSkillNames', () => {
   test('includes ancestor skills above Git boundaries without siblings or duplicates', () => {
     const workspace = makeProject();
     const repository = path.join(workspace, 'repository');
-    const worktree = path.join(repository, '.slim', 'worktrees', 'feature');
+    const worktree = path.join(
+      repository,
+      '.local',
+      '.slim',
+      'worktrees',
+      'feature',
+    );
     fs.mkdirSync(path.join(repository, '.git'), { recursive: true });
     fs.mkdirSync(worktree, { recursive: true });
     fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: ignored-fixture');

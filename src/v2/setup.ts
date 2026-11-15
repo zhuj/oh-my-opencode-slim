@@ -204,7 +204,7 @@ export function createCommandRegistration(
         await submit(
           invocation?.sessionID ?? '',
           wrapCommandMarker(name, invocation?.prompt?.text ?? ''),
-          ...(invocation?.prompt?.files ? [invocation.prompt.files] : []),
+          ...(invocation?.prompt?.files ? [[...invocation.prompt.files]] : []),
         );
       } catch (err) {
         log('[v2] command submit failed', { name, err: String(err) });

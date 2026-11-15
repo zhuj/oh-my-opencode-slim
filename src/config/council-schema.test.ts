@@ -47,6 +47,67 @@ describe('CouncillorConfigSchema', () => {
       ]);
     }
   });
+
+  test('accepts qualified references with nested paths and literal model colons', () => {
+    const model = 'gateway/team/model:2026:high';
+
+    const result = CouncillorConfigSchema.safeParse({ model });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.model).toBe(model);
+    }
+  });
+
+  test('preserves canonical fallback references and variant precedence', () => {
+    const primary = 'openai/team/gpt-5.6:2026#fast';
+    const fallback = 'anthropic/claude/family:opus#thinking';
+
+    const result = CouncillorConfigSchema.safeParse({
+      model: [primary, { id: fallback, variant: 'max' }],
+      variant: 'shared',
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.model).toBe(primary);
+      expect(result.data.models).toEqual([
+        { id: primary, variant: 'shared' },
+        { id: fallback, variant: 'max' },
+      ]);
+    }
+  });
+
+  test('rejects providerless model references in every chain shape', () => {
+    const models = [
+      'gpt-5.6#high',
+      ['openai/gpt-5.6', 'gpt-5.6'],
+      ['openai/gpt-5.6', { id: 'gpt-5.6#high', variant: 'max' }],
+    ];
+
+    for (const model of models) {
+      const result = CouncillorConfigSchema.safeParse({ model });
+
+      expect(result.success).toBe(false);
+    }
+  });
+
+  test('rejects malformed model reference delimiters', () => {
+    const models = [
+      'openai//gpt-5.6',
+      'openai/gpt-5.6/',
+      'openai/gpt-5.6#',
+      'openai/team/gpt-5.6#high#extra',
+      'openai$$team/gpt-5.6#high',
+      'openai$team/gpt-5.6##high',
+    ];
+
+    for (const model of models) {
+      const result = CouncillorConfigSchema.safeParse({ model });
+
+      expect(result.success).toBe(false);
+    }
+  });
 });
 
 test('preset with legacy "master" key is rejected', () => {

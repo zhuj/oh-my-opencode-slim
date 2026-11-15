@@ -1,12 +1,13 @@
 import { describe, expect, spyOn, test } from 'bun:test';
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createV1RemainingContextTokensReader } from '../hooks/rules-context-usage';
 import { isUserMessageWithParts } from '../hooks/types';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { classifyTerminalEvidence } from '../utils/child-transcript';
 import { createInternalAgentTextPart } from '../utils/internal-initiator';
 import { buildPluginInput } from './client-shim';
+import { createModelListSnapshot } from './model-list-shim';
 import type { V2Context } from './types';
 
 function makeCtx(overrides?: Partial<V2Context['session']>): V2Context {
@@ -524,7 +525,7 @@ describe('v2 client shim delegation', () => {
     expect(historyCalls).toBe(0);
   });
 
-  test('promptAsync switches model then steers when body.model present', async () => {
+  test('promptAsync switches model with its variant then steers', async () => {
     const seq: Array<{ m: string; i: unknown }> = [];
     const input = buildPluginInput(
       makeCtx({
@@ -544,7 +545,11 @@ describe('v2 client shim delegation', () => {
     ).session.promptAsync({
       path: { id: 'ses_1' },
       body: {
-        model: { providerID: 'anthropic', modelID: 'claude-x' },
+        model: {
+          providerID: 'anthropic',
+          modelID: 'claude-x',
+          variant: 'high',
+        },
         agent: 'orchestrator',
         parts: [
           { type: 'text', text: 'retry me' },
@@ -556,7 +561,11 @@ describe('v2 client shim delegation', () => {
       m: 'switchModel',
       i: {
         sessionID: 'ses_1',
-        model: { id: 'claude-x', providerID: 'anthropic' },
+        model: {
+          id: 'claude-x',
+          providerID: 'anthropic',
+          variant: 'high',
+        },
       },
     });
     // NOTE: assert `text` outside toMatchObject — Bun v1.4.0's
@@ -567,6 +576,45 @@ describe('v2 client shim delegation', () => {
       i: { sessionID: 'ses_1', delivery: 'steer' },
     });
     expect((seq[1].i as { text: string }).text).toContain('retry me');
+  });
+
+  test('promptAsync preserves an explicit model variant through switchModel', async () => {
+    const switchModels: unknown[] = [];
+    const input = buildPluginInput(
+      makeCtx({
+        switchModel: async (args: unknown) => {
+          switchModels.push(args);
+        },
+        prompt: async () => ({}),
+      } as never),
+    );
+
+    await (
+      input.client as {
+        session: { promptAsync: (args: unknown) => Promise<unknown> };
+      }
+    ).session.promptAsync({
+      path: { id: 'ses_1' },
+      body: {
+        model: {
+          providerID: 'openrouter',
+          modelID: 'openai/gpt-5.6-sol:free',
+          variant: 'max',
+        },
+        parts: [{ type: 'text', text: 'retry me' }],
+      },
+    });
+
+    expect(switchModels).toEqual([
+      {
+        sessionID: 'ses_1',
+        model: {
+          providerID: 'openrouter',
+          id: 'openai/gpt-5.6-sol:free',
+          variant: 'max',
+        },
+      },
+    ]);
   });
 
   test('promptAsync without a body model prompts directly', async () => {
@@ -1309,6 +1357,77 @@ describe('v2 client shim delegation', () => {
     expect(input.serverUrl).toBeUndefined();
   });
 
+  test('preserves active/project directories and provides reader evidence from transcript and provider list', async () => {
+    const snapshot = createModelListSnapshot();
+    snapshot.capture({
+      provider: {
+        list: () => [
+          {
+            provider: { id: 'p' },
+            models: new Map([['m', { limit: { context: 4096 } }]]),
+          },
+        ],
+      },
+    });
+    const shim = buildPluginInput(
+      {
+        ...makeCtx({
+          context: async () => [
+            {
+              id: 'assistant-1',
+              type: 'assistant',
+              tokens: { input: 1200 },
+              model: { providerID: 'p', id: 'm' },
+              content: [],
+            },
+          ],
+        } as never),
+        location: {
+          directory: '/active',
+          project: { id: 'project', directory: '/project-root' },
+        },
+      } as V2Context,
+      undefined,
+      snapshot,
+    );
+    expect(shim.directory).toBe('/active');
+    expect(shim.project).toEqual({ id: 'project', directory: '/project-root' });
+    const client = shim.client as {
+      session: { messages: (arg: unknown) => Promise<unknown> };
+      provider: { list: () => Promise<unknown> };
+    };
+    const reader = createV1RemainingContextTokensReader(
+      (id) => client.session.messages({ sessionID: id }),
+      client.provider.list,
+    );
+    await expect(reader('s')).resolves.toBe(2896);
+  });
+
+  test('reader returns null when v2 usage or model limit evidence is absent', async () => {
+    const snapshot = createModelListSnapshot();
+    snapshot.capture({
+      provider: {
+        list: () => [{ provider: { id: 'p' }, models: new Map([['m', {}]]) }],
+      },
+    });
+    const shim = buildPluginInput(
+      makeCtx({
+        context: async () => [{ id: 'a', type: 'assistant', content: [] }],
+      } as never),
+      undefined,
+      snapshot,
+    );
+    const client = shim.client as {
+      session: { messages: (arg: unknown) => Promise<unknown> };
+      provider: { list: () => Promise<unknown> };
+    };
+    const reader = createV1RemainingContextTokensReader(
+      (id) => client.session.messages({ sessionID: id }),
+      client.provider.list,
+    );
+    await expect(reader('s')).resolves.toBeNull();
+  });
+
   test('location falls back to cwd with a global project', () => {
     const ctx = makeCtx({});
     delete (ctx as { location?: unknown }).location;
@@ -1896,9 +2015,7 @@ describe('v2 client shim degradation notices (one-time per process)', () => {
     // reconciliation disable-notice test). The subprocess also gives the
     // shim's module-level one-time guards a fresh process — exactly the
     // "per plugin process" contract under test.
-    const logDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'omos-client-shim-log-'),
-    );
+    const logDir = createTmpDir();
     const workerSource = `
       const { buildPluginInput } = await import(
         process.env.SHIM_MODULE_URL
@@ -1962,7 +2079,7 @@ describe('v2 client shim degradation notices (one-time per process)', () => {
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
-    await fs.rm(logDir, { recursive: true, force: true });
+    removeTmpDir(logDir);
     if (exitCode !== 0) {
       console.error(stderr);
       expect(exitCode).toBe(0);
@@ -2040,3 +2157,57 @@ describe('experimental_v2 model domain threading', () => {
     ).toBeUndefined();
   });
 });
+describe('v2 client shim live model list', () => {
+  test('model.list prefers live ctx.model.list, falling back to the snapshot', async () => {
+    // Given a captured draft snapshot plus a working live model source
+    const snapshot = createModelListSnapshot();
+    snapshot.capture({
+      provider: {
+        list: () => [
+          {
+            provider: { id: 'p' },
+            models: new Map([['snapshot-model', { enabled: true }]]),
+          },
+        ],
+      },
+    });
+    const liveList = async () => ({
+      location: { directory: '/workspace' },
+      data: [{ id: 'p/live-model', modelID: 'live-model', providerID: 'p' }],
+    });
+    const input = buildPluginInput(makeCtx(), undefined, snapshot, liveList);
+
+    // When the live source resolves, its fresh host-filtered rows win
+    const list = modelListOf(input);
+    expect(typeof list).toBe('function');
+    if (typeof list !== 'function') return;
+    expect(await list()).toEqual({
+      data: [{ provider: 'p', id: 'live-model' }],
+    });
+
+    // When a live source rejects, the setup-time snapshot rows take over
+    const failingInput = buildPluginInput(
+      makeCtx(),
+      undefined,
+      snapshot,
+      async () => {
+        throw new Error('model list unavailable');
+      },
+    );
+    const failingList = modelListOf(failingInput);
+    expect(typeof failingList).toBe('function');
+    if (typeof failingList !== 'function') return;
+    expect(await failingList()).toEqual({
+      data: [{ provider: 'p', id: 'snapshot-model' }],
+    });
+  });
+});
+
+type ModelListCall = (input?: unknown) => Promise<unknown>;
+
+function modelListOf(
+  input: Record<string, unknown>,
+): ModelListCall | undefined {
+  return (input.client as { model?: { list?: ModelListCall } } | undefined)
+    ?.model?.list;
+}

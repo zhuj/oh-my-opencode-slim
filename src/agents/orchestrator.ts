@@ -131,8 +131,8 @@ ${agentsBlock}${agentSkills ? `\n\n${AGENT_SKILLS_NOTE}` : ''}
   const delegateTool = v2 ? 'subagent' : 'task';
 
   const modelLine = v2
-    ? `- Set \`model\` only when the user asks; look up IDs with the models tool
-  first.
+    ? `- Set \`model\` when the user or delegation instructions select a model or
+  variant; look up IDs with the models tool first.
 `
     : '';
 

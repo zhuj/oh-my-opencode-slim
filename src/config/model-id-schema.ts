@@ -1,15 +1,17 @@
 import { z } from 'zod';
+import { parseModelReference } from '../utils/session';
 
 /**
- * A provider ID followed by a nonempty, verbatim model remainder.
- *
- * Providers cannot contain slashes or whitespace. Model remainders may contain
- * spaces and additional slashes because provider adapters may expose nested or
- * human-readable model names.
+ * Shared provider-qualified reference boundary for configuration consumers.
  */
 export const ProviderModelIdSchema = z
   .string()
-  .regex(
-    /^[^/\s]+\/.+$/,
-    'Expected provider/model format (provider/.../model)',
+  .refine(
+    (value) => parseModelReference(value)?.providerID !== undefined,
+    'Expected a provider-qualified model reference',
+  )
+  .describe(
+    'Provider-qualified model reference: provider/model[#variant]. ' +
+      'The first slash separates the provider; remaining slashes and all ' +
+      'colons belong to the model ID. Only # separates the variant.',
   );

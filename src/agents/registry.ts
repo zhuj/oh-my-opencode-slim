@@ -1,11 +1,15 @@
 import type { AgentConfig as SDKAgentConfig } from '@opencode-ai/sdk/v2';
-import { getSkillPermissionsForAgent } from '../cli/skills';
 import {
   AGENT_ALIASES,
   type AgentOverrideConfig,
   loadAgentPrompt,
 } from '../config';
 import { parseList } from '../config/agent-mcps';
+import type {
+  EffectiveAgentProjection,
+  SkillAdmission,
+  SkillPermissions,
+} from '../config/effective-agent-overrides';
 import { resolvePreset } from '../config/presets';
 import type { HostConfigSnapshot, RuntimeConfig } from '../config/runtime';
 import { hostLegacyAgent } from '../config/runtime';
@@ -21,6 +25,10 @@ import type {
 } from '../marketplace/registry-runtime';
 import type { MarketplaceSkillRequirements } from '../marketplace/skills';
 import { normalizeAgentName } from '../utils/agent-variant';
+import {
+  assertSkillPolicyConfig,
+  assertSkillRules,
+} from '../utils/skill-policy-validation';
 import { adaptPermissions, v1PermKeyToV2 } from '../v2/adapters';
 import {
   compilePermissionPolicy,
@@ -218,8 +226,8 @@ function permissionEffect(
   if (typeof permission === 'string') {
     return permission === 'allow' || permission === 'ask' ? permission : 'deny';
   }
-  const direct = permission[key];
-  const wildcard = permission['*'];
+  const direct = Object.hasOwn(permission, key) ? permission[key] : undefined;
+  const wildcard = Object.hasOwn(permission, '*') ? permission['*'] : undefined;
   if (direct === 'deny' || direct === 'ask' || direct === 'allow') {
     return direct;
   }
@@ -279,10 +287,10 @@ function nativeEditPermission(
 function projectMarketplacePermission(
   existing: Record<string, unknown>,
   tools: readonly string[],
-  skills: readonly string[],
+  skills: { admission: SkillAdmission; permissions: SkillPermissions },
   mcps: readonly string[],
   availableMcps: readonly string[],
-): Record<string, unknown> {
+): Record<string, unknown> & { skill: SkillPermissions } {
   const projected: Record<string, unknown> = { '*': 'deny' };
   for (const tool of MARKETPLACE_TOOL_NAMES) projected[tool] = 'deny';
   for (const tool of tools) {
@@ -315,35 +323,42 @@ function projectMarketplacePermission(
       declaredExternal as Record<string, unknown>,
     );
   }
-  const existingSkills = existing.skill;
-  const grants = getSkillPermissionsForAgent('__marketplace__', skills);
-  const wildcard = grants['*'] === 'allow';
-  const skillPermissions: Record<string, unknown> = {
-    '*': wildcard
-      ? existingSkills === undefined
-        ? permissionEffect(existing, 'skill')
-        : permissionEffect(
-            existingSkills as Record<string, unknown> | string,
-            '*',
-          )
-      : 'deny',
-    ...(wildcard && existingSkills && typeof existingSkills === 'object'
-      ? clone(existingSkills as Record<string, unknown>)
-      : {}),
+  // Admission is a capability ceiling, not an authorization effect. Keep the
+  // ordered policy (including ask followed by a deliberate allow) in baseline
+  // rules, then clip it and host overrides to the selected skill language.
+  const skillPolicy = compilePermissionPolicy({
+    baselineRules: Object.entries(skills.permissions).map(
+      ([resource, effect]) => ({ action: 'skill', resource, effect }),
+    ),
+    hostRules: adaptPermissions({
+      skill: existing.skill ?? permissionEffect(existing, 'skill'),
+    }).filter(
+      (rule): rule is V2PermissionRule =>
+        rule.effect === 'allow' ||
+        rule.effect === 'ask' ||
+        rule.effect === 'deny',
+    ),
+    ceilings: {
+      defaultEffect: 'allow',
+      actions: { skill: 'allow' },
+      namespaces: [],
+      resources: { skill: skills.admission },
+    },
+  });
+  const skillPermissions: Record<string, 'allow' | 'ask' | 'deny'> = {
+    '*': 'deny',
   };
-  for (const [skill, effect] of Object.entries(grants)) {
-    if (skill === '*') continue;
-    skillPermissions[skill] =
-      effect === 'deny'
-        ? 'deny'
-        : existingSkills === undefined
-          ? permissionEffect(existing, 'skill')
-          : permissionEffect(
-              existingSkills as Record<string, unknown> | string,
-              skill,
-            );
+  for (const rule of skillPolicy.rules) {
+    if (rule.action !== 'skill') continue;
+    // SDK permission maps must retain the last occurrence's rule order.
+    delete skillPermissions[rule.resource];
+    Object.defineProperty(skillPermissions, rule.resource, {
+      value: rule.effect,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
-  projected.skill = skillPermissions;
   const allowedMcps = new Set(mcps);
   for (const name of availableMcps) {
     const key = `${name.replace(/[^a-zA-Z0-9_-]/g, '_')}_*`;
@@ -351,7 +366,7 @@ function projectMarketplacePermission(
       ? permissionEffect(existing, key)
       : 'deny';
   }
-  return projected;
+  return { ...projected, skill: skillPermissions };
 }
 
 /**
@@ -372,7 +387,7 @@ const EXTERNAL_DIRECTORY_GUARD_FLOOR: readonly V2PermissionRule[] = [
 
 function marketplacePermissionCeilings(
   tools: readonly string[],
-  skills: readonly string[],
+  admission: SkillAdmission,
   mcps: readonly string[],
 ): PermissionCeilings {
   const actions: Record<string, 'allow' | 'deny'> = {
@@ -391,8 +406,7 @@ function marketplacePermissionCeilings(
       actions[tool] = 'allow';
     }
   }
-  const grants = getSkillPermissionsForAgent('__marketplace__', skills);
-  const permitted = Object.values(grants).includes('allow');
+  const permitted = Object.values(admission).includes('allow');
   actions.skill = permitted ? 'allow' : 'deny';
   const namespaces = mcps.map(
     (name) => `${name.replace(/[^a-zA-Z0-9_-]/g, '_')}_*`,
@@ -404,7 +418,7 @@ function marketplacePermissionCeilings(
     ...(permitted
       ? {
           resources: {
-            skill: { ...grants },
+            skill: { ...admission },
           },
         }
       : {}),
@@ -539,9 +553,9 @@ function denyCeilingTail(
  * Whether a permission resource pattern covers a same-action declared
  * target (literal or pattern). Mirrors the host matcher for the shapes the
  * plugin emits: slash normalization, `?`, `*`, and trailing ` <space>*`.
- * Used only to place declared exceptions behind their deny, never to
- * evaluate access. A misjudged cover only misplaces an exception earlier —
- * fail-closed by the tail's monotonicity.
+ * Containment must hold for every target variant: a trailing ` *` matches
+ * both the bare prefix and its subcommands. Host bounding uses this to pick
+ * an authoritative cover, so accepting only one variant could widen access.
  */
 function resourcePatternCovers(cover: string, target: string): boolean {
   const normalizedCover = cover.replaceAll('\\', '/');
@@ -550,7 +564,7 @@ function resourcePatternCovers(cover: string, target: string): boolean {
     if (!pattern.endsWith(' *') || pattern.endsWith(' **')) return [pattern];
     return [pattern.slice(0, -2), pattern];
   };
-  return variants(normalizedTarget).some((targetVariant) =>
+  return variants(normalizedTarget).every((targetVariant) =>
     variants(normalizedCover).some((coverVariant) =>
       globContains(coverVariant, targetVariant),
     ),
@@ -753,8 +767,8 @@ function boundGrantByHost(
       );
     }
   }
-  // A denied grant only matters for the host's allow exceptions inside it.
-  if (effect === 'deny' && !tail.some((rule) => rule.effect === 'allow'))
+  // A denied grant still carries host allow/ask exceptions inside it.
+  if (effect === 'deny' && tail.every((rule) => rule.effect === 'deny'))
     return [];
   return [{ ...grant, effect }, ...tail];
 }
@@ -812,7 +826,7 @@ function finalizeAgentPolicy(input: {
   readonly permission: Record<string, unknown>;
   readonly sourcePermission: Record<string, unknown>;
   readonly tools: readonly string[];
-  readonly skills: readonly string[];
+  readonly skillAdmission: SkillAdmission;
   readonly mcps: readonly string[];
   readonly hostRules: readonly V2PermissionRule[];
   readonly packageMetadata: MarketplaceAgentMetadata | undefined;
@@ -825,7 +839,7 @@ function finalizeAgentPolicy(input: {
     permission,
     sourcePermission,
     tools,
-    skills,
+    skillAdmission,
     mcps,
     hostRules,
     packageMetadata,
@@ -852,7 +866,7 @@ function finalizeAgentPolicy(input: {
     ? baselineRules.filter((rule) => rule.action !== 'read')
     : baselineRules;
   const ceilings = packageMetadata
-    ? marketplacePermissionCeilings(tools, skills, mcps)
+    ? marketplacePermissionCeilings(tools, skillAdmission, mcps)
     : undefined;
   return {
     baselineRules,
@@ -955,6 +969,9 @@ export function buildResolvedAgentRegistry(
   runtime: RuntimeConfig,
   options: RegistryBuildOptions,
 ): ResolvedAgentRegistry {
+  assertSkillPolicyConfig(options.hostSnapshot, 'host registry configuration');
+  for (const rules of Object.values(options.nativePermissionsByAgent ?? {}))
+    assertSkillRules(rules, 'native agent permissions');
   const host = clone(options.hostSnapshot);
   const nativeRules = clone(options.nativePermissionsByAgent ?? {});
   // Populated when marketplace agents are constructed (before line-order
@@ -977,7 +994,7 @@ export function buildResolvedAgentRegistry(
   // reads these hoisted copies instead of re-deriving per agent. The
   // marketplace-defaults flavor (`agents(marketplaceSkillDefaults)`) stays a
   // separate derivation for package capability folds.
-  const runtimeAgentOverrides = runtime.agents();
+  const runtimeAgentOverrides = runtime.agentProjection().agents;
   const modelArrays = runtime.modelArrays;
   let definitions = options.definitions
     ? clone(options.definitions)
@@ -993,6 +1010,7 @@ export function buildResolvedAgentRegistry(
   }
   const marketplaceMetadata = new Map<string, MarketplaceAgentMetadata>();
   let marketplaceSkillDefaults: Record<string, readonly string[]> = {};
+  let marketplaceProjection: EffectiveAgentProjection | undefined;
   let marketplacePackages: MarketplaceLivePackage[] = [];
   let marketplaceRequiredSkills: MarketplaceSkillRequirements[] = [];
   if (options.marketplace?.selectedPackageIds.length) {
@@ -1049,13 +1067,15 @@ export function buildResolvedAgentRegistry(
         metadata.capabilities.skills,
       ]),
     );
+    const packageProjection = runtime.agentProjection(marketplaceSkillDefaults);
+    marketplaceProjection = packageProjection;
     const admittedNames = new Set(
       constructed.agents.map((agent) => agent.name),
     );
     // A config key matching an admitted marketplace agent is an owner
     // override; the package definition replaces the custom one, so
     // `primary` cannot apply (marketplace agents are never primary, #1591).
-    const ownerAgents = runtime.agents();
+    const ownerAgents = runtime.agentProjection().agents;
     for (const name of admittedNames) {
       if (
         customOwnerNames.has(name) &&
@@ -1111,7 +1131,7 @@ export function buildResolvedAgentRegistry(
     }
     const marketplaceAgents = constructed.agents.map((sourceAgent) => {
       const agent = clone(sourceAgent);
-      const owner = runtimeAgentOverrides[agent.name];
+      const owner = packageProjection.agents[agent.name];
       const hostOwner = host.agent?.[agent.name];
       const displayName =
         (typeof hostOwner?.displayName === 'string'
@@ -1244,10 +1264,21 @@ export function buildResolvedAgentRegistry(
     (name) =>
       isMcpEnabled(mcpConfig[name]) && !runtime.disabledMcps.includes(name),
   );
-  const configuredAgents = runtime.agents(marketplaceSkillDefaults);
+  const selectableMcpSet = new Set(selectableMcpNames);
+  const selectableMcpNamespaces =
+    marketplaceMetadata.size > 0
+      ? new Map(
+          selectableMcpNames.map((name) => [
+            name,
+            name.replace(/[^a-zA-Z0-9_-]/g, '_'),
+          ]),
+        )
+      : undefined;
+  const projection = marketplaceProjection ?? runtime.agentProjection();
+  const configuredAgents = projection.agents;
   const preset = resolvedPreset(runtime);
   const overrideFor = (name: string) =>
-    lookupWithAliases(runtimeAgentOverrides, name);
+    lookupWithAliases(configuredAgents, name);
   const hostEntries = host.agent ?? {};
   const finalAgentConfig: Record<string, unknown> = clone(hostEntries);
 
@@ -1499,6 +1530,7 @@ export function buildResolvedAgentRegistry(
     // policy ceilings below.
     let packageTools: readonly string[] = [];
     let packageSkills: readonly string[] = [];
+    let packageSkillAdmission: SkillAdmission = {};
     let packageMcps: readonly string[] = [];
     if (packageMetadata) {
       const requestedTools = finalEntry.tools as
@@ -1507,21 +1539,23 @@ export function buildResolvedAgentRegistry(
       packageTools = packageMetadata.capabilities.tools.filter(
         (tool) => requestedTools?.[tool] !== false,
       );
-      packageSkills = [
-        ...(configuredAgents[name]?.skills ??
-          packageMetadata.capabilities.skills),
-        ...runtime.disabledSkills.map((skill) => `!${skill}`),
-      ];
+      packageSkillAdmission = projection.skillAdmission[name];
+      packageSkills = Object.entries(packageSkillAdmission)
+        .filter(([key, effect]) => key !== '*' || effect === 'allow')
+        .map(([key, effect]) => (effect === 'allow' ? key : `!${key}`));
       const requestedMcps =
         configuredAgents[name]?.mcps ?? packageMetadata.capabilities.mcps;
-      const selectableMcpSet = new Set(selectableMcpNames);
       packageMcps = parseList(requestedMcps, selectableMcpNames).filter(
         // A `*` expansion must not brick the registry over an MCP the user
         // never named: drop wildcard-only picks with ambiguous namespaces
         // (fail closed). Explicitly named ones still throw below.
         (mcp) =>
           requestedMcps.includes(mcp) ||
-          ambiguousMcpNamespaces([mcp], selectableMcpSet).length === 0,
+          ambiguousMcpNamespaces(
+            [mcp],
+            selectableMcpSet,
+            selectableMcpNamespaces,
+          ).length === 0,
       );
       const displayHostName = definition.displayName
         ? normalizeAgentName(definition.displayName)
@@ -1531,7 +1565,11 @@ export function buildResolvedAgentRegistry(
       if (Array.isArray(hostMcps)) {
         packageMcps = narrowCapabilities(packageMcps, hostMcps as string[]);
       }
-      const ambiguous = ambiguousMcpNamespaces(packageMcps, selectableMcpSet);
+      const ambiguous = ambiguousMcpNamespaces(
+        packageMcps,
+        selectableMcpSet,
+        selectableMcpNamespaces,
+      );
       if (ambiguous.length > 0) {
         throw new Error(
           `Marketplace agent '${name}' has ambiguous MCP namespaces: ` +
@@ -1551,13 +1589,33 @@ export function buildResolvedAgentRegistry(
         packageTools.map((tool) => [tool, true]),
       );
       finalEntry.mcps = packageMcps;
-      permission = projectMarketplacePermission(
-        sourcePermission,
+      const hostPermission = normalizePermission(
+        (
+          hostEntries[name] ??
+          hostEntries[displayHostName] ??
+          hostLegacyAgent(hostEntries, name)
+        )?.permission,
+      );
+      const ownerPermission = configuredAgents[name]?.permission;
+      const projected = projectMarketplacePermission(
+        {
+          ...sourcePermission,
+          skill:
+            hostPermission.skill ??
+            hostPermission['*'] ??
+            (typeof ownerPermission === 'string'
+              ? ownerPermission
+              : projection.skillPermissions[name]),
+        },
         packageTools,
-        packageSkills,
+        {
+          admission: packageSkillAdmission,
+          permissions: projection.skillPermissions[name],
+        },
         packageMcps,
         availableMcpNames,
       );
+      permission = projected;
     }
     finalEntry.permission = permission;
     const visibleNativeRules = definition.displayName
@@ -1574,14 +1632,20 @@ export function buildResolvedAgentRegistry(
       permission,
       sourcePermission,
       tools: packageTools,
-      skills: packageSkills,
+      skillAdmission: packageSkillAdmission,
       mcps: packageMcps,
       hostRules: hostRuleSet,
       packageMetadata,
     });
     childPolicyConstraints[name] = ceilings;
     policyMap[name] = policy;
-    childDenyCeilings[name] = denyCeilingTail(baselineRules);
+    // Marketplace skill admission already bounds child capabilities. Replaying
+    // authorization denials would defeat later host allows inside admission.
+    childDenyCeilings[name] = denyCeilingTail(
+      packageMetadata
+        ? baselineRules.filter((rule) => rule.action !== 'skill')
+        : baselineRules,
+    );
     finalAgentConfig[name] = clone(finalEntry);
     sdk[name] = clone(finalEntry) as SDKAgentConfig & Record<string, unknown>;
   }
@@ -1689,7 +1753,10 @@ export function buildResolvedAgentRegistry(
         visiblePermission = projectMarketplacePermission(
           visiblePermission,
           visibleTools,
-          visibleSkills,
+          {
+            admission: projection.skillAdmission[definition.name],
+            permissions: projection.skillPermissions[definition.name],
+          },
           cappedMcps,
           availableMcpNames,
         );
@@ -1720,14 +1787,20 @@ export function buildResolvedAgentRegistry(
         permission: visiblePermission,
         sourcePermission: sourceVisiblePermission,
         tools: visibleTools,
-        skills: visibleSkills,
+        skillAdmission: packageMetadata
+          ? projection.skillAdmission[definition.name]
+          : {},
         mcps: cappedMcps,
         hostRules: visibleRules,
         packageMetadata,
       });
       childPolicyConstraints[display] = ceilings;
       policyMap[display] = policy;
-      childDenyCeilings[display] = denyCeilingTail(baselineRules);
+      childDenyCeilings[display] = denyCeilingTail(
+        packageMetadata
+          ? baselineRules.filter((rule) => rule.action !== 'skill')
+          : baselineRules,
+      );
       if (definition.name === 'orchestrator') {
         appendMarketplaceRouting(
           { orchestrator: visibleConfig },

@@ -30,7 +30,7 @@ The config system follows a layered architecture:
 | `CouncilConfig` | Multi-LLM council configuration with councillor presets and a default preset | council-schema.ts |
 | `MultiplexerConfig` | Unified pane management configuration (tmux/zellij) | schema.ts |
 | `AgentMcpPolicy` | Per-agent default MCP lists and wildcard/exclusion parsing | agent-mcps.ts |
-| `ProviderModelIdSchema` | Zod schema enforcing `provider/model` ID format (provider segment excludes slashes/whitespace) | model-id-schema.ts |
+| `ProviderModelIdSchema` | Shared provider-qualified model reference validation; nested slashes and colons remain part of the model ID, and `#` separates the variant | model-id-schema.ts |
 | Preset resolver | Preset normalization, layered merge (`mergePresetMaps`), and depth-first named-preset resolution (`resolvePresets` atomic, `PresetResolutionError` on unresolvable refs) | presets.ts |
 | `discoverProjectLocalSkillNames` | Current and ancestor `.opencode/skills` discovery from `SKILL.md` frontmatter names, symlink-confined to each location | project-skills.ts |
 | `getProjectConfigDirectories` | Shared host-aware `.opencode` walk: worktree-bounded on v1, root-bounded on v2, disabled by the host's project-config flag | loader.ts |
@@ -50,6 +50,24 @@ reads; uncached `loadPluginConfig` stays available.
 Shared JSONC parsing, locked atomic editing and path lookup live in `jsonc.ts`,
 `json-file.ts` and `paths.ts`, not the CLI. The full Marketplace manifest is not
 an eager config dependency: package-ID validation comes from `id-schema.ts`.
+
+`RuntimeConfig.agentProjection()` caches one deep-frozen product containing
+merged agent overrides, skill selections, capability admission, and ordered
+permission rules. Config reseeds, runtime preset changes, and supplemental
+project skill registration invalidate it along with model-array and fallback
+chain projections. Public `agents()` reads return independent mutable copies;
+marketplace-specific defaults use a separate uncached projection. Host model
+and permission snapshots remain separate inputs to final agent registration.
+Skill policy validation runs before accepting plugin or host config, local
+skill IDs, and registration candidates; cloning preserves own prototype-named
+rules without changing the object prototype.
+
+`project-resource-paths.ts` resolves ordered `resource_prefixes` within the
+project boundary. `project-skills.ts` retains native discovery and separately
+collects supplemental candidates; host-owned roots and skill identities win
+collisions. `project-skill-host-adapter.ts` maps admitted candidates to native
+V1 paths or V2 skill records, while `v1-native-project-skills.ts` inventories
+native project roots only for that collision boundary.
 
 ## Flow
 
@@ -159,7 +177,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `RuntimeConfig.reset(directory)`: Clear the singleton for a directory
 - `RuntimeConfig.captureHostConfig(opencodeConfig)`: Capture host-side config before the config hook mutates it
 - `setRuntimePreset(name)` / `getRuntimePreset()`: Runtime preset override (stale names clear it)
-- Derived getters: `plugin`, `preset`, `featureGates`, `agents()`, `agent(name)`, `disabledAgents`, `disabledTools`, `disabledSkills`, `disabledHooks`, `disabledCommands`, `customAgentNames`, `disabledMcps`, `imageRouting`, `multiplexer`, `backgroundJobs` (incl. `orchestratorWake`), `fallback`, `webfetch`, `acpAgents`, `companion`, `council`, `updateCheckerEnabled`, `stripOrchestratorModel`, `setDefaultAgent`, `compactSidebar`, `modelArrays` (incl. councillor chains), `runtimeChains`, `primaryModel`, `smallModel()`, `hostAgent(name)`
+- Derived getters: `plugin`, `preset`, `featureGates`, `agents()`, `agent(name)`, `disabledAgents`, `disabledTools`, `disabledSkills`, `disabledHooks`, `disabledCommands`, `customAgentNames`, `disabledMcps`, `imageRouting`, `multiplexer`, `backgroundJobs` (incl. `orchestratorWake`), `fallback`, `webfetch`, `acpAgents`, `companion`, `council`, `updateCheckerEnabled`, `stripOrchestratorModel`, `setDefaultAgent`, `compactSidebar`, `modelArrays` (incl. councillor chains), `runtimeChains`, `resourcePrefixes`, `primaryModel`, `smallModel()`, `hostAgent(name)`
 
 ### MCP Management
 

@@ -2,8 +2,12 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { DEFAULT_MODELS, type PluginConfig } from '../config';
 import { RuntimeConfig } from '../config/runtime';
 import { createAgents, getAgentConfigs } from './index';
+import { BASE_AGENT_PROMPT } from './prompt-layers';
 
 const TEST_DIRECTORY = 'runtime-test-agents-custom';
+const withBasePrompt = (prompt: string): string =>
+  `${BASE_AGENT_PROMPT}\n\n${prompt}`;
+
 function runtimeFor(config: PluginConfig | undefined = {}) {
   RuntimeConfig.reset(TEST_DIRECTORY);
   RuntimeConfig.init(TEST_DIRECTORY, config ?? {});
@@ -31,7 +35,7 @@ describe('custom-agent creation', () => {
     expect(customAgent).toBeDefined();
     expect(customAgent?.config.model).toBe('openai/gpt-6');
     expect(customAgent?.config.prompt).toBe(
-      'You are the custom reviewer agent.',
+      withBasePrompt('You are the custom reviewer agent.'),
     );
   });
 
@@ -52,7 +56,7 @@ describe('custom-agent creation', () => {
 
     expect(customAgent).toBeDefined();
     expect(customAgent?.config.prompt).toBe(
-      'You are a custom subagent for auditing.',
+      withBasePrompt('You are a custom subagent for auditing.'),
     );
 
     const orchestrator = agents.find((agent) => agent.name === 'orchestrator');

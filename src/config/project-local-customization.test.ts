@@ -1,14 +1,18 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { createAgents } from '../agents';
+import { BASE_AGENT_PROMPT } from '../agents/prompt-layers';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { loadAgentPrompt, mergePluginConfigs } from './loader';
 import { resolvePreset } from './presets';
 import { RuntimeConfig } from './runtime';
 import { type PluginConfig, PluginConfigSchema } from './schema';
 
 const TEST_DIRECTORY = 'runtime-test-project-local';
+const withBasePrompt = (prompt: string): string =>
+  `${BASE_AGENT_PROMPT}\n\n${prompt}`;
+
 function runtimeFor(config: PluginConfig | undefined = {}) {
   RuntimeConfig.reset(TEST_DIRECTORY);
   RuntimeConfig.init(TEST_DIRECTORY, config ?? {});
@@ -20,14 +24,14 @@ describe('Project-local customization - 15 core cases', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-custom-test-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = tempDir;
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
     }
@@ -37,7 +41,13 @@ describe('Project-local customization - 15 core cases', () => {
   test('inherits prompts across repository and nested worktree boundaries', () => {
     const workspace = path.join(tempDir, 'workspace');
     const repository = path.join(workspace, 'repository');
-    const worktree = path.join(repository, '.slim', 'worktrees', 'feature');
+    const worktree = path.join(
+      repository,
+      '.local',
+      '.slim',
+      'worktrees',
+      'feature',
+    );
     fs.mkdirSync(path.join(repository, '.git'), { recursive: true });
     fs.mkdirSync(worktree, { recursive: true });
     fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: ignored-fixture');
@@ -301,7 +311,9 @@ describe('Project-local customization - 15 core cases', () => {
       projectDirectory: projectDir,
     });
     const oracle = agents.find((a) => a.name === 'oracle');
-    expect(oracle?.config.prompt).toBe('replacement prompt\n\nappend prompt');
+    expect(oracle?.config.prompt).toBe(
+      withBasePrompt('replacement prompt\n\nappend prompt'),
+    );
   });
 
   // Test Case 5: Inline built-in prompt is accepted and used
@@ -318,7 +330,7 @@ describe('Project-local customization - 15 core cases', () => {
     const agents = createAgents(runtimeFor(config));
     const oracle = agents.find((a) => a.name === 'oracle');
     expect(oracle?.config.prompt).toBe(
-      'You are the inline oracle prompt override.',
+      withBasePrompt('You are the inline oracle prompt override.'),
     );
   });
 
@@ -344,7 +356,7 @@ describe('Project-local customization - 15 core cases', () => {
     const agents = createAgents(runtimeFor(config));
     const oracle = agents.find((a) => a.name === 'oracle');
     expect(oracle?.config.prompt).toBe(
-      'You are the inline oracle prompt override.',
+      withBasePrompt('You are the inline oracle prompt override.'),
     );
   });
 
@@ -367,7 +379,9 @@ describe('Project-local customization - 15 core cases', () => {
     const agents = createAgents(runtimeFor(config));
     const oracle = agents.find((a) => a.name === 'oracle');
     expect(oracle?.config.prompt).toBe(
-      'You are the inline oracle prompt override.\n\nappend content',
+      withBasePrompt(
+        'You are the inline oracle prompt override.\n\nappend content',
+      ),
     );
   });
 

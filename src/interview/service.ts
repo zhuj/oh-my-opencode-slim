@@ -9,7 +9,6 @@ import {
   isInternalInitiatorPart,
   log,
 } from '../utils';
-import { parseModelReference } from '../utils/session';
 import {
   appendInterviewAnswers,
   claimInterviewDocument,
@@ -269,7 +268,10 @@ export function createInterviewService(
   const interviewsById = new Map<string, InterviewRecord>();
   const activeSyncs = new Map<string, Promise<InterviewState>>();
   const sessionBusy = new Map<string, boolean>();
-  const sessionModel = new Map<string, string>();
+  const sessionModel = new Map<
+    string,
+    { readonly providerID: string; readonly modelID: string }
+  >();
   const browserOpened = new Set<string>(); // Track interviews that have opened browser
   let resolveBaseUrl: (() => Promise<string>) | null = null;
   let onStateChange:
@@ -1181,7 +1183,7 @@ export function createInterviewService(
                   printState,
                 )
               : buildPatchMissingRepairPrompt(maxQuestions, printState),
-            model ? (parseModelReference(model) ?? undefined) : undefined,
+            model,
           );
         } catch (error) {
           sessionBusy.set(sessionID, false);
@@ -1433,11 +1435,7 @@ export function createInterviewService(
         interview.completed = false;
         reopenedCompletion = true;
       }
-      await sessionRuntime.continue(
-        sessionID,
-        promptWithPatchNote,
-        model ? (parseModelReference(model) ?? undefined) : undefined,
-      );
+      await sessionRuntime.continue(sessionID, promptWithPatchNote, model);
       promptSent = true;
     } finally {
       if (!promptSent) {
@@ -1785,7 +1783,7 @@ export function createInterviewService(
       const providerID = info?.info?.providerID;
       const modelID = info?.info?.modelID;
       if (sessionID && providerID && modelID) {
-        sessionModel.set(sessionID, `${providerID}/${modelID}`);
+        sessionModel.set(sessionID, { providerID, modelID });
       }
       return;
     }

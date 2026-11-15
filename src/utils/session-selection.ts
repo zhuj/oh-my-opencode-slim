@@ -1,5 +1,6 @@
 import { parseContinuationModelSelection } from '../hooks/task-session-manager/continuation-model-selection';
 import { isRecord } from './guards';
+import { parseModelReference } from './session';
 
 /** Which source produced a resolved selection. */
 export type SessionSelectionProvenance =
@@ -102,13 +103,11 @@ export function modelFromMetadataString(
   model: string | undefined,
 ): { providerID: string; modelID: string } | undefined {
   if (!model) return undefined;
-  const parsed = parseContinuationModelSelection(model);
-  if (parsed) return parsed.model;
-  const slash = model.indexOf('/');
-  if (slash <= 0 || slash === model.length - 1) return undefined;
+  const parsed = parseModelReference(model);
+  if (!parsed?.providerID) return undefined;
   return {
-    providerID: model.slice(0, slash),
-    modelID: model.slice(slash + 1),
+    providerID: parsed.providerID,
+    modelID: parsed.modelID,
   };
 }
 
