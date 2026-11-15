@@ -44,7 +44,7 @@ And the browser UI looks like this:
 Resume an existing interview:
 
 ```text
-/interview interview/kanban-design-tool.md
+/interview .local/interview/kanban-design-tool.md
 ```
 
 You can also resume by basename if it exists in the configured output folder:
@@ -111,13 +111,13 @@ visible (legacy behavior). See [Options](#options).
 By default, interview files are written to:
 
 ```text
-interview/
+.local/interview/
 ```
 
 Example:
 
 ```text
-interview/kanban-design-tool.md
+.local/interview/kanban-design-tool.md
 ```
 
 The file contains three sections:
@@ -155,11 +155,26 @@ New interview markdown files use a slugified idea followed by a unique ID.
 Example:
 
 - user input: `build a kanban app for design teams with lightweight reviews`
-- file: `interview/build-a-kanban-app-for-design-teams-with-lightwe-<uuid>.md`
+- file: `.local/interview/build-a-kanban-app-for-design-teams-with-lightwe-<uuid>.md`
 
 The title in the specification does not choose the filename. The slug is
 lowercased, every run of non-alphanumeric characters becomes `-`, and the
 result is cut to 48 characters.
+
+### Output folders and existing projects
+
+`outputFolder` defaults to `"interview"`, which resolves to `.local/interview/`
+under the project directory. Ordinary configured folders are prefixed with
+`.local/`: `"specs/interviews"` resolves to `.local/specs/interviews/`. A folder
+already beginning with `.local/` is used without a second prefix. Configuration
+must be a relative path without `..` traversal; absolute paths are rejected.
+
+Existing project-root `interview/*.md` files are not automatically moved or
+included in output-folder scans. You can still resume one by its explicit
+project-relative path, such as `/interview interview/kanban-design-tool.md`.
+To include old files in basename lookup and dashboard scans, move them manually
+into the resolved output folder. Setting `outputFolder` to `"interview"` does
+not restore the old project-root location.
 
 ### Frontmatter
 
@@ -246,7 +261,7 @@ aggregates interviews from **all** OpenCode sessions on the machine:
 ### Options
 
 - `maxQuestions` - max questions per round, `1-10`, default `2`
-- `outputFolder` - where markdown files are written, default `interview`
+- `outputFolder` - relative folder for markdown files, default `"interview"` (resolved to `.local/interview/`); ordinary folders are placed beneath `.local/`, while an existing `.local/` prefix is preserved. See [Output folders and existing projects](#output-folders-and-existing-projects).
 - `autoOpenBrowser` - open the localhost UI in your default browser during interactive runs, default `true` (suppressed automatically in tests and CI)
 - `port` - port for the interview server, `0-65535`, default `0` (OS-assigned in per-session mode). Set a fixed port to enable dashboard mode. Note: ports 1-1023 require elevated privileges on most systems.
 - `dashboard` - enable dashboard mode on the default port (`43211`), default `false`. Setting `port` to a value greater than `0` also enables dashboard mode. If both are set, `port` takes precedence.

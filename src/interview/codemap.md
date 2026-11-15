@@ -17,7 +17,7 @@
   - local HTTP UI server and shared dashboard mode.
 - Keep interview lifecycle synchronized across:
   - in-memory session/interview maps,
-  - markdown artifacts under `outputFolder`,
+  - markdown artifacts under `.local/<outputFolder>` (default `.local/interview`),
   - dashboard cache used for cross-process recovery and browser polling.
 - Support two runtime modes:
   - **per-session mode** (local interview server)
@@ -59,10 +59,13 @@
   - Creates and resumes interviews:
     - `resolveExistingInterviewPath`, `createInterview`, `resumeInterview`.
   - Syncs state from session messages:
-    - loads messages,
+    - reads messages once per sync using the last host message ID as its boundary,
     - extracts assistant state via `findLatestAssistantState`,
     - fallbacks through `buildFallbackState` when needed,
     - rewrites markdown with `rewriteInterviewDocument`.
+  - Reuses derived parsing and block snapshots while the complete relevant
+    transcript and document remain unchanged; document reads and writes still
+    use the document lock, and response arrays never expose cached references.
   - Injects prompts:
     - kickoff (`buildKickoffPrompt`),
     - resume (`buildResumePrompt`),
@@ -105,12 +108,20 @@
   - Recovery/scan:
     - periodic `rebuildFromFiles()` from markdown frontmatter,
     - session directory discovery via SDK + manual folders,
-    - file scanning in known directories and cached file lists.
+    - file scanning in all registered output folders and cached file lists,
+    - recovery IDs hash the full file path; one live-file index per rebuild
+      avoids scanning all cached rows for every document.
+  - Document caching checks file identity, size and nanosecond timestamps;
+    missing paths watch their nearest existing directory and retry transient
+    errors. Explicit file paths remain authoritative when folder routing changes.
+  - The unauthenticated health endpoint exposes a keyed state fingerprint,
+    without exposing predictable interview IDs.
   - TTL cleanup removes terminal states after 24h.
 
 - Supporting modules:
   - `document.ts`: markdown/file helpers (`slugify`, path resolution, frontmatter,
-    title/summary extraction).
+    title/summary extraction). Output folder normalization adds `.local` once;
+    existing explicit document paths are retained without relocating files.
   - `parser.ts`: assistant state parse pipeline (`parseAssistantState`,
     `findLatestAssistantState`, `buildFallbackState`).
   - `prompts.ts`: prompt templates for create/resume/answer/nudge.

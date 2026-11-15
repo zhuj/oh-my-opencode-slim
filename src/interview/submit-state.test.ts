@@ -1,23 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { InterviewConfigSchema } from '../config/schema';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { normalizeAssistantState, parseAssistantState } from './parser';
 import type { InterviewSessionRuntime } from './runtime';
 import { createInterviewService } from './service';
 import type { InterviewMessage, InterviewState } from './types';
-
-const tempDirs: string[] = [];
-
-afterEach(async () => {
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop();
-    if (dir) {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-});
 
 interface Harness {
   directory: string;
@@ -29,14 +17,20 @@ interface Harness {
   service: ReturnType<typeof createInterviewService>;
 }
 
+const scratchDirectories = new Set<string>();
+afterEach(() => {
+  for (const directory of scratchDirectories) {
+    removeTmpDir(directory);
+  }
+  scratchDirectories.clear();
+});
+
 async function createHarness(
   config?: Partial<Parameters<typeof createInterviewService>[1]>,
   continueFailure = false,
 ): Promise<Harness> {
-  const directory = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'interview-submit-state-'),
-  );
-  tempDirs.push(directory);
+  const directory = createTmpDir('interview-submit-state-');
+  scratchDirectories.add(directory);
   const messages: InterviewMessage[] = [];
   const notifyCalls: string[] = [];
   const continued: string[] = [];

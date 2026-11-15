@@ -15,6 +15,7 @@ import type {
 // ─── Path Utilities ──────────────────────────────────────────────────
 
 export const DEFAULT_OUTPUT_FOLDER = 'interview';
+const PROJECT_ARTIFACT_FOLDER = '.local';
 
 const DOCUMENT_LOCK_RETRY_LIMIT = 200;
 const DOCUMENT_LOCK_RETRY_DELAY_MS = 25;
@@ -279,8 +280,17 @@ export async function releaseInterviewDocument(
 }
 
 export function normalizeOutputFolder(outputFolder: string): string {
-  const normalized = outputFolder.trim().replace(/^\/+|\/+$/g, '');
-  return normalized || DEFAULT_OUTPUT_FOLDER;
+  const configuredSegments = outputFolder
+    .trim()
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  const segments =
+    configuredSegments.length > 0
+      ? configuredSegments
+      : [DEFAULT_OUTPUT_FOLDER];
+  return segments[0] === PROJECT_ARTIFACT_FOLDER
+    ? path.join(...segments)
+    : path.join(PROJECT_ARTIFACT_FOLDER, ...segments);
 }
 
 export function createInterviewDirectoryPath(

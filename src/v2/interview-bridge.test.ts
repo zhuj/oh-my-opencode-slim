@@ -1,17 +1,45 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { bindFreePort } from '../interview/test-port';
+import { createTmpDir, removeTmpDir, withTmpDir } from '../test-utils';
 import { isInternalAdmission } from './internal-admissions';
-import { createV2InterviewBridge, markerText } from './interview-bridge';
+import {
+  createV2InterviewBridge as createV2InterviewBridgeImpl,
+  markerText,
+} from './interview-bridge';
+
+const scratchDirectories = new Set<string>();
+const bridges = new Set<ReturnType<typeof createV2InterviewBridgeImpl>>();
+
+function createV2InterviewBridge(
+  ...args: Parameters<typeof createV2InterviewBridgeImpl>
+): ReturnType<typeof createV2InterviewBridgeImpl> {
+  const bridge = createV2InterviewBridgeImpl(...args);
+  bridges.add(bridge);
+  return bridge;
+}
+
+afterEach(async () => {
+  try {
+    await Promise.all([...bridges].map((bridge) => bridge.dispose()));
+  } finally {
+    bridges.clear();
+    for (const directory of scratchDirectories) removeTmpDir(directory);
+    scratchDirectories.clear();
+  }
+});
 
 function createContext(overrides?: {
+  directory?: string;
   synthetic?: (input: Record<string, unknown>) => Promise<unknown>;
   update?: (input: Record<string, unknown>) => Promise<unknown>;
   prompt?: (input: Record<string, unknown>) => Promise<unknown>;
 }): any {
+  const directory = overrides?.directory ?? createTmpDir('v2-interview-');
+  if (!overrides?.directory) scratchDirectories.add(directory);
   return {
+    location: { directory },
     session: {
       hook: mock(async () => ({ dispose() {} })),
       synthetic: overrides?.synthetic,
@@ -128,12 +156,10 @@ describe('v2 interview bridge', () => {
     const directory = `.tmp-v2-interview-${Date.now()}`;
     const synthetic = mock(async () => ({}));
     const update = mock(async () => ({}));
-    const bridge = createV2InterviewBridge(
-      createContext({ synthetic, update }),
-      {
-        outputFolder: directory,
-      } as never,
-    );
+    const context = createContext({ synthetic, update });
+    const bridge = createV2InterviewBridge(context, {
+      outputFolder: directory,
+    } as never);
     const added: Array<{ name: string; description?: string }> = [];
     bridge.registerCommand({
       add: (def) =>
@@ -193,11 +219,17 @@ describe('v2 interview bridge', () => {
       title: 'Interview: build a notes app',
     });
 
+    const localOutputDirectory = path.join(
+      context.location.directory,
+      '.local',
+      directory,
+    );
+    const localFiles = await fs
+      .readdir(localOutputDirectory)
+      .catch((): string[] => []);
     bridge.dispose();
-    await fs.rm(`${process.cwd()}/${directory}`, {
-      recursive: true,
-      force: true,
-    });
+    expect(localFiles).toHaveLength(1);
+    expect(localFiles[0]).toMatch(/^build-a-notes-app-[0-9a-f-]+\.md$/);
   });
 
   test('does not intercept markers when the command is disabled', async () => {
@@ -233,26 +265,21 @@ describe('v2 interview bridge', () => {
     expect(synthetic).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
     bridge.dispose();
-    await fs.rm(`${process.cwd()}/${directory}`, {
-      recursive: true,
-      force: true,
-    });
   });
 
   test('uses the v2 project directory for interview files', async () => {
-    const projectDir = await fs.mkdtemp(
-      path.join(tmpdir(), 'v2-interview-project-'),
-    );
-    try {
+    await withTmpDir(async (projectDir) => {
       const outputFolder = 'specs';
-      await fs.mkdir(path.join(projectDir, outputFolder));
+      await fs.mkdir(path.join(projectDir, '.local', outputFolder), {
+        recursive: true,
+      });
       await fs.writeFile(
-        path.join(projectDir, outputFolder, 'feature.md'),
+        path.join(projectDir, '.local', outputFolder, 'feature.md'),
         '# Feature\n\n## Summary\nA feature',
       );
 
       const bridge = createV2InterviewBridge(
-        { ...createContext(), location: { directory: projectDir } },
+        createContext({ directory: projectDir }),
         { outputFolder } as never,
       );
       try {
@@ -262,9 +289,7 @@ describe('v2 interview bridge', () => {
       } finally {
         bridge.dispose();
       }
-    } finally {
-      await fs.rm(projectDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test('intercepts markers when the command is enabled', async () => {
@@ -304,10 +329,6 @@ describe('v2 interview bridge', () => {
       synthetic: true,
     });
     bridge.dispose();
-    await fs.rm(`${process.cwd()}/${directory}`, {
-      recursive: true,
-      force: true,
-    });
   });
 
   test('registerCommand is a no-op when the draft has no add', () => {
@@ -483,10 +504,6 @@ describe('v2 interview bridge', () => {
       ),
     ).toBe(false);
     bridge.dispose();
-    await fs.rm(`${process.cwd()}/${directory}`, {
-      recursive: true,
-      force: true,
-    });
   });
 
   test('maps v2 session.execution lifecycle into a turn notice', async () => {
@@ -544,10 +561,6 @@ describe('v2 interview bridge', () => {
     const notices = calls.map((call) => String(call[0]?.text ?? ''));
     expect(notices.some((text) => text.includes('⎔ Spec updated'))).toBe(true);
     bridge.dispose();
-    await fs.rm(`${process.cwd()}/${directory}`, {
-      recursive: true,
-      force: true,
-    });
   });
 
   test('projects text events and removes a deleted session', async () => {
@@ -615,10 +628,6 @@ describe('v2 interview bridge', () => {
     });
     expect(bridge.getTranscript('ses_text')).toEqual([]);
     bridge.dispose();
-    await fs.rm(`${process.cwd()}/${directory}`, {
-      recursive: true,
-      force: true,
-    });
   });
 
   test('resolves sessionID from live `data`-keyed events (text + deletion)', async () => {
@@ -661,10 +670,6 @@ describe('v2 interview bridge', () => {
     });
     expect(bridge.getTranscript('ses_live')).toEqual([]);
     bridge.dispose();
-    await fs.rm(`${process.cwd()}/${directory}`, {
-      recursive: true,
-      force: true,
-    });
   });
 
   test('ignores text streams for sessions that are not interviews', async () => {
@@ -711,7 +716,10 @@ describe('v2 interview bridge', () => {
       config,
       { server },
     );
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await bridge1.handleEvent({
+      type: 'session.status',
+      properties: { sessionID: 'v2-session-1', status: { type: 'idle' } },
+    });
     const bridge2 = createV2InterviewBridge(
       createContext({ synthetic: synthetic2 }),
       config,
@@ -769,10 +777,6 @@ describe('v2 interview bridge', () => {
         server.closeAllConnections();
         server.close();
       }
-      await fs.rm(`${process.cwd()}/${directory}`, {
-        recursive: true,
-        force: true,
-      });
     }
   });
 });
