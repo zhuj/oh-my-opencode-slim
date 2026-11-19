@@ -526,6 +526,160 @@ describe('createV2Setup e2e', () => {
     removeTmpDir(fixtureRoot);
   });
 
+  test('startup diagnostics: propagates the original factory failure and releases only its scope', async () => {
+    const otherDirectory = path.join(fixtureRoot, 'other');
+    const other = createEventDirectoryScope(otherDirectory);
+    const observer = createEventDirectoryScope(
+      path.join(fixtureRoot, 'observer'),
+    );
+    const projectEvent = { location: { directory: projectDir } };
+    const failure = new Error('shared factory startup failed');
+    const factory: typeof OhMyOpenCodeLite = async () => {
+      expect(observer.isForeign(projectEvent)).toBe(true);
+      throw failure;
+    };
+    const { ctx, calls } = makeMockV2Context(projectDir);
+
+    try {
+      await expect(createV2Setup(factory)(ctx)).rejects.toBe(failure);
+      expect(observer.isForeign(projectEvent)).toBe(false);
+      expect(
+        observer.isForeign({ location: { directory: otherDirectory } }),
+      ).toBe(true);
+      expect(calls.agentTransformCount).toBe(0);
+      await flushLoggerForTesting();
+      expect(readPluginLog()).toContain(
+        '[v2] FATAL: v1 factory init failed "Error: shared factory startup failed"',
+      );
+    } finally {
+      observer.release();
+      other.release();
+    }
+  });
+
+  test('startup diagnostics: a preflight rejection leaves no directory claim', async () => {
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({ disabled_skills: ['123'] }),
+    );
+    const observer = createEventDirectoryScope(path.join(fixtureRoot, 'other'));
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    try {
+      await expect(createV2Setup()(ctx)).rejects.toThrow('integer-index skill');
+      expect(observer.isForeign({ location: { directory: projectDir } })).toBe(
+        false,
+      );
+      expect(calls.agentTransformCount).toBe(0);
+    } finally {
+      observer.release();
+    }
+  });
+
+  async function writeStartupDiagnosticConfig(): Promise<void> {
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        autoUpdate: false,
+        backgroundJobs: { mode: 'off' },
+        companion: { enabled: false },
+        disabled_tools: ['ast_grep_search'],
+        marketplace: { enabled: false },
+        webfetch: { enabled: false },
+      }),
+    );
+  }
+
+  test('startup diagnostics: reports pending callbacks and only the names later applied to drafts', async () => {
+    await writeStartupDiagnosticConfig();
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    type AgentTransform = Parameters<typeof ctx.agent.transform>[0];
+    type ToolTransform = Parameters<typeof ctx.tool.transform>[0];
+    const runAgent = ctx.agent.transform;
+    const runTool = ctx.tool.transform;
+    const agentCallbacks: AgentTransform[] = [];
+    const toolCallbacks: ToolTransform[] = [];
+    ctx.agent.transform = async (cb) => {
+      agentCallbacks.push(cb);
+      return { dispose: () => {} };
+    };
+    ctx.tool.transform = async (cb) => {
+      toolCallbacks.push(cb);
+      return { dispose: () => {} };
+    };
+
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      await flushLoggerForTesting();
+      const pending = readPluginLog();
+      expect(pending).toContain(
+        '[v2] agent transform registered; draft pending',
+      );
+      expect(pending).toContain(
+        '[v2] core tool transform registered; draft pending',
+      );
+      expect(pending).not.toContain('draft applied');
+      expect(pending).not.toContain('[v2] health check passed');
+
+      for (const cb of agentCallbacks) (await runAgent(cb)).dispose();
+      for (const cb of toolCallbacks) (await runTool(cb)).dispose();
+      await flushLoggerForTesting();
+      const applied = readPluginLog();
+      const agentNames = calls.agentUpdates.map(({ id }) => id);
+      const toolNames = calls.toolAdds.map(({ name }) => name);
+      expect(agentNames).toContain('orchestrator');
+      expect(toolNames.length).toBeGreaterThan(0);
+      expect(toolNames).not.toContain('ast_grep_search');
+      expect(applied).toContain(
+        `[v2] agent draft applied ${JSON.stringify({ names: agentNames })}`,
+      );
+      expect(applied).toContain(
+        `[v2] core tool draft applied ${JSON.stringify({ names: toolNames })}`,
+      );
+      expect(applied).not.toContain('[v2] core tool draft projection failed');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('startup diagnostics: distinguishes tool registration and partial projection failures', async () => {
+    await writeStartupDiagnosticConfig();
+    const first = makeMockV2Context(projectDir);
+    const register = first.ctx.tool.transform;
+    first.ctx.tool.transform = (cb) =>
+      register((draft) =>
+        cb({
+          ...draft,
+          add: (tool) => {
+            if (tool.name === 'ast_grep_replace')
+              throw new Error('tool add refused');
+            draft.add(tool);
+          },
+        }),
+      );
+    const cleanup = await createV2Setup()(first.ctx);
+    await cleanup();
+    await flushLoggerForTesting();
+    const partial = readPluginLog();
+    expect(first.calls.toolAdds.length).toBeGreaterThan(0);
+    expect(partial).toContain(
+      `[v2] core tool draft projection failed ${JSON.stringify({
+        names: first.calls.toolAdds.map(({ name }) => name),
+        failed: ['ast_grep_replace'],
+      })}`,
+    );
+
+    const second = makeMockV2Context(projectDir);
+    second.ctx.tool.transform = async () => {
+      throw new Error('tool transform refused');
+    };
+    const secondCleanup = await createV2Setup()(second.ctx);
+    await secondCleanup();
+    await flushLoggerForTesting();
+    expect(readPluginLog()).toContain(
+      '[v2] core tool transform registration failed "Error: tool transform refused"',
+    );
+  });
+
   test('registers agents, tools, commands, mcp, and hooks on a full ctx', async () => {
     const { ctx, calls } = makeMockV2Context(projectDir);
     const cleanup = await createV2Setup()(ctx);
@@ -4410,7 +4564,9 @@ describe('createV2Setup e2e', () => {
         expect.objectContaining({ action: 'host-only_*', effect: 'deny' }),
       );
       await flushLoggerForTesting();
-      expect(readPluginLog()).toContain('[v2] agents registered {"count":5}');
+      const logText = readPluginLog();
+      expect(logText).toContain('[v2] agent draft projection deferred');
+      expect(logText).toMatch(/\[v2\] agent draft applied .*"explorer"/);
       expect(await earlyPrompt).toMatchObject({
         message: 'transient inference refresh',
       });
@@ -4686,7 +4842,7 @@ describe('createV2Setup e2e', () => {
     expect(logText).toContain(
       '[v2] ctx.mcp.transform unavailable; skipping MCP snapshot (v1 host embedded v2 core)',
     );
-    expect(logText).toContain('[v2] agents registered');
+    expect(logText).toMatch(/\[v2\] agent draft applied .*"orchestrator"/);
 
     await cleanup();
   }, 20_000);

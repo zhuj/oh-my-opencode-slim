@@ -2493,10 +2493,6 @@ export function createV2Setup(
     // state survives instance disposal inside one process.
     resetV2GenerationWarnings();
 
-    // Directory scope (multi-instance): the host loads this plugin once per
-    // location and broadcasts every event to every instance in the process.
-    // Process only this location's events; unresolved events fall through.
-    const eventDirectoryScope = createEventDirectoryScope(directory);
     const disposers: Array<() => Promise<void> | void> = [];
     let generationDisposed = false;
     let stopPermissionPromptAdmission: (() => Promise<void>) | undefined;
@@ -2589,6 +2585,38 @@ export function createV2Setup(
       // queued writes.
       log('[v2] managed background-job lifecycle disabled by config');
     }
+
+    // Claim only after preflight, when startup failures can unwind the scope.
+    // The host broadcasts events to all locations; unresolved events still
+    // fall through the location filter.
+    const eventDirectoryScope = createEventDirectoryScope(directory);
+    const abortStartup = async (): Promise<void> => {
+      generationDisposed = true;
+      eventDirectoryScope.release();
+      // Unwind only this generation's resources. In particular, the
+      // process-wide persistence backend may serve another live project.
+      for (const dispose of [
+        () => skillCommands?.stop(),
+        retireSessionPresets,
+        () => registryBridge?.retire(),
+        ...[...disposers].reverse(),
+      ]) {
+        try {
+          await dispose?.();
+        } catch (err) {
+          log('[v2] abort-path disposer failed', String(err));
+        }
+      }
+      try {
+        const v1Dispose = v1Hooks?.dispose as (() => Promise<void>) | undefined;
+        if (v1Dispose) {
+          log('[v2] v1 dispose hook invoked (abort path)');
+          await v1Dispose();
+        }
+      } catch (err) {
+        log('[v2] v1 dispose failed (abort path)', String(err));
+      }
+    };
 
     try {
       log('[v2] importing v1 factory...');
@@ -2699,26 +2727,8 @@ export function createV2Setup(
     } catch (err) {
       log('[v2] FATAL: v1 factory init failed', String(err));
       console.error('[oh-my-opencode-slim][v2] factory init failed:', err);
-      // Don't hard-fail the whole plugin; register nothing and stay loaded.
-      // The scope claim must not outlive the failed generation.
-      eventDirectoryScope.release();
-      if (err instanceof InvalidSkillPolicyError) {
-        generationDisposed = true;
-        for (const dispose of [...disposers].reverse()) {
-          try {
-            await dispose();
-          } catch (disposeError) {
-            log('[v2] invalid-policy cleanup failed', String(disposeError));
-          }
-        }
-        throw err;
-      }
-      return async () => {};
-    }
-
-    if (!v1Hooks) {
-      eventDirectoryScope.release();
-      return async () => {};
+      await abortStartup();
+      throw err;
     }
 
     try {
@@ -2946,6 +2956,7 @@ export function createV2Setup(
             })
             .catch((cause) => {
               if (generationDisposed) return;
+              log('[v2] agent finalization failed', String(cause));
               permissionSnapshotFailure =
                 cause instanceof Error ? cause : new Error(String(cause));
               resolvePermissionSnapshotReady();
@@ -2964,6 +2975,10 @@ export function createV2Setup(
           permissionSnapshotFailure = new Error(
             'Marketplace agents require ctx.session.update to enforce child permission ceilings',
           );
+          log(
+            '[v2] agent finalization failed',
+            String(permissionSnapshotFailure),
+          );
           resolvePermissionSnapshotReady();
           return;
         }
@@ -2975,6 +2990,7 @@ export function createV2Setup(
         if (permissionRulesBridge) {
           permissionRulesBridge.refreshPluginAgents();
         }
+        const appliedAgentNames: string[] = [];
         for (const [name, cfg] of Object.entries(resolvedAgents)) {
           if (
             !registry.agentNames.includes(name) &&
@@ -2995,6 +3011,7 @@ export function createV2Setup(
             cfg,
             registry.nativePolicies[name]?.rules,
           );
+          appliedAgentNames.push(name);
         }
         if (
           preFlightConfig.setDefaultAgent !== false &&
@@ -3015,11 +3032,8 @@ export function createV2Setup(
             directory,
           );
         }
-        // Log inside finalization because the transform await only confirms
-        // registration; the callback may not have run yet.
-        log('[v2] agents registered', {
-          count: Object.keys(resolvedAgents).length,
-        });
+        // These are draft writes, not evidence of a host registry commit.
+        log('[v2] agent draft applied', { names: appliedAgentNames });
         permissionSnapshotReady = true;
         resolvePermissionSnapshotReady();
       };
@@ -3091,6 +3105,9 @@ export function createV2Setup(
           }
           finalizeAgentDraft(draft);
           agentPassDeferred = !permissionSnapshotReady;
+          if (agentPassDeferred && !permissionSnapshotFailure) {
+            log('[v2] agent draft projection deferred');
+          }
         } catch (error) {
           if (generationDisposed) throw error;
           log('[v2] agent finalization failed', String(error));
@@ -3149,6 +3166,13 @@ export function createV2Setup(
       try {
         const reg = await ctx.agent.transform(captureAgentDraft);
         disposers.push(() => reg.dispose());
+        if (
+          !permissionSnapshotReady &&
+          !agentPassDeferred &&
+          !permissionSnapshotFailure
+        ) {
+          log('[v2] agent transform registered; draft pending');
+        }
         if (permissionSnapshotFailure) {
           if (
             permissionSnapshotFailure.message.startsWith(
@@ -3162,7 +3186,7 @@ export function createV2Setup(
           });
         }
       } catch (err) {
-        registryBridge.retire();
+        log('[v2] agent transform failed', String(err));
         throw err;
       }
       permissionRulesBridgeEnabled = typeof ctx.session?.update === 'function';
@@ -3369,7 +3393,9 @@ export function createV2Setup(
             return { type: 'object', properties: {} };
           };
 
+          let draftSeen = false;
           const reg = await ctx.tool.transform((draft) => {
+            draftSeen = true;
             try {
               updateToolDraft(draft, DELEGATION_TOOL_V2, (tool) => {
                 const patch: Partial<V2ToolDefinition> = {};
@@ -3388,6 +3414,8 @@ export function createV2Setup(
             } catch (err) {
               log('[v2] native delegation metadata update failed', String(err));
             }
+            const names: string[] = [];
+            const failed: string[] = [];
             for (const [name, def] of toolEntries) {
               try {
                 // adaptTool stamps `options: { codemode: false }` on every
@@ -3403,16 +3431,26 @@ export function createV2Setup(
                     ctx.permission,
                   ),
                 );
+                names.push(name);
               } catch (err) {
+                failed.push(name);
                 log('[v2] tool adapt failed', { name, err: String(err) });
               }
             }
+            if (failed.length > 0) {
+              log('[v2] core tool draft projection failed', { names, failed });
+            } else {
+              log('[v2] core tool draft applied', { names });
+            }
           });
           disposers.push(() => reg.dispose());
-          log('[v2] tools registered', { count: toolEntries.length });
+          if (!draftSeen)
+            log('[v2] core tool transform registered; draft pending');
+        } else {
+          log('[v2] core tool transform skipped; no tools selected');
         }
       } catch (err) {
-        log('[v2] tool.transform failed', String(err));
+        log('[v2] core tool transform registration failed', String(err));
       }
 
       log('[v2] mcp servers registered', { count: Object.keys(mcps).length });
@@ -4485,19 +4523,6 @@ export function createV2Setup(
       // awaited here because the host cannot finish activation until we return.
       await skillCommandController.refresh();
 
-      // ── Health check: surface silent zero-registration failures ──
-      // Every bridge is fail-soft; without this, a fully broken registration
-      // would look like a successful load with an empty session.
-      if (disposers.length === 0) {
-        console.error(
-          '[oh-my-opencode-slim][v2] WARNING: no bridges registered — ' +
-            'the plugin loaded but registered nothing. Check the plugin log.',
-        );
-        log('[v2] health check: zero bridges registered');
-      } else {
-        log('[v2] health check passed', { bridges: disposers.length });
-      }
-
       const dispose = v1Hooks.dispose as (() => Promise<void>) | undefined;
 
       return async () => {
@@ -4552,15 +4577,6 @@ export function createV2Setup(
         }
       };
     } catch (err) {
-      generationDisposed = true;
-      skillCommands?.stop();
-      // The abort path never reaches the returned cleanup, so release the
-      // scope claim here: a leaked live-directory entry would keep other
-      // instances from ever reclaiming this location and would block the
-      // last-instance wake reset.
-      await retireSessionPresets?.();
-      eventDirectoryScope.release();
-      registryBridge?.retire();
       // The original cause MUST reach the plugin log and stderr before the
       // unwind: without it a live setup failure is invisible (the host only
       // sees a rejected plugin load). Walk the `cause` chain too — wrapper
@@ -4580,23 +4596,7 @@ export function createV2Setup(
         causes.join('\ncaused by: '),
       );
       console.error('[oh-my-opencode-slim][v2] setup failed:', err);
-      // Best-effort abort-path cleanup: LIFO over the saved disposers,
-      // each isolated so a failing disposer cannot mask the original
-      // error, then the v1 dispose hook, then rethrow unchanged.
-      for (const d of [...disposers].reverse()) {
-        try {
-          await d();
-        } catch (disposerErr) {
-          log('[v2] abort-path disposer failed', String(disposerErr));
-        }
-      }
-      const v1Dispose = v1Hooks?.dispose as (() => Promise<void>) | undefined;
-      try {
-        log('[v2] v1 dispose hook invoked (abort path)');
-        await v1Dispose?.();
-      } catch (disposeErr) {
-        log('[v2] v1 dispose failed (abort path)', String(disposeErr));
-      }
+      await abortStartup();
       throw err;
     }
   };

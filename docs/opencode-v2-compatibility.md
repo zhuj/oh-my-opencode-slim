@@ -925,15 +925,23 @@ that wait before every later context selection. Local server logs contain
 the same failure also affects other plugin agents.
 The related upstream [OpenCode issue #54172](https://github.com/anomalyco/opencode/issues/54172)
 also reports existing agents disappearing during plugin/config reloads.
-The proposed [host fix #51133](https://github.com/anomalyco/opencode/pull/51133)
-adds per-selection waits; it remains unmerged at the time of investigation.
-That fix does not establish whether activation readiness covers this plugin's
-deferred agent projection and asynchronous rebuild during cold startup.
+The upstream [host fix #51133](https://github.com/anomalyco/opencode/pull/51133)
+merged and is included in v2.2.0. In that release, the
+[runner waits for activation before selecting an agent](https://github.com/anomalyco/opencode/blob/v2.2.0/packages/core/src/session/runner/llm.ts#L196-L203),
+and [activation holds readiness through the registration batch](https://github.com/anomalyco/opencode/blob/v2.2.0/packages/core/src/plugin.ts#L116-L193).
+The batch [awaits registry notifications and their synchronous rebuilds](https://github.com/anomalyco/opencode/blob/v2.2.0/packages/core/src/state.ts#L96-L109).
+That covers the normal batched agent projection. It does not guarantee that
+plugin work deferred beyond the batch, such as retrying a busy marketplace
+lease before requesting a rebuild, has finished. That path is not a confirmed
+cause of the reported intermittent startup failure.
 
 If native recovery reaches agent selection before registration completes,
 board adoption cannot repair that failed execution. A prompt-admission hook
-cannot protect selection that already failed. The host needs a readiness
-boundary covering plugin activation and committed agent-registry rebuilds.
+cannot protect selection that already failed. If this error recurs on v2.2.0
+or later, capture the host and plugin versions and compare the failed selection
+with the first Slim agent projection and any deferred rebuild error. Keep any
+fix for selection before a committed registry in the host; do not block plugin
+setup on callbacks the host runs only after setup returns.
 Do not interpret a restored task row as proof that execution resumed, and do
 not blindly resend continuation prompts after uncertain admission. This plugin
 does not add placeholder agents or automatically relaunch work to mask the race.
@@ -1263,10 +1271,14 @@ review — and a host without `session.get` produces no entries.
   gracefully for those hosts instead of crashing or retry-storming. The
   same applies to the embedded v2 pass inside every v1 host: it invokes
   `setup` with registration-only domains, so a v1 session's plugin log
-  shows `[v2] tool.transform failed`-style lines and
-  `health check passed {"bridges":4}` — expected noise from that parallel
-  pass, not breakage. The classic `server()` path (a separate plugin-log
-  instance a few seconds apart) carries the full v1 functionality.
+  may show v2 registration diagnostics from that parallel pass. The classic
+  `server()` path carries the full v1 functionality.
+- **Server startup diagnostics.** A shared factory error now rejects v2 setup
+  instead of leaving OpenCode with an apparently loaded plugin that does
+  nothing. The plugin log distinguishes a transform waiting for a draft, a
+  deferred or failed projection, and the agent or tool names applied to a
+  draft. An applied draft is not proof that the host committed its registry;
+  verify that the missing agent or tool is available in the affected location.
 - **TUI-side plugin logs are not captured.** The plugin logger initializes
   in the server process only, so TUI-side registration failures write no
   `[v2][tui]` lines anywhere. Verify TUI behavior through the host (command
