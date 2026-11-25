@@ -70,6 +70,10 @@ Register the complete package directory, not a single `dist` file: builds use
 relative ESM chunks and optional dependencies. Update with `git pull`,
 `bun install` and `bun run build`, then restart/reload OpenCode.
 
+If your local OpenCode configuration points directly to the `dist` directory,
+the build creates `dist/tui.js` as a symlink to `tui2.js` so the TUI can find it.
+Published packages use the `./tui` export instead.
+
 ### Ask another coding agent
 
 ```text

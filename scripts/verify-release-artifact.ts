@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -366,6 +367,9 @@ function cleanupTarball(tarballPath: string) {
 }
 
 function main() {
+  if (readlinkSync(path.join(distDir, 'tui.js')) !== 'tui2.js') {
+    fail('Expected the local TUI entry dist/tui.js to link to tui2.js');
+  }
   verifyDistHasNoLeakedPaths();
   const tarballPath = packArtifact();
   try {
