@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir, withTmpDirSync } from './test-utils';
 import {
   clearTuiAgentActivities,
   flushTuiSnapshotBatch,
@@ -15,6 +15,7 @@ import {
   resolveTuiSnapshotRoot,
   snapshotSectionsEqual,
   TUI_SESSION_PARENTS_MAX,
+  type TuiSnapshot,
   updateSnapshot,
   withTuiSnapshotBatch,
 } from './tui-state';
@@ -24,7 +25,7 @@ let tempDir: string;
 
 beforeEach(() => {
   previousXdgDataHome = process.env.XDG_DATA_HOME;
-  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-state-'));
+  tempDir = createTmpDir();
   process.env.XDG_DATA_HOME = tempDir;
 });
 
@@ -35,7 +36,7 @@ afterEach(() => {
     process.env.XDG_DATA_HOME = previousXdgDataHome;
   }
 
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeTmpDir(tempDir);
 });
 
 const LUNA = {
@@ -749,18 +750,15 @@ describe('tui-state persistence', () => {
   });
 
   test('cross-project isolation — different directories write independent state files', () => {
-    const dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-a-'));
-    const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-b-'));
-    try {
-      recordTuiAgentModels({ agentModels: { explorer: 'model-a' } }, dirA);
-      recordTuiAgentModels({ agentModels: { explorer: 'model-b' } }, dirB);
+    withTmpDirSync((dirA) => {
+      withTmpDirSync((dirB) => {
+        recordTuiAgentModels({ agentModels: { explorer: 'model-a' } }, dirA);
+        recordTuiAgentModels({ agentModels: { explorer: 'model-b' } }, dirB);
 
-      expect(readTuiSnapshot(dirA).agentModels.explorer).toBe('model-a');
-      expect(readTuiSnapshot(dirB).agentModels.explorer).toBe('model-b');
-    } finally {
-      fs.rmSync(dirA, { recursive: true, force: true });
-      fs.rmSync(dirB, { recursive: true, force: true });
-    }
+        expect(readTuiSnapshot(dirA).agentModels.explorer).toBe('model-a');
+        expect(readTuiSnapshot(dirB).agentModels.explorer).toBe('model-b');
+      });
+    });
   });
 
   test('skips the disk write when the recorded value is unchanged', () => {
@@ -1400,5 +1398,147 @@ describe('withTuiSnapshotBatch (native event fan-out scope)', () => {
       readTuiSnapshot(tempDir).sessionModels?.['model-session']?.explorer
         ?.model,
     ).toBe(LUNA.model);
+  });
+});
+
+describe('snapshot root resolution', () => {
+  function snapshotWith(overrides: Partial<TuiSnapshot> = {}): TuiSnapshot {
+    return {
+      version: 1,
+      updatedAt: 0,
+      agentModels: {},
+      agentVariants: {},
+      activeSessions: {},
+      activityPids: {},
+      sessionParents: {},
+      sessionDetails: {},
+      reusableByAgent: {},
+      reusableOwners: {},
+      ...overrides,
+    };
+  }
+
+  /** Counts ancestor-link reads so scaling claims can be asserted. */
+  function countingParents(links: Record<string, string>): {
+    parents: Record<string, string>;
+    reads: () => number;
+  } {
+    let reads = 0;
+    const parents = new Proxy(
+      { ...links },
+      {
+        get(target, key) {
+          reads += 1;
+          return Reflect.get(target, key);
+        },
+      },
+    ) as Record<string, string>;
+    return { parents, reads: () => reads };
+  }
+
+  test('walks deep chains and keeps the missing- and self-parent breaks', () => {
+    const links: Record<string, string> = {
+      grandchild: 'child',
+      child: 'root',
+    };
+    for (let depth = 2; depth < 40; depth += 1) {
+      links[`deep-${depth}`] = `deep-${depth - 1}`;
+    }
+    const snapshot = snapshotWith({ sessionParents: { ...links } });
+
+    expect(resolveTuiSnapshotRoot(snapshot, 'grandchild')).toBe('root');
+    expect(resolveTuiSnapshotRoot(snapshot, 'deep-39')).toBe('deep-1');
+    // No recorded parent: the session is its own root.
+    expect(resolveTuiSnapshotRoot(snapshot, 'root')).toBe('root');
+    expect(resolveTuiSnapshotRoot(snapshot, 'never-seen')).toBe('never-seen');
+    // Repeated resolution of the same snapshot is stable.
+    expect(resolveTuiSnapshotRoot(snapshot, 'grandchild')).toBe('root');
+
+    const selfParent = snapshotWith({
+      sessionParents: { self: 'self', kid: 'self' },
+    });
+    expect(resolveTuiSnapshotRoot(selfParent, 'self')).toBe('self');
+    expect(resolveTuiSnapshotRoot(selfParent, 'kid')).toBe('self');
+    expect(resolveTuiSnapshotRoot(selfParent, 'kid')).toBe('self');
+  });
+
+  test('a late-learned link re-roots through the new snapshot only', () => {
+    // Recorded before the parent was known: the session is its own root.
+    const before = snapshotWith({ sessionParents: { 'child-a': 'orphan' } });
+    expect(resolveTuiSnapshotRoot(before, 'child-a')).toBe('orphan');
+    expect(resolveTuiSnapshotRoot(before, 'orphan')).toBe('orphan');
+
+    // The next published snapshot carries the learned link.
+    const after = snapshotWith({
+      sessionParents: { 'child-a': 'conv-1', sibling: 'conv-1' },
+    });
+    expect(resolveTuiSnapshotRoot(after, 'child-a')).toBe('conv-1');
+    expect(resolveTuiSnapshotRoot(after, 'sibling')).toBe('conv-1');
+    // The earlier snapshot keeps its own answer: no cross-snapshot entries.
+    expect(resolveTuiSnapshotRoot(before, 'child-a')).toBe('orphan');
+  });
+
+  test('a re-read after a learned link is a fresh snapshot object', () => {
+    recordTuiSessionParent('child-a', 'root-a', tempDir);
+    const first = readTuiSnapshot(tempDir);
+    expect(resolveTuiSnapshotRoot(first, 'child-a')).toBe('root-a');
+
+    recordTuiSessionParent('grandchild', 'child-a', tempDir);
+    const second = readTuiSnapshot(tempDir);
+
+    // Identity is the memo key, so a changed write must publish a new
+    // object — otherwise the index would serve the previous ancestry.
+    expect(second).not.toBe(first);
+    expect(resolveTuiSnapshotRoot(second, 'grandchild')).toBe('root-a');
+    expect(resolveTuiSnapshotRoot(second, 'child-a')).toBe('root-a');
+    expect(resolveTuiSnapshotRoot(first, 'child-a')).toBe('root-a');
+  });
+
+  test('a parent cycle resolves per entry point and is never indexed', () => {
+    const snapshot = snapshotWith({
+      sessionParents: { a: 'b', b: 'a', x: 'a', tail: 'x' },
+    });
+
+    expect(resolveTuiSnapshotRoot(snapshot, 'a')).toBe('a');
+    expect(resolveTuiSnapshotRoot(snapshot, 'b')).toBe('b');
+    expect(resolveTuiSnapshotRoot(snapshot, 'x')).toBe('a');
+    expect(resolveTuiSnapshotRoot(snapshot, 'tail')).toBe('a');
+    // Repeatable in any order: a cycle has no shared root to memoize.
+    expect(resolveTuiSnapshotRoot(snapshot, 'tail')).toBe('a');
+    expect(resolveTuiSnapshotRoot(snapshot, 'b')).toBe('b');
+  });
+
+  test('a pass over siblings costs O(siblings), not O(siblings x depth)', () => {
+    const DEPTH = 20;
+    const SIBLINGS = 64;
+    const links: Record<string, string> = {};
+    for (let depth = 1; depth < DEPTH; depth += 1) {
+      links[`n${depth}`] = `n${depth - 1}`;
+    }
+    const leaves = Array.from({ length: SIBLINGS }, (_, i) => `leaf-${i}`);
+    for (const leaf of leaves) links[leaf] = `n${DEPTH - 1}`;
+
+    const { parents, reads } = countingParents(links);
+    const snapshot = snapshotWith({ sessionParents: parents });
+
+    const before = reads();
+    const roots = leaves.map((leaf) => resolveTuiSnapshotRoot(snapshot, leaf));
+    const firstPass = reads() - before;
+
+    expect(new Set(roots)).toEqual(new Set(['n0']));
+    // Re-walking every chain would cost SIBLINGS * DEPTH reads; the chain is
+    // walked once and each leaf then costs one memo lookup plus its link.
+    expect(firstPass).toBeLessThan(SIBLINGS * 4);
+
+    // An identical but distinct snapshot object shares no entries: its own
+    // first pass pays the same cost again, so a process-wide index (which
+    // would answer the leaves in O(1) here) cannot be what happened above.
+    const second = countingParents(links);
+    const other = snapshotWith({ sessionParents: second.parents });
+    const otherBefore = second.reads();
+    for (const leaf of leaves) {
+      expect(resolveTuiSnapshotRoot(other, leaf)).toBe('n0');
+    }
+    expect(second.reads() - otherBefore).toBe(firstPass);
   });
 });

@@ -2,6 +2,10 @@ import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { parse as parseJsonc } from 'jsonc-parser';
+import {
+  assertSkillPolicyConfig,
+  InvalidSkillPolicyError,
+} from '../utils/skill-policy-validation';
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -28,8 +32,10 @@ function readConfig(path: string): Record<string, unknown> | undefined {
     const value = parseJsonc(readFileSync(path, 'utf8'), errors, {
       allowTrailingComma: true,
     });
+    if (errors.length === 0) assertSkillPolicyConfig(value, path);
     return errors.length === 0 ? asObject(value) : undefined;
-  } catch {
+  } catch (error) {
+    if (error instanceof InvalidSkillPolicyError) throw error;
     return undefined;
   }
 }

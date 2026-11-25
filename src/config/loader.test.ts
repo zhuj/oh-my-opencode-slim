@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir, withTmpDirSync } from '../test-utils';
 import { getAgentMcpList } from './agent-mcps';
 import {
   resolveFeatureGates,
@@ -25,7 +25,7 @@ describe('loadPluginConfig', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loader-test-'));
+    tempDir = createTmpDir();
     userConfigDir = path.join(tempDir, 'user-config');
     originalEnv = { ...process.env };
     // Isolate from real user config
@@ -34,7 +34,7 @@ describe('loadPluginConfig', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) {
         delete process.env[key];
@@ -54,7 +54,7 @@ describe('loadPluginConfig', () => {
     const ancestor = path.join(tempDir, 'ancestor');
     const projectDir = path.join(ancestor, 'repo');
     const file = writeProjectConfig(ancestor, {
-      presets: { old: { agents: { orchestrator: { subagents: ['fixer'] } } } },
+      presets: { old: { agents: { orchestrator: { subagents: ['@*'] } } } },
     });
     writeProjectConfig(projectDir, {
       backgroundJobs: { mode: 'off' },
@@ -134,10 +134,10 @@ describe('loadPluginConfig', () => {
     });
   });
 
-  describe('host-aware background jobs retirement matrix', () => {
-    test('migrates managed mode in every reader without discarding the layer', () => {
+  describe('host-aware background jobs compatibility', () => {
+    test('retains legacy managed admission in every config reader', () => {
       const projectDir = path.join(tempDir, 'project');
-      const file = writeProjectConfig(projectDir, {
+      writeProjectConfig(projectDir, {
         backgroundJobs: { mode: 'managed' },
         agents: { oracle: { model: 'test/model' } },
       });
@@ -148,31 +148,19 @@ describe('loadPluginConfig', () => {
           silent: true,
           onWarning: (w) => warnings.push(w),
         });
-        expect(config.backgroundJobs?.mode).toBe('native');
+        expect(config.backgroundJobs?.mode).toBe('managed');
         expect(config.agents?.oracle?.model).toBe('test/model');
-        expect(warnings).toContainEqual(
-          expect.objectContaining({
-            path: file,
-            kind: 'removed-key',
-            message: expect.stringContaining('backgroundJobs.mode'),
-          }),
-        );
+        expect(resolveFeatureGates(config)).toMatchObject({
+          backgroundJobsMode: 'native',
+          admissionQueue: true,
+        });
+        expect(warnings).toEqual([]);
       }
     });
 
     test('strips inert and malformed managed values with warnings', () => {
       const projectDir = path.join(tempDir, 'project');
       for (const backgroundJobs of [
-        { concurrency: {} },
-        {
-          concurrency: {
-            defaultConcurrency: 0,
-            providerConcurrency: { openai: 0 },
-            modelConcurrency: { 'openai/model': 0 },
-          },
-        },
-        { concurrency: null },
-        { concurrency: { defaultConcurrency: 'bad', providerConcurrency: [] } },
         { wallClockTimeoutMs: 0 },
         { wallClockTimeoutMs: -1 },
         { wallClockTimeoutMs: 'invalid' },
@@ -209,24 +197,35 @@ describe('loadPluginConfig', () => {
       }
     });
 
-    test('rejects positive limits even if mode is off', () => {
+    test('preserves configured admission limits even when the queue is disabled', () => {
       const projectDir = path.join(tempDir, 'project');
-      for (const [key, value] of [
-        ['concurrency', { defaultConcurrency: 1 }],
-        ['concurrency', { providerConcurrency: { openai: 2 } }],
-        ['concurrency', { modelConcurrency: { 'openai/model': 3 } }],
-        ['wallClockTimeoutMs', 900000],
-      ] as const) {
-        const file = writeProjectConfig(projectDir, {
-          backgroundJobs: { mode: 'off', [key]: value },
-        });
-        expect(() =>
-          loadPluginConfig(projectDir, { hostFlavor: 'v2', silent: true }),
-        ).toThrow(UnsupportedHostConfigError);
-        expect(() =>
-          loadPluginConfig(projectDir, { hostFlavor: 'v2', silent: true }),
-        ).toThrow(file);
-      }
+      const concurrency = {
+        defaultConcurrency: 1,
+        providerConcurrency: { openai: 2 },
+        modelConcurrency: { 'openai/model': 3 },
+      };
+      writeProjectConfig(projectDir, {
+        backgroundJobs: { mode: 'off', concurrency },
+      });
+      const config = loadPluginConfig(projectDir, {
+        hostFlavor: 'v2',
+        silent: true,
+      });
+      expect(config.backgroundJobs?.concurrency).toEqual(concurrency);
+      expect(resolveFeatureGates(config).admissionQueue).toBe(false);
+    });
+
+    test('rejects a positive wall-clock limit even if mode is off', () => {
+      const projectDir = path.join(tempDir, 'project');
+      const file = writeProjectConfig(projectDir, {
+        backgroundJobs: { mode: 'off', wallClockTimeoutMs: 900_000 },
+      });
+      expect(() =>
+        loadPluginConfig(projectDir, { hostFlavor: 'v2', silent: true }),
+      ).toThrow(UnsupportedHostConfigError);
+      expect(() =>
+        loadPluginConfig(projectDir, { hostFlavor: 'v2', silent: true }),
+      ).toThrow(file);
     });
 
     test('a project mode cannot hide a positive user-layer limit', () => {
@@ -317,10 +316,28 @@ describe('loadPluginConfig', () => {
     return filename;
   }
 
+  test.each([undefined, 'full', 'none'])(
+    'inherits skillCommandMode unless project overrides it with %j',
+    (projectMode) => {
+      const projectDir = path.join(tempDir, 'project');
+      const globalDir = path.join(userConfigDir, 'opencode');
+      fs.mkdirSync(globalDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(globalDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({ skillCommandMode: 'reference' }),
+      );
+      writeProjectConfig(projectDir, { skillCommandMode: projectMode });
+
+      expect(loadPluginConfig(projectDir).skillCommandMode).toBe(
+        projectMode ?? 'reference',
+      );
+    },
+  );
+
   test('inherits custom agents when loading from a nested Git worktree', () => {
     const workspace = path.join(tempDir, 'workspace');
     const repo = path.join(workspace, 'repo');
-    const worktree = path.join(repo, '.slim', 'worktrees', 'feature');
+    const worktree = path.join(repo, '.local', '.slim', 'worktrees', 'feature');
     fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
     fs.mkdirSync(worktree, { recursive: true });
     fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: ../../../.git');
@@ -583,7 +600,7 @@ describe('loadPluginConfig', () => {
 
   test('enumerates absent ancestor candidates through the filesystem root', () => {
     const nested = path.join(tempDir, 'workspace', 'repo', 'nested');
-    const { project } = getPluginConfigCandidates(nested);
+    const { project } = getPluginConfigCandidates(nested, 'v2');
     const directories: string[] = [];
     let current = path.resolve(nested);
     for (;;) {
@@ -665,6 +682,35 @@ describe('loadPluginConfig', () => {
     // carry `webfetch` over, so the enhanced webfetch turns back on.
     expect(config.disabled_tools).toEqual(['ast_grep_search']);
     expect(resolveFeatureGates(config).webfetch).toBe(true);
+  });
+
+  test('project resource prefixes replace user list, omission inherits, and empty disables', () => {
+    const userConfigPath = path.join(userConfigDir, 'opencode');
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(userConfigPath, { recursive: true });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    const userPath = path.join(userConfigPath, 'oh-my-opencode-slim.json');
+    const projectPath = path.join(projectConfigDir, 'oh-my-opencode-slim.json');
+    fs.writeFileSync(
+      userPath,
+      JSON.stringify({ resource_prefixes: ['.local'] }),
+    );
+    fs.writeFileSync(projectPath, JSON.stringify({}));
+    expect(
+      loadPluginConfig(projectDir, { silent: true }).resource_prefixes,
+    ).toEqual(['.local']);
+    fs.writeFileSync(
+      projectPath,
+      JSON.stringify({ resource_prefixes: ['.opencode'] }),
+    );
+    expect(
+      loadPluginConfig(projectDir, { silent: true }).resource_prefixes,
+    ).toEqual(['.opencode']);
+    fs.writeFileSync(projectPath, JSON.stringify({ resource_prefixes: [] }));
+    expect(
+      loadPluginConfig(projectDir, { silent: true }).resource_prefixes,
+    ).toEqual([]);
   });
 
   test('retains user interview settings when project partially overrides them', () => {
@@ -866,7 +912,9 @@ describe('loadPluginConfig', () => {
     // The project layer configures only concurrency: its absent mode must
     // not reset the user's explicit lifecycle switch.
     expect(config.backgroundJobs?.mode).toBe('off');
-    expect(config.backgroundJobs).not.toHaveProperty('concurrency');
+    expect(config.backgroundJobs?.concurrency).toEqual({
+      defaultConcurrency: 2,
+    });
   });
 
   test('validates auto image routing after project enables Observer', () => {
@@ -997,46 +1045,48 @@ describe('loadPluginConfig', () => {
   });
 
   test('respects OPENCODE_CONFIG_DIR for user config location', () => {
-    const customDir = path.join(tempDir, 'custom-opencode-config');
-    fs.mkdirSync(customDir, { recursive: true });
-    process.env.OPENCODE_CONFIG_DIR = customDir;
+    withTmpDirSync((customDir) => {
+      process.env.OPENCODE_CONFIG_DIR = customDir;
 
-    // Write plugin config in the custom directory
-    fs.writeFileSync(
-      path.join(customDir, 'oh-my-opencode-slim.json'),
-      JSON.stringify({
-        agents: { oracle: { model: 'custom/model-from-opencode-config-dir' } },
-      }),
-    );
+      // Write plugin config in the custom directory
+      fs.writeFileSync(
+        path.join(customDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          agents: {
+            oracle: { model: 'custom/model-from-opencode-config-dir' },
+          },
+        }),
+      );
 
-    const projectDir = path.join(tempDir, 'project');
-    fs.mkdirSync(projectDir, { recursive: true });
+      const projectDir = path.join(tempDir, 'project');
+      fs.mkdirSync(projectDir, { recursive: true });
 
-    const config = loadPluginConfig(projectDir);
-    expect(config.agents?.oracle?.model).toBe(
-      'custom/model-from-opencode-config-dir',
-    );
+      const config = loadPluginConfig(projectDir);
+      expect(config.agents?.oracle?.model).toBe(
+        'custom/model-from-opencode-config-dir',
+      );
+    });
   });
 
   test('falls back to default user config dir when OPENCODE_CONFIG_DIR has no config', () => {
-    const customDir = path.join(tempDir, 'custom-opencode-config-empty');
-    fs.mkdirSync(customDir, { recursive: true });
-    process.env.OPENCODE_CONFIG_DIR = customDir;
+    withTmpDirSync((customDir) => {
+      process.env.OPENCODE_CONFIG_DIR = customDir;
 
-    const defaultConfigDir = path.join(userConfigDir, 'opencode');
-    fs.mkdirSync(defaultConfigDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(defaultConfigDir, 'oh-my-opencode-slim.json'),
-      JSON.stringify({
-        agents: { oracle: { model: 'fallback/default-config' } },
-      }),
-    );
+      const defaultConfigDir = path.join(userConfigDir, 'opencode');
+      fs.mkdirSync(defaultConfigDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(defaultConfigDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          agents: { oracle: { model: 'fallback/default-config' } },
+        }),
+      );
 
-    const projectDir = path.join(tempDir, 'project');
-    fs.mkdirSync(projectDir, { recursive: true });
+      const projectDir = path.join(tempDir, 'project');
+      fs.mkdirSync(projectDir, { recursive: true });
 
-    const config = loadPluginConfig(projectDir);
-    expect(config.agents?.oracle?.model).toBe('fallback/default-config');
+      const config = loadPluginConfig(projectDir);
+      expect(config.agents?.oracle?.model).toBe('fallback/default-config');
+    });
   });
 
   test('project multiplexer keys still override the user layer when explicitly set', () => {
@@ -1137,14 +1187,14 @@ describe('onWarning callback', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onwarning-test-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = tempDir;
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
   });
 
@@ -1972,14 +2022,14 @@ describe('disabled_* key normalization', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'disabled-normalize-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = path.join(tempDir, 'user-config');
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
   });
 
@@ -2120,7 +2170,7 @@ describe('deepMerge behavior', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'merge-test-'));
+    tempDir = createTmpDir();
     userConfigDir = path.join(tempDir, 'user-config');
     originalEnv = { ...process.env };
 
@@ -2130,7 +2180,7 @@ describe('deepMerge behavior', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
   });
 
@@ -2352,14 +2402,14 @@ describe('preset resolution', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'preset-test-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = path.join(tempDir, 'user-config');
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
   });
 
@@ -2774,14 +2824,14 @@ describe('environment variable preset override', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'env-preset-test-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = path.join(tempDir, 'user-config');
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
   });
 
@@ -2900,14 +2950,14 @@ describe('JSONC config support', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jsonc-test-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = path.join(tempDir, 'user-config');
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
   });
 
@@ -3094,14 +3144,14 @@ describe('loadAgentPrompt', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prompt-test-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = tempDir;
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) {
         delete process.env[key];
@@ -3294,32 +3344,32 @@ describe('loadAgentPrompt', () => {
   });
 
   test('respects OPENCODE_CONFIG_DIR for prompt location', () => {
-    const customDir = path.join(tempDir, 'custom-prompt-config');
-    fs.mkdirSync(customDir, { recursive: true });
-    process.env.OPENCODE_CONFIG_DIR = customDir;
+    withTmpDirSync((customDir) => {
+      process.env.OPENCODE_CONFIG_DIR = customDir;
 
-    const promptsDir = path.join(customDir, 'oh-my-opencode-slim');
-    fs.mkdirSync(promptsDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(promptsDir, 'oracle.md'),
-      'prompt from OPENCODE_CONFIG_DIR dir',
-    );
+      const promptsDir = path.join(customDir, 'oh-my-opencode-slim');
+      fs.mkdirSync(promptsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(promptsDir, 'oracle.md'),
+        'prompt from OPENCODE_CONFIG_DIR dir',
+      );
 
-    const result = loadAgentPrompt('oracle');
-    expect(result.prompt).toBe('prompt from OPENCODE_CONFIG_DIR dir');
+      const result = loadAgentPrompt('oracle');
+      expect(result.prompt).toBe('prompt from OPENCODE_CONFIG_DIR dir');
+    });
   });
 
   test('falls back to default prompt dir when OPENCODE_CONFIG_DIR has no prompt', () => {
-    const customDir = path.join(tempDir, 'custom-prompt-config-empty');
-    fs.mkdirSync(customDir, { recursive: true });
-    process.env.OPENCODE_CONFIG_DIR = customDir;
+    withTmpDirSync((customDir) => {
+      process.env.OPENCODE_CONFIG_DIR = customDir;
 
-    const promptsDir = path.join(tempDir, 'opencode', 'oh-my-opencode-slim');
-    fs.mkdirSync(promptsDir, { recursive: true });
-    fs.writeFileSync(path.join(promptsDir, 'oracle.md'), 'fallback prompt');
+      const promptsDir = path.join(tempDir, 'opencode', 'oh-my-opencode-slim');
+      fs.mkdirSync(promptsDir, { recursive: true });
+      fs.writeFileSync(path.join(promptsDir, 'oracle.md'), 'fallback prompt');
 
-    const result = loadAgentPrompt('oracle');
-    expect(result.prompt).toBe('fallback prompt');
+      const result = loadAgentPrompt('oracle');
+      expect(result.prompt).toBe('fallback prompt');
+    });
   });
 });
 
@@ -3328,14 +3378,14 @@ describe('env variable interpolation', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'env-interp-test-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = path.join(tempDir, 'user-config');
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
   });
 
@@ -3407,12 +3457,12 @@ describe('env variable interpolation', () => {
     fs.writeFileSync(
       path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
       JSON.stringify({
-        agents: { oracle: { model: '{env:NONEXISTENT}' } },
+        agents: { oracle: { options: { label: '{env:NONEXISTENT}' } } },
       }),
     );
 
     const config = loadPluginConfig(projectDir);
-    expect(config.agents?.oracle?.model).toBe('');
+    expect(config.agents?.oracle?.options?.label).toBe('');
   });
 
   test('no interpolation needed: config without {env:...} works unchanged', () => {
@@ -3488,14 +3538,14 @@ describe('removed config keys', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loader-removed-'));
+    tempDir = createTmpDir('loader-removed-');
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_CONFIG_HOME = path.join(tempDir, 'user-config');
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
   });
 
@@ -3606,13 +3656,11 @@ describe('removed config keys', () => {
     expect(config.backgroundJobs?.mode).toBe('off');
     // Retired managed siblings are dropped too.
     expect(config.backgroundJobs).not.toHaveProperty('maxSessionsPerAgent');
-    expect(config.backgroundJobs).not.toHaveProperty('concurrency');
+    expect(config.backgroundJobs?.concurrency).toEqual({
+      defaultConcurrency: 2,
+    });
     expect(Object.hasOwn(config.backgroundJobs ?? {}, 'enabled')).toBe(false);
-    expect(warnings.map((w) => w.kind)).toEqual([
-      'removed-key',
-      'removed-key',
-      'removed-key',
-    ]);
+    expect(warnings.map((w) => w.kind)).toEqual(['removed-key', 'removed-key']);
     expect(
       warnings.find((w) => w.message.includes('"backgroundJobs.enabled"'))
         ?.message,
@@ -3714,7 +3762,7 @@ describe('legacy generated preset explorer.mcps repair', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loader-legacy-mcps-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
@@ -3723,7 +3771,7 @@ describe('legacy generated preset explorer.mcps repair', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
     }

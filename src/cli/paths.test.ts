@@ -1,8 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   ensureConfigDir,
@@ -12,6 +11,7 @@ import {
   getExistingLiteConfigPath,
   getLiteConfig,
 } from '../config/paths';
+import { createTmpDir, removeTmpDir, withTmpDirSync } from '../test-utils';
 
 describe('paths', () => {
   const originalEnv = { ...process.env };
@@ -67,7 +67,7 @@ describe('paths', () => {
   });
 
   test('selects the last OpenCode file defining plugin and prefers JSONC otherwise', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'opencode-paths-'));
+    const dir = createTmpDir('opencode-paths-');
     process.env.OPENCODE_CONFIG_DIR = dir;
     for (const name of ['opencode', 'oh-my-opencode-slim']) {
       writeFileSync(join(dir, `${name}.json`), '{}');
@@ -83,7 +83,7 @@ describe('paths', () => {
     expect(getExistingLiteConfigPath()).toBe(
       join(dir, 'oh-my-opencode-slim.jsonc'),
     );
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   });
 
   describe('getExistingConfigPath()', () => {
@@ -91,12 +91,12 @@ describe('paths', () => {
 
     afterEach(() => {
       if (tmpDir && existsSync(tmpDir)) {
-        rmSync(tmpDir, { recursive: true, force: true });
+        removeTmpDir(tmpDir);
       }
     });
 
     test('returns .json if it exists', () => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'opencode-test-'));
+      tmpDir = createTmpDir();
       process.env.XDG_CONFIG_HOME = tmpDir;
 
       const configDir = join(tmpDir, 'opencode');
@@ -109,7 +109,7 @@ describe('paths', () => {
     });
 
     test("returns .jsonc if .json doesn't exist but .jsonc does", () => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'opencode-test-'));
+      tmpDir = createTmpDir();
       process.env.XDG_CONFIG_HOME = tmpDir;
 
       const configDir = join(tmpDir, 'opencode');
@@ -122,7 +122,7 @@ describe('paths', () => {
     });
 
     test('returns default .json if neither exists', () => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'opencode-test-'));
+      tmpDir = createTmpDir();
       process.env.XDG_CONFIG_HOME = tmpDir;
 
       const jsonPath = join(tmpDir, 'opencode', 'opencode.json');
@@ -131,14 +131,13 @@ describe('paths', () => {
   });
 
   test("ensureConfigDir() creates directory if it doesn't exist", () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), 'opencode-test-'));
-    process.env.XDG_CONFIG_HOME = tmpDir;
-    const configDir = join(tmpDir, 'opencode');
+    withTmpDirSync((tmpDir) => {
+      process.env.XDG_CONFIG_HOME = tmpDir;
+      const configDir = join(tmpDir, 'opencode');
 
-    expect(existsSync(configDir)).toBe(false);
-    ensureConfigDir();
-    expect(existsSync(configDir)).toBe(true);
-
-    rmSync(tmpDir, { recursive: true, force: true });
+      expect(existsSync(configDir)).toBe(false);
+      ensureConfigDir();
+      expect(existsSync(configDir)).toBe(true);
+    });
   });
 });

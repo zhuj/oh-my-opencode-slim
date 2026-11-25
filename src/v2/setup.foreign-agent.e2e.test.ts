@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
+import { Schema } from 'effect';
 import { MarketplaceStore } from '../marketplace/store';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { createV2Setup } from './setup';
 import type { V2Context } from './types';
 
@@ -104,6 +105,20 @@ function makeMockV2Context(projectDir: string, initialAgents: string[]) {
     currentAgents = draftAgents;
   }
 
+  const nativeSubagentTool = {
+    description: 'Native subagent',
+    input: Schema.Struct({
+      agent: Schema.String,
+      description: Schema.String,
+      prompt: Schema.String,
+      model: Schema.optionalKey(Schema.String),
+      sessionID: Schema.optionalKey(
+        Schema.String.check(Schema.isStartingWith('ses')),
+      ),
+    }),
+    execute: async () => ({}),
+  };
+
   const ctx = {
     app: { name: 'opencode', version: 'v2-census' },
     options: {},
@@ -138,16 +153,10 @@ function makeMockV2Context(projectDir: string, initialAgents: string[]) {
       transform: async (callback: (draft: unknown) => void) => {
         callback({
           update: (id: string, update: (tool: unknown) => void) => {
-            if (id === 'subagent')
-              update({
-                description: 'Native subagent',
-                execute: async () => ({}),
-              });
+            if (id === 'subagent') update(nativeSubagentTool);
           },
           get: (id: string) =>
-            id === 'subagent'
-              ? { description: 'Native subagent', execute: async () => ({}) }
-              : undefined,
+            id === 'subagent' ? nativeSubagentTool : undefined,
           add: () => {},
         });
         return { dispose: () => {} };
@@ -207,7 +216,7 @@ describe('issue #1874 marketplace hidden-agent census', () => {
   let originalEnv: typeof process.env;
 
   afterEach(async () => {
-    if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
+    if (fixtureRoot) removeTmpDir(fixtureRoot);
     fixtureRoot = undefined;
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
@@ -217,7 +226,7 @@ describe('issue #1874 marketplace hidden-agent census', () => {
 
   test('admits a later-registered foreign hidden child through the host envelope (#1874)', async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omos-census-1874-'));
+    fixtureRoot = createTmpDir('omos-census-1874-');
     const projectDir = path.join(fixtureRoot, 'project');
     await mkdir(path.join(projectDir, '.opencode'), { recursive: true });
     process.env.OPENCODE_CONFIG_DIR = path.join(fixtureRoot, 'config');

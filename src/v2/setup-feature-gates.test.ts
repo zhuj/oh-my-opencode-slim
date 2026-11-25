@@ -3,8 +3,8 @@
  *
  * - `interview.enabled: false` → no bridge instance (no `/interview` command
  *   marker registered, no per-event bridge work, no context-hook dispatch).
- * - V2 native defaults → no job ledger/KV; native keeps preset routing and
- *   the preset-wrapper executor wrap, while off leaves delegation untouched.
+ * - Default native delegation uses the admission queue. Explicit native mode
+ *   can use preset routing alone, and off preserves the native executor.
  * - `liveConfigRefresh: false` → no config-file watcher, while the one-shot
  *   startup profile seed and explicit `refreshProfiles` still function.
  * - `sidebar: false` → no server-side sidebar state write on finalization.
@@ -16,14 +16,51 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import fs from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
+import { Schema } from 'effect';
 import * as agentFactory from '../agents';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import * as configWatch from './config-watch';
 import { sessionPresetRpc } from './preset-rpc';
 import { createV2Setup } from './setup';
 import type { V2Context, V2SessionContextEvent } from './types';
+
+const nativeModelWording =
+  'NEVER set this unless the user explicitly asks for a particular model or variant.';
+const nativeSubagentInput = Schema.Struct({
+  agent: Schema.String,
+  description: Schema.String,
+  prompt: Schema.String,
+  model: Schema.optionalKey(Schema.String).annotate({
+    description: nativeModelWording,
+  }),
+  sessionID: Schema.optionalKey(
+    Schema.String.check(Schema.isStartingWith('ses')).pipe(
+      Schema.brand('SessionID'),
+      Schema.annotate({ identifier: 'Session.ID' }),
+    ),
+  ),
+});
+const nativeSubagentExecute = async () => ({});
+const detachedNativeEvents = [
+  'session.created',
+  'session.deleted',
+  'session.agent.selected',
+  'session.moved',
+  'skill.updated',
+  'plugin.updated',
+];
+const admissionEventTypes = [
+  'session.execution.started',
+  'session.execution.succeeded',
+  'session.execution.failed',
+  'session.execution.interrupted',
+  'session.inbox.enqueued',
+  'session.inbox.delivered',
+  'session.inbox.cancelled',
+  'session.model.selected',
+];
 
 /** Mock v2 context capturing the registrations the gates must suppress. */
 function makeCtx(
@@ -37,9 +74,14 @@ function makeCtx(
 ) {
   const commandAdds: Array<{ name: string }> = [];
   const removedAgents: string[] = [];
-  const toolUpdates: Array<{ id: string; description?: unknown }> = [];
   const beforeHooks: Array<(event: never) => Promise<void>> = [];
-  const subagentTools: Array<Record<string, unknown>> = [];
+  // The host replays registered transforms over the same draft. Keep one
+  // native tool here so later transforms observe and wrap earlier edits.
+  const subagentTool: Record<string, unknown> = {
+    description: `Native delegation. ${nativeModelWording}`,
+    input: nativeSubagentInput,
+    execute: nativeSubagentExecute,
+  };
   const hooks: string[] = [];
   const skillCallbacks = new Set<(draft: unknown) => void>();
   const contextHooks: Array<(event: never) => Promise<void>> = [];
@@ -109,25 +151,9 @@ function makeCtx(
     },
     tool: {
       transform: async (cb: (draft: unknown) => void) => {
-        // One live `subagent` tool per replay so `update` and `get` observe
-        // the same object: the setup wraps this executor when preset
-        // routing needs the wrapper.
-        const subagentTool: Record<string, unknown> = {
-          description: 'native',
-          execute: async () => ({}),
-        };
-        subagentTools.push(subagentTool);
         cb({
-          // The native subagent executor is what the wrapper(s) wrap; record
-          // each update plus the description the wrap left behind, so the
-          // native description staying byte-unchanged stays observable.
           update: (id: string, update: (tool: unknown) => void) => {
-            const tool = id === 'subagent' ? subagentTool : {};
-            update(tool);
-            toolUpdates.push({
-              id,
-              description: (tool as { description?: unknown }).description,
-            });
+            update(id === 'subagent' ? subagentTool : {});
           },
           get: (id: string) => (id === 'subagent' ? subagentTool : undefined),
           add: (definition: { name: string }) => toolAdds.push(definition.name),
@@ -226,9 +252,8 @@ function makeCtx(
     ctx,
     commandAdds,
     removedAgents,
-    toolUpdates,
     beforeHooks,
-    subagentTools,
+    subagentTool,
     hooks,
     contextHooks,
     promptHooks,
@@ -243,16 +268,54 @@ function makeCtx(
 const INTERVIEW_MARKER =
   '<omos-interview-command>do it</omos-interview-command>';
 
-/**
- * Preset-wrapper readiness keeps the native subagent description untouched:
- * the wrapper wraps the executor, never rewrites the description text.
- */
-function expectNativeWrap(
-  updates: Array<{ id: string; description?: unknown }>,
-) {
-  const subagent = updates.filter((u) => u.id === 'subagent');
-  expect(subagent.length).toBeGreaterThan(0);
-  expect(subagent.every((u) => u.description === 'native')).toBe(true);
+function subagentSchema(tool: Record<string, unknown>) {
+  expect(Schema.isSchema(tool.input)).toBe(true);
+  return tool.input as typeof nativeSubagentInput;
+}
+
+function expectQueueSchema(tool: Record<string, unknown>, enabled: boolean) {
+  const nativeFields = Object.keys(nativeSubagentInput.fields);
+  if (!enabled) {
+    expect(Object.keys(subagentSchema(tool).fields)).toEqual(nativeFields);
+    return;
+  }
+
+  // The admission projection crosses the host's Standard Schema boundary,
+  // whereas the pure native path keeps the original Effect schema.
+  const standard = (
+    tool.input as {
+      '~standard': {
+        jsonSchema: {
+          input(): { properties: Record<string, unknown>; required: string[] };
+        };
+        validate(value: unknown): { value: unknown } | { issues: unknown[] };
+      };
+    }
+  )['~standard'];
+  const input = standard.jsonSchema.input();
+  expect(Object.keys(input.properties)).toEqual([
+    ...nativeFields,
+    'id',
+    'depends_on',
+  ]);
+  expect(input.required).toEqual(['agent', 'description', 'prompt']);
+  expect(input.properties.sessionID).toMatchObject({ pattern: '^ses' });
+
+  const args = {
+    agent: 'explorer',
+    description: 'Review',
+    prompt: 'Review this',
+    id: 'review',
+    depends_on: ['prepare'],
+  };
+  expect(standard.validate(args)).toEqual({ value: args });
+  expect(standard.validate({ ...args, sessionID: 'bad-id' })).toHaveProperty(
+    'issues',
+  );
+  expect(standard.validate({ ...args, model: 42 })).toHaveProperty('issues');
+  expect(standard.validate({ ...args, depends_on: [null] })).toHaveProperty(
+    'issues',
+  );
 }
 
 /** A v2 delegation the `execute.before` bridge must admit (or reject). */
@@ -282,7 +345,7 @@ describe('v2 setup feature gates', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-gates-'));
+    fixtureRoot = createTmpDir('omo-v2-gates-');
     projectDir = path.join(fixtureRoot, 'project');
     await writeProjectConfig({ companion: { enabled: false } });
     process.env.OPENCODE_CONFIG_DIR = path.join(fixtureRoot, 'config');
@@ -298,7 +361,7 @@ describe('v2 setup feature gates', () => {
       if (!(key in originalEnv)) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
-    await rm(fixtureRoot, { recursive: true, force: true });
+    removeTmpDir(fixtureRoot);
   });
 
   test('accepts major-zero preview hosts but rejects unsupported releases', async () => {
@@ -306,8 +369,13 @@ describe('v2 setup feature gates', () => {
     ctx.app.version = '0.0.0-beta-19507';
     const cleanup = await createV2Setup()(ctx);
     await cleanup();
-    ctx.app.version = '2.2.4';
-    await expect(createV2Setup()(ctx)).rejects.toThrow(/unsupported/i);
+    const { ctx: minimumHost } = makeCtx(projectDir);
+    minimumHost.app.version = '2.4.0';
+    const minimumCleanup = await createV2Setup()(minimumHost);
+    await minimumCleanup();
+    const { ctx: oldHost } = makeCtx(projectDir);
+    oldHost.app.version = '2.3.9';
+    await expect(createV2Setup()(oldHost)).rejects.toThrow(/unsupported/i);
   });
 
   test('interview disabled: no command marker, no context dispatch', async () => {
@@ -384,7 +452,7 @@ describe('v2 setup feature gates', () => {
     }
   }, 20_000);
 
-  test('no v1 post-tool consumers keeps the native admission cleanup hook', async () => {
+  test('native routing and rule processing retain before and after hooks with the loop guard off', async () => {
     await writeProjectConfig({
       companion: { enabled: false },
       backgroundJobs: { mode: 'native' },
@@ -429,13 +497,13 @@ describe('v2 setup feature gates', () => {
         },
       },
     });
-    const { ctx, beforeHooks, subagentTools, storageCalls } =
+    const { ctx, beforeHooks, subagentTool, storageCalls } =
       makeCtx(projectDir);
     const get = spyOn(ctx.session, 'get');
     const cleanup = await createV2Setup()(ctx);
     try {
       const before = beforeHooks[0];
-      const execute = subagentTools.at(-1)?.execute as
+      const execute = subagentTool.execute as
         | ((input: unknown, context: unknown) => Promise<unknown>)
         | undefined;
       if (!before || !execute) throw new Error('native hooks not captured');
@@ -510,7 +578,7 @@ describe('v2 setup feature gates', () => {
       backgroundJobs: { mode: 'native' },
       sessionPresetRouting: false,
     });
-    const { ctx, commandAdds, rpcDefinitions, toolUpdates } =
+    const { ctx, commandAdds, rpcDefinitions, subagentTool } =
       makeCtx(projectDir);
     const cleanup = await createV2Setup()(ctx);
     try {
@@ -518,7 +586,8 @@ describe('v2 setup feature gates', () => {
         'preset',
       );
       expect(rpcDefinitions).not.toContain(sessionPresetRpc);
-      expect(toolUpdates.filter((tool) => tool.id === 'subagent')).toEqual([]);
+      expect(subagentTool.execute).toBe(nativeSubagentExecute);
+      expectQueueSchema(subagentTool, false);
     } finally {
       await cleanup();
     }
@@ -588,42 +657,79 @@ describe('v2 setup feature gates', () => {
     const { ctx, eventTypes } = makeCtx(projectDir);
     const cleanup = await createV2Setup()(ctx);
     try {
-      const subscribed = eventTypes[0];
-      expect(subscribed).toEqual([
-        'session.created',
-        'session.deleted',
-        'session.agent.selected',
-        'session.moved',
-      ]);
+      expect(eventTypes[0]).toEqual(detachedNativeEvents);
     } finally {
       await cleanup();
     }
   }, 20_000);
 
-  test('off mode keeps delegation fully native: no admission capture hook', async () => {
-    await writeProjectConfig({
-      companion: { enabled: false },
-      backgroundJobs: { mode: 'off' },
-      disabled_hooks: ['tool-loop-guard'],
-    });
-    const { ctx, hooks } = makeCtx(projectDir);
-    const cleanup = await createV2Setup()(ctx);
-    try {
-      expect(hooks).not.toContain('tool:execute.after');
-    } finally {
-      await cleanup();
-    }
-  }, 20_000);
+  for (const [label, backgroundJobs, queueEnabled] of [
+    ['default', {}, true],
+    ['explicit native', { mode: 'native' }, false],
+    ['native with queue', { mode: 'native', queue: { enabled: true } }, true],
+    [
+      'off with queue requested',
+      { mode: 'off', queue: { enabled: true } },
+      false,
+    ],
+  ] as const) {
+    test(`${label}: queue state is independent of preset routing and other event consumers`, async () => {
+      await writeProjectConfig({
+        companion: { enabled: false },
+        backgroundJobs,
+        sessionPresetRouting: false,
+        tui: false,
+        disabled_hooks: [
+          'foreground-fallback',
+          'cache-monitor',
+          'tool-loop-guard',
+        ],
+        interview: { enabled: false },
+      });
+      const {
+        ctx,
+        commandAdds,
+        eventTypes,
+        hooks,
+        rpcDefinitions,
+        subagentTool,
+      } = makeCtx(projectDir);
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        expect(commandAdds.map((command) => command.name)).not.toContain(
+          'preset',
+        );
+        expect(rpcDefinitions).not.toContain(sessionPresetRpc);
+        expect(hooks).toContain('tool:execute.after');
+        expectQueueSchema(subagentTool, queueEnabled);
+        if (queueEnabled)
+          expect(subagentTool.execute).not.toBe(nativeSubagentExecute);
+        else expect(subagentTool.execute).toBe(nativeSubagentExecute);
+        expect(eventTypes[0]).toEqual(
+          queueEnabled
+            ? [
+                ...detachedNativeEvents.slice(0, 4),
+                ...admissionEventTypes,
+                ...detachedNativeEvents.slice(4),
+              ]
+            : detachedNativeEvents,
+        );
+      } finally {
+        await cleanup();
+      }
+    }, 20_000);
+  }
 
   test('lifecycle disabled: no persistence and no structured-launch wrapper', async () => {
     await writeProjectConfig({
       companion: { enabled: false },
       backgroundJobs: { mode: 'off' },
     });
-    const { ctx, toolUpdates } = makeCtx(projectDir);
+    const { ctx, subagentTool } = makeCtx(projectDir);
     const cleanup = await createV2Setup()(ctx);
     try {
-      expect(toolUpdates.filter((tool) => tool.id === 'subagent')).toEqual([]);
+      expect(subagentTool.execute).toBe(nativeSubagentExecute);
+      expectQueueSchema(subagentTool, false);
       // No persisted board state was seeded for this project directory.
       const stateDir = path.join(
         fixtureRoot,
@@ -645,15 +751,14 @@ describe('v2 setup feature gates', () => {
         companion: { enabled: false },
         backgroundJobs: { mode },
       });
-      const { ctx, toolUpdates, storageCalls } = makeCtx(projectDir);
+      const { ctx, subagentTool, storageCalls } = makeCtx(projectDir);
       const cleanup = await createV2Setup()(ctx);
       try {
         expect(storageCalls).toEqual({ get: 0, set: 0, remove: 0, scan: 0 });
-        if (mode === 'native') expectNativeWrap(toolUpdates);
-        else
-          expect(toolUpdates.filter((tool) => tool.id === 'subagent')).toEqual(
-            [],
-          );
+        expectQueueSchema(subagentTool, false);
+        if (mode === 'native')
+          expect(subagentTool.execute).not.toBe(nativeSubagentExecute);
+        else expect(subagentTool.execute).toBe(nativeSubagentExecute);
         const stateDir = path.join(
           fixtureRoot,
           'xdg-data',
@@ -780,19 +885,18 @@ describe('v2 setup feature gates', () => {
         companion: { enabled: false },
         backgroundJobs: backgroundJobs as Record<string, unknown>,
       });
-      const { ctx, beforeHooks, subagentTools } = makeCtx(projectDir);
+      const { ctx, beforeHooks, subagentTool } = makeCtx(projectDir);
       const cleanup = await createV2Setup()(ctx);
       try {
         const hook = beforeHooks[0];
-        const subagent = subagentTools.at(-1);
-        if (!hook || !subagent) throw new Error('subagent wiring not captured');
+        if (!hook) throw new Error('subagent wiring not captured');
         const event = {
           ...delegationEvent(),
           id: 'call_gate_resume',
           input: { sessionID: 'ses_gate_child', prompt: 'Continue' },
         };
         await hook(event as never);
-        const execute = subagent.execute as (
+        const execute = subagentTool.execute as (
           input: unknown,
           context: unknown,
         ) => Promise<unknown>;
@@ -851,20 +955,43 @@ describe('v2 setup feature gates', () => {
         pruneEvictedSessions: false,
       },
     });
-    const { ctx, commandAdds } = makeCtx(projectDir);
+    const { ctx, commandAdds, subagentTool } = makeCtx(projectDir);
     const cleanup = await createV2Setup()(ctx);
     try {
       expect(commandAdds.map((entry) => entry.name)).toContain('preset');
+      expectQueueSchema(subagentTool, true);
+      expect(subagentTool.execute).not.toBe(nativeSubagentExecute);
     } finally {
       await cleanup();
     }
   });
 
-  test('native default leaves the native subagent description untouched', async () => {
-    const { ctx, toolUpdates } = makeCtx(projectDir);
+  test('native delegation wording retains the host schema validators and executor in off mode', async () => {
+    await writeProjectConfig({ backgroundJobs: { mode: 'off' } });
+    const { ctx, subagentTool } = makeCtx(projectDir);
     const cleanup = await createV2Setup()(ctx);
     try {
-      expectNativeWrap(toolUpdates);
+      const schema = subagentSchema(subagentTool);
+      const description = schema.fields.model.ast.annotations?.description;
+      const guidance =
+        'Set this when the user or delegation instructions select a model or variant;';
+      expect(description).toBe(guidance);
+      expect(subagentTool.description).toBe(`Native delegation. ${guidance}`);
+      expect(subagentTool.execute).toBe(nativeSubagentExecute);
+      const decode = Schema.decodeUnknownSync(schema);
+      const args = {
+        agent: 'explorer',
+        description: 'Review',
+        prompt: 'Review this',
+      };
+      expect(decode(args)).toEqual(args);
+      expect(decode({ ...args, sessionID: 'ses_host_child' })).toEqual({
+        ...args,
+        sessionID: 'ses_host_child',
+      });
+      expect(() => decode({ ...args, sessionID: 'bad-id' })).toThrow();
+      expect(() => decode({ ...args, model: 42 })).toThrow();
+      expectQueueSchema(subagentTool, false);
     } finally {
       await cleanup();
     }

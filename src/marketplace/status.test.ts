@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   readDesiredMarketplacePackageIds,
   readMarketplaceRuntimeStatus,
@@ -20,12 +20,12 @@ afterEach(() => {
   }
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    if (dir) removeTmpDir(dir);
   }
 });
 
 function setup(config: object, inspection: MarketplaceStoreInspection) {
-  const directory = mkdtempSync(join(tmpdir(), 'marketplace-status-'));
+  const directory = createTmpDir();
   tempDirs.push(directory);
   const configDirectory = join(directory, '.opencode');
   mkdirSync(configDirectory, { recursive: true });
@@ -49,7 +49,7 @@ function setup(config: object, inspection: MarketplaceStoreInspection) {
       },
     },
     readCount: () => reads,
-    cleanup: () => rmSync(directory, { recursive: true, force: true }),
+    cleanup: () => removeTmpDir(directory),
   };
 }
 

@@ -1,5 +1,4 @@
 import type { Server } from 'node:http';
-import path from 'node:path';
 import type { PluginInput } from '@opencode-ai/plugin';
 import type { PluginConfig } from '../config';
 import { log } from '../utils';
@@ -10,7 +9,10 @@ import {
   readDashboardAuthFile,
   tryBecomeDashboard,
 } from './dashboard';
-import { interviewOwnerSessionID } from './document';
+import {
+  createInterviewDirectoryPath,
+  interviewOwnerSessionID,
+} from './document';
 import {
   createV1InterviewSessionRuntime,
   type InterviewSessionRuntime,
@@ -244,7 +246,7 @@ export function createDashboardManager(
     fallbackServer ??= createInterviewServer(
       createInterviewServerDeps(
         service,
-        path.join(ctx.directory, outputFolder),
+        createInterviewDirectoryPath(ctx.directory, outputFolder),
         0,
       ),
     );

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 import { createTimerHarness } from '../../utils/test-timers';
 import type { EqualizeAgentPanesOptions } from './layout-equalize';
 
@@ -25,7 +25,9 @@ mock.module('../../utils/logger', () => ({
   log: loggerMock,
 }));
 
+const actualCompat = await import('../../utils/compat');
 mock.module('../../utils/compat', () => ({
+  ...actualCompat,
   crossSpawn: crossSpawnMock,
 }));
 
@@ -114,7 +116,7 @@ async function spawnRunCommand(platform: NodeJS.Platform): Promise<string> {
     return createSpawnResult();
   });
   const { HerdrMultiplexer } = await importFreshHerdr();
-  const dir = mkdtempSync(join(tmpdir(), 'omos-pane-'));
+  const dir = createTmpDir();
   const bin = join(dir, 'opencode.exe');
   writeFileSync(bin, '');
   const originalBin = process.env.OPENCODE_BIN;
@@ -132,7 +134,7 @@ async function spawnRunCommand(platform: NodeJS.Platform): Promise<string> {
   } finally {
     if (originalBin === undefined) delete process.env.OPENCODE_BIN;
     else process.env.OPENCODE_BIN = originalBin;
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 }
 
@@ -2170,7 +2172,7 @@ describe('HerdrMultiplexer', () => {
 
   test('desktop sweep recovers a journaled unverified spawn with verified ownership', async () => {
     process.env.HC_TERMINAL_ID = 't-parent';
-    const dir = mkdtempSync(join(tmpdir(), 'omos-herdr-journal-'));
+    const dir = createTmpDir('omos-herdr-journal-');
     const journalPath = join(dir, 'recovery.json');
     const spawnToken = '11111111-1111-4111-8111-111111111111';
     const title = `omosc:${process.pid - 1}:session-old`;
@@ -2237,13 +2239,13 @@ describe('HerdrMultiplexer', () => {
       const panes = await adapter.listPanesWithTitles();
       expect(panes).toEqual([{ paneId: 't-orphan', title }]);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     }
   });
 
   test('desktop sweep journal recovery ignores candidates without verified ownership', async () => {
     process.env.HC_TERMINAL_ID = 't-parent';
-    const dir = mkdtempSync(join(tmpdir(), 'omos-herdr-journal-'));
+    const dir = createTmpDir('omos-herdr-journal-');
     const journalPath = join(dir, 'recovery.json');
     const spawnToken = '22222222-2222-4222-8222-222222222222';
     writeFileSync(
@@ -2305,7 +2307,7 @@ describe('HerdrMultiplexer', () => {
       expect(await adapter.listPanesWithTitles()).toEqual([]);
       expect(commands().some((command) => command[1] === 'kill')).toBe(false);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTmpDir(dir);
     }
   });
 

@@ -32,6 +32,11 @@ oh-my-opencode-slim is an agent orchestration plugin for OpenCode. It includes a
 
 The main idea is simple: instead of forcing one model to do everything, the plugin routes each part of the job to the agent best suited for it, balancing **quality, speed and cost**. The Orchestrator plans the work graph, dispatches specialists as background tasks, and reconciles their results before continuing.
 
+Delegation model guidance honors both user choices and delegation instructions.
+The plugin updates the model guidance through OpenCode's native `subagent`
+tool transform. Its Effect schema retains native validators and optional
+fields when Slim rewrites the model annotation.
+
 ### ✨ Highlights
 
 - **[Deepwork](src/skills/deepwork/SKILL.md)** for heavy programming sessions.
@@ -54,6 +59,10 @@ The main idea is simple: instead of forcing one model to do everything, the plug
 - **Own your presets.** Model lineups change fast, so the
   [example presets](#preset-docs) go stale quickly. Use them for ideas, then
   build your own around the models you actually have.
+- **[Task queues and dependencies](docs/background-orchestration.md)** — inspect
+  the selected parent's queue with `/queue`, enforce prerequisites with
+  `id`/`depends_on`, and wait for completion with `task_wait`. Queue controls
+  postpone or cancel pending admissions without interrupting running work.
 
 ### What Users Say
 
@@ -160,9 +169,19 @@ bun install
 bun run build
 ```
 
-### Getting Started
+### OpenCode 2.4+
 
-Slim requires OpenCode **2.3.0 or newer**. OpenCode delivers subagent completions to the parent. Slim removed its five-minute idle TODO reminder. See the [upgrade guide](docs/installation.md#upgrading) for the host update and configuration changes.
+Slim requires OpenCode **2.4.0 or newer**. OpenCode runs delegated agents using
+its native `subagent` tool and delivers completions to the parent. Slim's
+optional admission queue adds concurrency limits and task dependencies before
+native execution. The TUI provides `/preset` and `/queue`. Multiplexer panes
+require the shared service or an explicit `--server`.
+
+See the [installation and upgrade guide](docs/installation.md#upgrading) for
+host requirements and the [configuration reference](docs/configuration.md)
+for feature settings.
+
+### Getting Started
 
 The installer generates both OpenAI and OpenCode Go presets, with OpenAI active by default.
 
@@ -696,13 +715,12 @@ activation, and update flow.
 
 ## 🧩 Skills
 
-Skills are prompt-based instructions injected into an agent's system prompt to
+Skills are prompt-based instructions loaded into an agent's context to
 guide decisions, workflows, and tool use. Unlike MCPs (which are running
 servers), a skill runs no process — it is a focused playbook an agent activates
-when the task calls for it. The plugin registers its eight bundled skills
-in-process at load — updates apply on restart, nothing is copied to disk. A
-same-named skill directory under `~/.config/opencode/skills/` overrides the
-bundled version.
+when the task calls for it. The plugin registers bundled skills in-process at
+load, and updates apply on restart. A same-named skill directory under
+`~/.config/opencode/skills/` overrides the bundled version.
 
 | Skill | Purpose | Default agent | How to invoke |
 |:-----:|---------|---------------|---------------|
@@ -715,6 +733,7 @@ bundled version.
 | <img src="img/skills/step-back.webp" width="120" alt="Step Back artifact"><br>[`step-back`](src/skills/step-back/SKILL.md) | Pauses snowballing patches to reassess direction and propose a cleaner path | `orchestrator` | automatic when fixes start stacking |
 | <img src="img/skills/deanchor.webp" width="120" alt="Deanchor artifact"><br>[`deanchor`](src/skills/deanchor/SKILL.md) | Generalizes from examples instead of copying them with light edits | `orchestrator` | automatic when a request includes examples |
 | <img src="img/skills/ai-estimates.webp" width="120" alt="AI Estimates artifact"><br>[`ai-estimates`](src/skills/ai-estimates/SKILL.md) | Estimates task duration for a human working with AI, not alone | `orchestrator` | ask how long something will take |
+| [`delegation`](src/skills/delegation/SKILL.md) | Lossless model references and variant precedence for delegated host calls | `orchestrator` | automatic during model selection |
 | <img src="img/skills/reflect.webp" width="120" alt="Reflect artifact"><br>[`reflect`](src/skills/reflect/SKILL.md) | Turns repeated workflow friction into reusable skills, agents, or config | `orchestrator` | `/reflect` |
 | <img src="img/skills/oh-my-opencode-slim.webp" width="120" alt="oh-my-opencode-slim artifact"><br>[`oh-my-opencode-slim`](src/skills/oh-my-opencode-slim/SKILL.md) | Configures and safely improves the plugin setup itself | `orchestrator` | ask to tune your setup |
 
@@ -722,6 +741,29 @@ Skill assignments are permission grants — an agent can only activate skills it
 has been given. Configure them per agent with the `skills` array in
 `~/.config/opencode/oh-my-opencode-slim.json`: an explicit list, `"*"` for
 everything, or `"!skill-name"` to deny one.
+
+All registered skills, including global/user skills such as `show-me`,
+are eligible for `/<skill-id>`. The optional root `skillCommandMode` setting
+defaults to `full`: inline the body between `<skill-instruction>` tags with a
+base-directory hint, then wrap the unchanged arguments in `<user-request>`.
+`reference` instead asks the model to load and follow the exact skill ID with
+the `skill` tool, without inlining the body; loading depends on the model and
+normal tool permissions. `none` skips generic commands without disabling the
+skills. A nested `slim.command` field in a skill's `SKILL.md` YAML frontmatter
+overrides the global mode, including opting in when the global mode is `none`.
+Missing or invalid overrides inherit the global mode.
+
+Explicit commands still win name collisions, including the existing
+`/deepwork` and `/reflect` workflows; these modes do not change their behavior
+or skill permissions. A name owned by neither an explicit command nor a
+generated skill command reports `Command "/<name>" not found.` instead of a
+bare argument blob. Reload the plugin after changing the global mode. The
+adapter reconciles the catalog after event
+subscription and refreshes the catalog and per-skill metadata on host
+skill/plugin updates, including skills registered later during activation.
+See [configuration examples](docs/configuration.md#generated-skill-commands)
+and the delivery and refresh limits in
+[Skill Slash Commands](docs/skills.md#skill-slash-commands).
 
 See **[Skills](docs/skills.md)** for full documentation, or browse the
 illustrated overview at
@@ -767,6 +809,10 @@ install details.
 
 Use this section as a map: start with installation, then jump to features, configuration, or example presets depending on what you need.
 
+This fork's [`my-v2/v3.0.8-fixes` port notes](docs/my-v2-v3.0.8-port.md)
+map the previous my-v2 scenarios to upstream v3.0.8 and document the OpenCode
+2.4+ compatibility boundary, native execution reuse and admission queue.
+
 <a id="features-and-workflows"></a>
 
 ### ✨ Features & Workflows
@@ -779,7 +825,7 @@ Use this section as a map: start with installation, then jump to features, confi
 | **[Multiplexer Integration](docs/multiplexer-integration.md)** | Watch agents work live in Tmux, Zellij, Herdr, cmux, kitty, WezTerm, or Orca panes |
 | **[Codemap](docs/skills.md#codemap)** | Generate hierarchical codemaps to understand large codebases faster |
 | **[Clonedeps](docs/skills.md#clonedeps)** | Clone selected dependency source into an ignored local workspace for inspection |
-| **[Worktrees](docs/skills.md#worktrees)** | Use `.slim/worktrees/` lanes for isolated parallel or risky coding work |
+| **[Worktrees](docs/skills.md#worktrees)** | Use `.local/.slim/worktrees/` lanes for isolated parallel or risky coding work |
 | **[Preset Switching](docs/presets/preset-switching.md)** | Switch agent model presets at runtime with `/preset` |
 | **[Interview](docs/interview.md)** | Turn rough ideas into a structured markdown spec through a browser-based Q&A flow, then implement it with `/implement` |
 | **[Companion](docs/companion.md)** | Floating window companion for parsing, help, and types |
@@ -797,7 +843,7 @@ Use this section as a map: start with installation, then jump to features, confi
 | **[Background Orchestration](docs/background-orchestration.md)** | Scheduler-first orchestrator model built around native background subagents |
 | **[Maintainer Guide](docs/maintainers.md)** | Issue triage rules, label meanings, support routing, and repo maintenance workflow |
 | **[Developer Evals](docs/evals.md)** | Source-checkout routing/reliability harness, offline scoring, and advisory model judging |
-| **[Skills](docs/skills.md)** | Bundled skills such as `simplify`, `codemap`, `clonedeps`, `deepwork`, `verification-planning`, `step-back`, `deanchor`, `ai-estimates`, `reflect`, `worktrees`, and `oh-my-opencode-slim` |
+| **[Skills](docs/skills.md)** | Bundled skills such as `simplify`, `codemap`, `clonedeps`, `delegation`, `deepwork`, `verification-planning`, `step-back`, `deanchor`, `ai-estimates`, `reflect`, `worktrees`, and `oh-my-opencode-slim` |
 | **[MCPs](docs/mcps.md)** | `context7`, `gh_grep`, and how MCP permissions work per agent |
 | **[Tools](docs/tools.md)** | What Slim adds: background task control, `ast_grep` search, and the enhanced `webfetch` |
 

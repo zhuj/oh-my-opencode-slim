@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { Database } from 'bun:sqlite';
 /**
- * Packed-artifact, headless OpenCode 2.3.2 lifecycle verification.
+ * Packed-artifact, headless OpenCode 2.4.1 lifecycle verification.
  *
  * Build first, then run:
  *   bun scripts/verify-v2-native-lifecycle.ts
@@ -66,7 +66,7 @@ type Mode = 'default' | 'native' | 'off';
 type PackEntry = { filename?: string };
 
 const ROOT = '/tmp/opencode/v2-native-lifecycle';
-const HOST_VERSION = '2.3.2';
+const HOST_VERSION = '2.4.1';
 const HOST = process.env.V2_LIFECYCLE_HOST ?? 'opencode';
 const PLUGIN_KV_NAMESPACE = `plugin:${[...'oh-my-opencode-slim']
   .map((character) => character.charCodeAt(0).toString(16).padStart(4, '0'))
@@ -2459,7 +2459,7 @@ async function selfCheck() {
     assert.equal(pluginConfig('off').backgroundJobs?.mode, 'off');
     assert('plugins' in hostConfig('/tmp/opencode/local-only', model));
     assert(!('plugin' in hostConfig('/tmp/opencode/local-only', model)));
-    assert.equal(HOST_VERSION, '2.3.2');
+    assert.equal(HOST_VERSION, '2.4.1');
     assert.deepEqual(subagent('Local', { sessionID: 'ses_local' }).input, {
       agent: 'explorer',
       description: 'Local lifecycle verification',

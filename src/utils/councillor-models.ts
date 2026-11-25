@@ -12,9 +12,10 @@ export type CouncillorModelEntry = { id: string; variant?: string };
 /**
  * Flatten a councillor model config into an ordered list of model entries.
  *
- * Accepts either a single "provider/model" string or an ordered fallback
- * chain (array of strings and/or `{ id, variant }` entries). Entries that
- * don't carry their own variant fall back to the shared `fallbackVariant`.
+ * Accepts either a single provider/model[#variant] reference,
+ * or an ordered fallback chain (array of strings and/or
+ * `{ id, variant }` entries). Entries without their own variant fall back to
+ * the shared `fallbackVariant`.
  */
 export function normalizeCouncillorModels(
   model: string | Array<string | CouncillorModelEntry>,

@@ -39,7 +39,8 @@ export function mergeTaskStance<T>(override: T, factoryPermission: unknown): T {
     override === null ||
     typeof override !== 'object' ||
     Array.isArray(override) ||
-    (override as Record<string, unknown>).task !== undefined
+    (override as Record<string, unknown>).task !== undefined ||
+    (override as Record<string, unknown>).subagent !== undefined
   ) {
     return override;
   }

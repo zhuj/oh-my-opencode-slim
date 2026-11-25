@@ -1,7 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import {
   createMarketplaceRegistryEntry,
   createMarketplaceRegistryEntryV3,
@@ -9,6 +6,7 @@ import {
   createMarketplaceRegistryIndexV3,
   type MarketplacePackageBundle,
 } from '../marketplace-contract/index.js';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   MarketplaceCompatibilityError,
   MarketplaceRegistryIntegrityError,
@@ -79,7 +77,7 @@ function response(value: unknown, status = 200): Response {
 
 describe('MarketplaceRegistryClient', () => {
   test('update reports an installed latest version without calling it incompatible', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'marketplace-latest-'));
+    const root = createTmpDir();
     const v2 = bundle('1.0.0', 'community/latest');
     const v3 = bundle('1.0.0', 'community/latest', 3);
     if (v2.manifest.schemaVersion !== 2 || v3.manifest.schemaVersion !== 3)
@@ -111,7 +109,7 @@ describe('MarketplaceRegistryClient', () => {
       );
       expect(service.show('community/latest').digest).toBe(installed.digest);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -176,7 +174,7 @@ describe('MarketplaceRegistryClient', () => {
           ? response(index)
           : response(v3Bundle),
     });
-    const rootDir = mkdtempSync(join(tmpdir(), 'marketplace-live-routing-'));
+    const rootDir = createTmpDir();
 
     try {
       const downloaded = await client.downloadV3('alvin/paladin');
@@ -199,7 +197,7 @@ describe('MarketplaceRegistryClient', () => {
         installed.manifest.routing.delegateWhen.map((line) => line.length),
       ).toEqual([164, 170]);
     } finally {
-      rmSync(rootDir, { recursive: true, force: true });
+      removeTmpDir(rootDir);
     }
   });
 

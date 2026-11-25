@@ -25,13 +25,13 @@ The config system follows a layered architecture:
 | Abstraction | Purpose | Location |
 |-------------|---------|----------|
 | `PluginConfig` | Root configuration object with agents, presets, and feature flags | schema.ts |
-| `FeatureGates` | Frozen optional-subsystem projection; defaults to native and rejects a direct managed-mode seed | feature-gates.ts |
+| `FeatureGates` | Frozen optional-subsystem projection shared by server and TUI consumers | feature-gates.ts |
 | `AgentOverrideConfig` | Per-agent configuration (model, temperature, skills, MCPs) | schema.ts |
 | `CouncilConfig` | Multi-LLM council configuration with councillor presets and a default preset | council-schema.ts |
 | `MultiplexerConfig` | Unified pane management configuration (tmux/zellij) | schema.ts |
 | `AgentMcpPolicy` | Per-agent default MCP lists and wildcard/exclusion parsing | agent-mcps.ts |
 | `ListFilter` | Shared `"*"` / `"!name"` list splitter and predicate (agent skills/MCPs, multiplexer pane filter) | list-filter.ts |
-| `ProviderModelIdSchema` | Zod schema enforcing `provider/model` ID format (provider segment excludes slashes/whitespace) | model-id-schema.ts |
+| `ProviderModelIdSchema` | Shared provider-qualified model reference validation; nested slashes and colons remain part of the model ID, and `#` separates the variant | model-id-schema.ts |
 | Preset resolver | Preset normalization, layered merge (`mergePresetMaps`), and depth-first named-preset resolution (`resolvePresets` atomic, `PresetResolutionError` on unresolvable refs) | presets.ts |
 | `discoverProjectLocalSkillNames` | Current and ancestor `.opencode/skills` discovery from `SKILL.md` frontmatter names, symlink-confined to each location | project-skills.ts |
 | `getProjectConfigDirectories` | Shared host-aware `.opencode` walk: worktree-bounded on v1, root-bounded on v2, disabled by the host's project-config flag | loader.ts |
@@ -51,6 +51,23 @@ reads; uncached `loadPluginConfig` stays available.
 Shared JSONC parsing, locked atomic editing and path lookup live in `jsonc.ts`,
 `json-file.ts` and `paths.ts`, not the CLI. The full Marketplace manifest is not
 an eager config dependency: package-ID validation comes from `id-schema.ts`.
+
+`RuntimeConfig.agentProjection()` caches one deep-frozen product containing
+merged agent overrides, skill selections, capability admission, and ordered
+permission rules. Config reseeds, runtime preset changes, and supplemental
+project skill registration invalidate it along with model-array and fallback
+chain projections. Public `agents()` reads return independent mutable copies;
+marketplace-specific defaults use a separate uncached projection. Host model
+and permission snapshots remain separate inputs to final agent registration.
+Skill policy validation runs before accepting plugin or host config, local
+skill IDs, and registration candidates; cloning preserves own prototype-named
+rules without changing the object prototype.
+
+`project-resource-paths.ts` resolves ordered `resource_prefixes` within the
+project boundary. `project-skills.ts` retains native discovery and separately
+collects supplemental candidates; host-owned roots and skill identities win
+collisions. `project-skill-host-adapter.ts` maps admitted candidates to native
+v2 skill registrations using the validated `SKILL.md` path.
 
 ## Flow
 
@@ -158,7 +175,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `RuntimeConfig.reset(directory)`: Clear the singleton for a directory
 - `RuntimeConfig.captureHostConfig(opencodeConfig)`: Capture host-side config before the config hook mutates it
 - `setRuntimePreset(name)` / `getRuntimePreset()`: Runtime preset override (stale names clear it)
-- Derived getters: `plugin`, `preset`, `featureGates`, `agents()`, `agent(name)`, `disabledAgents`, `disabledTools`, `disabledSkills`, `disabledHooks`, `disabledCommands`, `customAgentNames`, `disabledMcps`, `imageRouting`, `multiplexer`, `backgroundJobs` (incl. `orchestratorWake`), `fallback`, `acpAgents`, `companion`, `council`, `updateCheckerEnabled`, `stripOrchestratorModel`, `setDefaultAgent`, `compactSidebar`, `modelArrays` (incl. councillor chains), `runtimeChains`, `primaryModel`, `smallModel()`, `hostAgent(name)`
+- Derived getters: `plugin`, `preset`, `featureGates`, `agents()`, `agent(name)`, `disabledAgents`, `disabledTools`, `disabledSkills`, `disabledHooks`, `disabledCommands`, `customAgentNames`, `disabledMcps`, `imageRouting`, `multiplexer`, `backgroundJobsMode`, `fallback`, `acpAgents`, `companion`, `council`, `updateCheckerEnabled`, `stripOrchestratorModel`, `setDefaultAgent`, `compactSidebar`, `modelArrays` (incl. councillor chains), `runtimeChains`, `resourcePrefixes`, `primaryModel`, `smallModel()`, `hostAgent(name)`
 
 ### MCP Management
 
@@ -170,6 +187,8 @@ This allows consumers to import directly from `src/config` rather than individua
 ### PluginConfig (Root Schema)
 - `preset`: Active preset name
 - `setDefaultAgent`: Whether to select the orchestrator as the default agent
+- `resource_prefixes`: Ordered project-confined supplemental resource roots
+- `skillCommandMode`: Default template mode for generated skill slash commands
 - `sessionPresetRouting`: Session binding and inference routing, independently
   selectable from Slim task controls; absent follows `backgroundJobs.mode`
 - `replaceBuiltinSubagents`: Controls replacement of undeclared host general/explore
@@ -187,14 +206,14 @@ This allows consumers to import directly from `src/config` rather than individua
 - `multiplexer`: Unified pane management config (type, layout, sizes, viewer surface)
 - `interview`: Interview feature configuration
 - `backgroundJobs`: Background job configuration
-- Removed managed settings include `backgroundJobs.concurrency`, `sameProviderPolicy`, `wallClockTimeoutMs`, and `stopConfirmationMs`. The v2 loader rejects positive concurrency and wall-clock limits; other removed keys are stripped with a warning before schema validation.
+- Admission concurrency is configured under `backgroundJobs.concurrency`. The v2 loader rejects positive wall-clock limits. The loader handles retired board, wake and lifecycle settings.
 - `fallback`: Failover/retry configuration
 - `council`: Council configuration with councillor presets and a default preset
 - `companion`: Companion animation configuration
 - `acpAgents`: active ACP wrapper projection (empty when `acp_run` or every wrapper is disabled; raw config remains `plugin.acpAgents`)
 
 ### AgentOverrideConfig
-- `model`: Model ID or array of model IDs
+- `model`: `provider/model[#variant]`, a fallback chain, or the dynamic selected-model reference
 - `inheritModelFrom`: Explicitly inherit the current `session` model or the configured `orchestrator` model when `model` is omitted; supported for built-in and custom agents
 - `temperature`: Sampling temperature (0-2)
 - `variant`: Model variant identifier
@@ -205,7 +224,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `options`: Provider-specific model options
 - `displayName`: Custom display name for the agent
 - `color`: Agent display color as a six-digit hex value or OpenCode theme color
-- Delegation restrictions use native `subagent` rules; no separate Slim agent allowlist or scoped prompt catalog
+- `primary` exposes a custom agent in the native primary roster. `subagents` maps a primary’s legacy exact-name scope onto native ordered delegation permissions and the marked prompt section.
 
 ### CouncilConfig
 - `presets`: Named council presets (map of councillor name → CouncillorConfig)

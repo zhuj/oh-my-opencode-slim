@@ -14,8 +14,8 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import tuiPlugin, { readConfigState, retainLastGoodConfigState } from '../tui';
 import { notifyConfigChanged } from './config-change-coordinator';
 import { makeTestEnv, type TestEnv } from './test-fixtures';
@@ -292,9 +292,7 @@ describe('v2 sidebar config-state invalidation', () => {
 
   test('directory changes rebind the coordinator listener', async () => {
     writeConfig('alpha');
-    const secondProject = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'omos-v2sb-proj-next-'),
-    );
+    const secondProject = createTmpDir();
     const ctx = makeContext();
     const mutable = ctx as typeof ctx & {
       location: { directory: string };
@@ -313,7 +311,7 @@ describe('v2 sidebar config-state invalidation', () => {
       );
     } finally {
       cleanup?.();
-      fs.rmSync(secondProject, { recursive: true, force: true });
+      removeTmpDir(secondProject);
     }
   });
 });

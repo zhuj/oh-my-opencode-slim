@@ -7,6 +7,7 @@ import {
   buildOrchestratorPrompt,
   createOrchestratorAgent,
 } from './orchestrator';
+import { prependBaseAgentPrompt } from './prompt-layers';
 import { SPECIALIST_DESCRIPTIONS } from './role-descriptions';
 
 const DIRECTORY = 'runtime-test-orchestrator-native-catalog';
@@ -79,7 +80,7 @@ describe('orchestrator prompt', () => {
 
 describe('native agent catalog ownership', () => {
   test('ordinary roster changes do not alter the coordinator prompt', () => {
-    const expected = buildOrchestratorPrompt();
+    const expected = prependBaseAgentPrompt(buildOrchestratorPrompt());
     for (const config of [
       {},
       { backgroundJobs: { mode: 'off' } },

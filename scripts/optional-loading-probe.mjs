@@ -56,7 +56,7 @@ const agentDraft = {
   default() {},
 };
 const cleanup = await mod.default.setup({
-  app: { version: '2.3.0' },
+  app: { version: '2.4.1' },
   location: { directory },
   agent: {
     async transform(fn) {

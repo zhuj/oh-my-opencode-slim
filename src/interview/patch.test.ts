@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { withTmpDir } from '../test-utils';
 import {
   extractSpecOutline,
   InterviewPatchRequiredError,
@@ -99,239 +99,225 @@ describe('applyUnifiedDiff', () => {
 
 describe('rewriteInterviewDocument', () => {
   test('uses the kickoff summary when the empty patch targets the placeholder', async () => {
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'interview-patch-empty-kickoff-'),
-    );
-    const record: InterviewRecord = {
-      id: 'interview-empty-kickoff',
-      sessionID: 'session-empty-kickoff',
-      idea: 'Empty kickoff',
-      markdownPath: path.join(directory, 'spec.md'),
-      baseMessageCount: 0,
-      status: 'active',
-      completed: false,
-    };
+    await withTmpDir(async (directory) => {
+      const record: InterviewRecord = {
+        id: 'interview-empty-kickoff',
+        sessionID: 'session-empty-kickoff',
+        idea: 'Empty kickoff',
+        markdownPath: path.join(directory, 'spec.md'),
+        baseMessageCount: 0,
+        status: 'active',
+        completed: false,
+      };
 
-    await rewriteInterviewDocument(record, '', 'empty-kickoff');
-    const next = await rewriteInterviewDocument(
-      record,
-      'Full kickoff specification',
-      'empty-kickoff',
-      '',
-    );
+      await rewriteInterviewDocument(record, '', 'empty-kickoff');
+      const next = await rewriteInterviewDocument(
+        record,
+        'Full kickoff specification',
+        'empty-kickoff',
+        '',
+      );
 
-    expect(next).toContain('Full kickoff specification');
-    expect(next).not.toContain('Waiting for interview answers.');
-    await fs.rm(directory, { recursive: true, force: true });
+      expect(next).toContain('Full kickoff specification');
+      expect(next).not.toContain('Waiting for interview answers.');
+    });
   });
 
   test('applies a patch onto the current spec and leaves Q&A history alone', async () => {
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'interview-patch-'),
-    );
-    const record: InterviewRecord = {
-      id: 'interview-1',
-      sessionID: 'session-1',
-      idea: 'Patch idea',
-      markdownPath: path.join(directory, 'spec.md'),
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      baseMessageCount: 0,
-    };
+    await withTmpDir(async (directory) => {
+      const record: InterviewRecord = {
+        id: 'interview-1',
+        sessionID: 'session-1',
+        idea: 'Patch idea',
+        markdownPath: path.join(directory, 'spec.md'),
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        baseMessageCount: 0,
+      };
 
-    await rewriteInterviewDocument(record, SOURCE, 'patch-idea');
-    const patched = await rewriteInterviewDocument(
-      record,
-      'Updated the introduction.',
-      undefined,
-      ['@@ -3,1 +3,1 @@', '-alpha', '+beta'].join('\n'),
-    );
+      await rewriteInterviewDocument(record, SOURCE, 'patch-idea');
+      const patched = await rewriteInterviewDocument(
+        record,
+        'Updated the introduction.',
+        undefined,
+        ['@@ -3,1 +3,1 @@', '-alpha', '+beta'].join('\n'),
+      );
 
-    expect(patched).toContain('beta');
-    expect(patched).not.toContain('\nalpha\n');
-    expect(patched).toContain('## Q&A history');
-    expect(patched).not.toContain('Updated the introduction.');
-    await fs.rm(directory, { recursive: true, force: true });
+      expect(patched).toContain('beta');
+      expect(patched).not.toContain('\nalpha\n');
+      expect(patched).toContain('## Q&A history');
+      expect(patched).not.toContain('Updated the introduction.');
+    });
   });
 
   test('does not write a short status when the patch fails', async () => {
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'interview-patch-'),
-    );
-    const record: InterviewRecord = {
-      id: 'interview-2',
-      sessionID: 'session-2',
-      idea: 'Patch idea',
-      markdownPath: path.join(directory, 'spec.md'),
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      baseMessageCount: 0,
-    };
-    await rewriteInterviewDocument(record, SOURCE);
+    await withTmpDir(async (directory) => {
+      const record: InterviewRecord = {
+        id: 'interview-2',
+        sessionID: 'session-2',
+        idea: 'Patch idea',
+        markdownPath: path.join(directory, 'spec.md'),
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        baseMessageCount: 0,
+      };
+      await rewriteInterviewDocument(record, SOURCE);
 
-    await expect(
-      rewriteInterviewDocument(
-        record,
-        'status only',
-        undefined,
-        '@@ -1,1 +1,1 @@\n-missing\n+nope',
-      ),
-    ).rejects.toBeInstanceOf(InterviewPatchApplyError);
+      await expect(
+        rewriteInterviewDocument(
+          record,
+          'status only',
+          undefined,
+          '@@ -1,1 +1,1 @@\n-missing\n+nope',
+        ),
+      ).rejects.toBeInstanceOf(InterviewPatchApplyError);
 
-    const saved = await fs.readFile(record.markdownPath, 'utf8');
-    expect(saved).toContain('alpha');
-    expect(saved).not.toContain('status only');
-    await fs.rm(directory, { recursive: true, force: true });
+      const saved = await fs.readFile(record.markdownPath, 'utf8');
+      expect(saved).toContain('alpha');
+      expect(saved).not.toContain('status only');
+    });
   });
 
   test('requires a patch after the initial spec has been written', async () => {
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'interview-patch-'),
-    );
-    const record: InterviewRecord = {
-      id: 'interview-required-patch',
-      sessionID: 'session-required-patch',
-      idea: 'Patch idea',
-      markdownPath: path.join(directory, 'spec.md'),
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      baseMessageCount: 0,
-    };
-    await rewriteInterviewDocument(record, SOURCE);
+    await withTmpDir(async (directory) => {
+      const record: InterviewRecord = {
+        id: 'interview-required-patch',
+        sessionID: 'session-required-patch',
+        idea: 'Patch idea',
+        markdownPath: path.join(directory, 'spec.md'),
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        baseMessageCount: 0,
+      };
+      await rewriteInterviewDocument(record, SOURCE);
 
-    await expect(
-      rewriteInterviewDocument(record, 'status only'),
-    ).rejects.toBeInstanceOf(InterviewPatchRequiredError);
-    await fs.rm(directory, { recursive: true, force: true });
+      await expect(
+        rewriteInterviewDocument(record, 'status only'),
+      ).rejects.toBeInstanceOf(InterviewPatchRequiredError);
+    });
   });
 
   test('keeps the current spec when patch is explicitly empty', async () => {
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'interview-patch-'),
-    );
-    const record: InterviewRecord = {
-      id: 'interview-3',
-      sessionID: 'session-3',
-      idea: 'Patch idea',
-      markdownPath: path.join(directory, 'spec.md'),
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      baseMessageCount: 0,
-    };
-    await rewriteInterviewDocument(record, SOURCE);
-    const next = await rewriteInterviewDocument(
-      record,
-      'No spec change.',
-      undefined,
-      '',
-    );
-    expect(next).toContain('alpha');
-    expect(next).not.toContain('No spec change.');
-    expect(extractSpecOutline(SOURCE)).toContain('## 1. Purpose & Scope');
-    await fs.rm(directory, { recursive: true, force: true });
+    await withTmpDir(async (directory) => {
+      const record: InterviewRecord = {
+        id: 'interview-3',
+        sessionID: 'session-3',
+        idea: 'Patch idea',
+        markdownPath: path.join(directory, 'spec.md'),
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        baseMessageCount: 0,
+      };
+      await rewriteInterviewDocument(record, SOURCE);
+      const next = await rewriteInterviewDocument(
+        record,
+        'No spec change.',
+        undefined,
+        '',
+      );
+      expect(next).toContain('alpha');
+      expect(next).not.toContain('No spec change.');
+      expect(extractSpecOutline(SOURCE)).toContain('## 1. Purpose & Scope');
+    });
   });
 
   test('leaves the body unchanged when a trailing hunk is cut off', async () => {
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'interview-patch-cutoff-'),
-    );
-    const record: InterviewRecord = {
-      id: 'interview-cutoff',
-      sessionID: 'session-cutoff',
-      idea: 'Cutoff idea',
-      markdownPath: path.join(directory, 'spec.md'),
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      baseMessageCount: 0,
-    };
-    await rewriteInterviewDocument(record, SOURCE);
-    await expect(
-      rewriteInterviewDocument(
-        record,
-        'ignored',
-        undefined,
-        '@@ -3,1 +3,1 @@\n-alpha\n+beta\n@@ -7,1 +7,1 @@',
-      ),
-    ).rejects.toBeInstanceOf(InterviewPatchApplyError);
-    expect(await fs.readFile(record.markdownPath, 'utf8')).toContain('alpha');
-    await fs.rm(directory, { recursive: true, force: true });
+    await withTmpDir(async (directory) => {
+      const record: InterviewRecord = {
+        id: 'interview-cutoff',
+        sessionID: 'session-cutoff',
+        idea: 'Cutoff idea',
+        markdownPath: path.join(directory, 'spec.md'),
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        baseMessageCount: 0,
+      };
+      await rewriteInterviewDocument(record, SOURCE);
+      await expect(
+        rewriteInterviewDocument(
+          record,
+          'ignored',
+          undefined,
+          '@@ -3,1 +3,1 @@\n-alpha\n+beta\n@@ -7,1 +7,1 @@',
+        ),
+      ).rejects.toBeInstanceOf(InterviewPatchApplyError);
+      expect(await fs.readFile(record.markdownPath, 'utf8')).toContain('alpha');
+    });
   });
 });
 
 describe('document status updates', () => {
   test('preserves custom frontmatter and body when completing and reopening', async () => {
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'interview-document-status-'),
-    );
-    const record: InterviewRecord = {
-      id: 'status-preservation',
-      sessionID: 'owner-session',
-      idea: 'Status idea',
-      markdownPath: path.join(directory, 'spec.md'),
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      baseMessageCount: 0,
-    };
-    const frontmatter = [
-      '---',
-      'title: Custom title',
-      'owner: custom-owner',
-      'tags: [one, two]',
-      'date_created: 2026-10-07',
-      'status: active',
-      'custom: preserved',
-      '---',
-    ].join('\n');
-    const body = '\n# Custom body\n\nDo not rewrite this.\n';
-    await fs.writeFile(record.markdownPath, frontmatter + body, 'utf8');
-
-    const expectedComplete =
-      [
+    await withTmpDir(async (directory) => {
+      const record: InterviewRecord = {
+        id: 'status-preservation',
+        sessionID: 'owner-session',
+        idea: 'Status idea',
+        markdownPath: path.join(directory, 'spec.md'),
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        baseMessageCount: 0,
+      };
+      const frontmatter = [
         '---',
         'title: Custom title',
         'owner: custom-owner',
         'tags: [one, two]',
         'date_created: 2026-10-07',
-        'status: complete',
+        'status: active',
         'custom: preserved',
         '---',
-      ].join('\n') + body;
+      ].join('\n');
+      const body = '\n# Custom body\n\nDo not rewrite this.\n';
+      await fs.writeFile(record.markdownPath, frontmatter + body, 'utf8');
 
-    const complete = await markInterviewDocumentComplete(record);
-    expect(complete).toBe(expectedComplete);
+      const expectedComplete =
+        [
+          '---',
+          'title: Custom title',
+          'owner: custom-owner',
+          'tags: [one, two]',
+          'date_created: 2026-10-07',
+          'status: complete',
+          'custom: preserved',
+          '---',
+        ].join('\n') + body;
 
-    const expectedIncomplete =
-      [
-        '---',
-        'title: Custom title',
-        'owner: custom-owner',
-        'tags: [one, two]',
-        'date_created: 2026-10-07',
-        'custom: preserved',
-        '---',
-      ].join('\n') + body;
+      const complete = await markInterviewDocumentComplete(record);
+      expect(complete).toBe(expectedComplete);
 
-    const incomplete = await markInterviewDocumentIncomplete(record);
-    expect(incomplete).toBe(expectedIncomplete);
-    expect(incomplete).not.toContain('status:');
+      const expectedIncomplete =
+        [
+          '---',
+          'title: Custom title',
+          'owner: custom-owner',
+          'tags: [one, two]',
+          'date_created: 2026-10-07',
+          'custom: preserved',
+          '---',
+        ].join('\n') + body;
 
-    await fs.writeFile(record.markdownPath, expectedIncomplete, 'utf8');
+      const incomplete = await markInterviewDocumentIncomplete(record);
+      expect(incomplete).toBe(expectedIncomplete);
+      expect(incomplete).not.toContain('status:');
 
-    const expectedAdded =
-      [
-        '---',
-        'title: Custom title',
-        'owner: custom-owner',
-        'tags: [one, two]',
-        'date_created: 2026-10-07',
-        'custom: preserved',
-        'status: complete',
-        '---',
-      ].join('\n') + body;
+      await fs.writeFile(record.markdownPath, expectedIncomplete, 'utf8');
 
-    const added = await markInterviewDocumentComplete(record);
-    expect(added).toBe(expectedAdded);
-    await fs.rm(directory, { recursive: true, force: true });
+      const expectedAdded =
+        [
+          '---',
+          'title: Custom title',
+          'owner: custom-owner',
+          'tags: [one, two]',
+          'date_created: 2026-10-07',
+          'custom: preserved',
+          'status: complete',
+          '---',
+        ].join('\n') + body;
+
+      const added = await markInterviewDocumentComplete(record);
+      expect(added).toBe(expectedAdded);
+    });
   });
 });
 

@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import * as os from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 
 import type { PluginInput } from '@opencode-ai/plugin';
 
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 import { createSearchPathGuardHook, resolveSearchPath } from './index';
 
 describe('search-path-guard hook', () => {
@@ -25,12 +25,12 @@ describe('search-path-guard hook', () => {
   ): Promise<void> =>
     hook['tool.execute.before']({ tool }, args === undefined ? {} : { args });
 
-  beforeAll(async () => {
-    tempRoot = await mkdtemp(path.join(os.tmpdir(), 'search-path-guard-'));
+  beforeAll(() => {
+    tempRoot = createTmpDir();
   });
 
-  afterAll(async () => {
-    await rm(tempRoot, { recursive: true, force: true });
+  afterAll(() => {
+    removeTmpDir(tempRoot);
   });
 
   test('blocks grep when the absolute path does not exist', async () => {

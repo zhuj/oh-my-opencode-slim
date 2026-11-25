@@ -679,7 +679,7 @@ bunx oh-my-opencode-slim@latest companion install
   </tr>
   <tr>
     <td><strong><a href="docs/skills.md#worktrees">Worktrees</a></strong></td>
-    <td dir="rtl" align="right">از laneهای <code>.slim/worktrees/</code> برای coding ایزوله، موازی یا پرریسک استفاده کنید</td>
+    <td dir="rtl" align="right">از laneهای <code>.local/.slim/worktrees/</code> برای coding ایزوله، موازی یا پرریسک استفاده کنید</td>
   </tr>
   <tr>
     <td dir="rtl" align="right"><strong><a href="docs/presets/preset-switching.md">تغییر Preset</a></strong></td>
@@ -704,11 +704,11 @@ bunx oh-my-opencode-slim@latest companion install
   </tr>
   <tr>
     <td><strong><a href="docs/installation.md">راهنمای نصب</a></strong></td>
-    <td dir="rtl" align="right">نصب Plugin، استفاده از flagهای CLI، reset کردن config و عیب‌یابی setup</td>
+    <td dir="rtl" align="right">نیازمند OpenCode نسخهٔ 2.4.0 یا جدیدتر. نصب Plugin، استفاده از flagهای CLI، reset کردن config و عیب‌یابی setup</td>
   </tr>
   <tr>
     <td dir="rtl" align="right"><strong><a href="src/v2/codemap.md">سازگاری با OpenCode v2</a></strong></td>
-    <td dir="rtl" align="right">اجرای همان Plugin روی <code>opencode</code>: ماتریس featureها، baseline سازگاری با v2.3.0+ و pin کردن version</td>
+    <td dir="rtl" align="right">قراردادهای میزبان، مجوزها و سازگاری با OpenCode 2.4.0 یا جدیدتر</td>
   </tr>
   <tr>
     <td><strong><a href="docs/configuration.md">Configuration</a></strong></td>

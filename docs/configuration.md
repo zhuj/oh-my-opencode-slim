@@ -1,7 +1,7 @@
 # Configuration Reference
 
 Core settings, feature switches, and configuration precedence for the current
-OpenCode 2.3+ plugin. The generated
+OpenCode 2.4+ plugin. The generated
 [`oh-my-opencode-slim.schema.json`](../oh-my-opencode-slim.schema.json) lists
 accepted fields and types. Feature-specific settings live in the guides linked
 below; they are not separate configuration systems.
@@ -96,10 +96,10 @@ ESM modules cannot be unloaded; restart the host to measure cold-start savings.
 
 | Switch | Additional disables normally unnecessary |
 |---|---|
-| `tui: false` | `sidebar: false`, `/killall`, `/subagent`, TUI `/preset`, pane settings |
+| `tui: false` | `sidebar: false`, `/killall`, `/subagent`, `/queue`, TUI `/preset`, pane settings |
 | `interview.enabled: false` | `/interview`, `/implement`, `interview_submit_state` |
 | `marketplace.enabled: false` | `marketplace_inspect`, `marketplace_manage` |
-| `backgroundJobs.mode: "off"` | Four Slim task tools; session routing unless explicitly enabled |
+| `backgroundJobs.mode: "off"` | Slim task tools, admission queue and `/queue`; session routing unless explicitly enabled |
 | Disabled `foreground-fallback` hook | `fallback.enabled: false` |
 | `disabled_skills: ["reflect"]` | Disabled `/reflect` command |
 
@@ -113,10 +113,15 @@ active, or as an explicit veto against a nearer layer enabling that feature.
 | Option | Default | Purpose |
 |---|---|---|
 | `preset` | Unset | Select startup agent configuration from `presets` |
+| `routingBlock` | `false` | Add a static agent inventory to the stock orchestrator prompt. The native tool provides its permission-filtered roster independently |
 | `presets` | Unset | Named agent configurations; optional single-parent `extends` |
-| `agents` | Unset | Overrides shared across presets; unknown safe names define custom specialists |
+| `agents` | Unset | Overrides shared across presets; unknown safe names define custom agents |
 | `setDefaultAgent` | `true` | Set the native default to Orchestrator when unset or pointing at a subagent |
-| `backgroundJobs.mode` | `"native"` | `native` registers Slim task controls; `off` registers none. Both use native execution |
+| `backgroundJobs.mode` | Unset | Unset or legacy `managed` enables the admission queue and native task controls. Explicit `native` enables native task controls with an optional queue. `off` disables both |
+| `backgroundJobs.queue.enabled` | Follows mode and limits | Override queue enablement. Explicit `native` enables the queue when `concurrency` is present unless this switch is `false`. `off` always disables it |
+| `backgroundJobs.concurrency.defaultConcurrency` | `0` | Default cap on open native admissions in the directory. Limits accept integers from 0 to 1000. `0` means unlimited |
+| `backgroundJobs.concurrency.providerConcurrency` | `{}` | Caps keyed by provider ID, overriding the default cap |
+| `backgroundJobs.concurrency.modelConcurrency` | `{}` | Caps keyed by `provider/model` without a variant, overriding the provider cap |
 | `sessionPresetRouting` | Follows task mode | Independently enable persisted per-session inference bindings; `native` defaults on, `off` defaults off |
 | `replaceBuiltinSubagents` | `true` | Hide undeclared native `general`/`explore`; `false` keeps their host configuration |
 | `tui` | `true` | Enable all Slim TUI surfaces and server-side sidebar recording |
@@ -124,6 +129,8 @@ active, or as an explicit veto against a nearer layer enabling that feature.
 | `compactSidebar` | `true` | Compact rather than expanded sidebar layout |
 | `sidebarShowHiddenAgents` | `false` | Show Council internals as sidebar rows; registration and native agent visibility are unchanged |
 | `liveConfigRefresh` | `true` | Watch configuration candidates for inference-profile refresh; no watcher is created without a consumer |
+| `resource_prefixes` | `[".local", ".local/.slim", ".opencode"]` | Ordered project resource prefixes. An explicit empty array disables supplemental resource discovery |
+| `skillCommandMode` | `"full"` | Control generated skill commands with `"full"`, `"reference"` or `"none"` |
 | `stripOrchestratorModel` | `false` | Omit the configured Orchestrator model/variant so native session selection can win; an explicitly selected preset model is retained |
 | `autoUpdate` | `true` | Enable Slim TUI update checks and notices; host package management is separate |
 | `questionTimeoutMs` | Unset/`0` | Opt-in automatic answer for eligible unanswered questions; enabled range 60,000–2,147,483,647 ms |
@@ -227,9 +234,19 @@ routing off, children use registered agent settings. `disabled_commands:
 routing switch. Live refresh only updates inference fields, not prompts,
 permissions, skills, MCPs or registration; those require a new host generation.
 
-### Independent agent model inheritance
+### Model references and inheritance
 
-- A scalar `model` wins over `inheritModelFrom` in the same effective override.
+Qualified model references use `provider/model[#variant]`. The first slash
+separates the provider. Further slashes and literal colons belong to the model
+ID. For example, `openrouter/team/model:free#high` selects the
+`team/model:free` model from `openrouter` with variant `high`. Use
+`resolve_model` to check available references before adding them to a preset.
+
+- `model: { "dynamic": "selected" }` asks OpenCode to use the current session
+  model. It clears a configured agent model and its fallback chain, preserving
+  an explicit nonempty agent variant. Scalar `"opencode_model"` and
+  `"inherit"` are accepted as legacy spellings.
+- A concrete scalar `model` wins over `inheritModelFrom` in the same effective override.
 - Inheritance without a model clears a lower-layer model, including a host
   model. Both sources follow the live session/Orchestrator selection.
 - An array plus inheritance follows the live model while retaining the array as
@@ -286,7 +303,20 @@ rules in [Config Files](#config-files).
 The base is **inline `prompt` > resolved file > agent default**. When inline and
 file prompts coexist, Slim warns that inline wins. Append text follows that
 base, separated by two newlines. File and append inputs can come from different
-locations. User-authored content is not shortened by stock prompt changes.
+locations. Slim prepends its shared agent instructions to the resulting prompt.
+
+For selective reuse, put `<!-- slim-prompt-template:v1 -->` on the first line of
+a replacement or append input. References such as `{{slim.section.agents}}`
+render the supported section in place. The available sections are
+`intent_gate`, `agents`, `task_management`, `verification`, `orchestration`,
+`delegation` and `result_synthesis`. Escape a reference with a leading
+backslash to keep it literal. Unknown or malformed references in a marked
+template fail load with the template source. Plain prompts keep their text.
+
+When a primary declares `subagents`, the `agents` section uses the same
+normalized allowlist as the projected permission. If an explicit delegation
+permission takes precedence, the section is empty and OpenCode supplies the
+effective roster through its native tool.
 
 ### Host Vocabulary in Custom Prompts
 
@@ -309,7 +339,7 @@ with `@<agent-name>`; setting it on Orchestrator is rejected.
 
 ## Custom Agents
 
-Unknown safe names under `agents` create specialist agents, not new primaries:
+Unknown safe names under `agents` create specialists by default:
 
 ```jsonc
 {
@@ -324,11 +354,20 @@ Unknown safe names under `agents` create specialist agents, not new primaries:
 }
 ```
 
-Custom agents need a model and cannot collide with built-in, ACP, display or
+Custom agents need a model or `inheritModelFrom` and cannot collide with built-in, ACP, display or
 reserved Council-seat identities. Missing models are reported and skipped.
 `librarian` remains a reserved alias for Explorer: explicit Explorer fields win;
 use `explorer` in new configuration. Legacy generated MCP-pair repairs are
 reported by `doctor`; customized permissions are not inferred or rewritten.
+
+Set `primary: true` on a custom agent to make it selectable as a native primary.
+Use `subagents: ["fixer", "@researcher"]` on the orchestrator or a custom primary
+to scope its delegation. The entries accept registered names or configured
+display aliases. Slim compiles the list to ordered native rules with a
+wildcard deny followed by exact allows. An empty list denies all delegation.
+A configured `permission.task` or `permission.subagent` takes precedence,
+and native OpenCode user permissions still apply. Use native rules directly
+for wildcard patterns or delegates registered outside Slim.
 
 ## Agent Permissions
 
@@ -369,7 +408,10 @@ apply at their own execution seams.
 ### Merge semantics
 
 1. Explicit `permission` supplies the base.
-2. Resolved `skills` grants own `permission.skill`; global disables still win.
+2. Resolved skill directives, explicit skill permission rules and local
+   discoveries are merged in order. Explicit selections, removals and disabled
+   skill IDs keep their configured effect. Automatic additions honor author
+   rules.
 3. MCP selections fill only missing `<mcp>_*` keys; explicit action entries win.
 4. Native host rules and role/package capability ceilings can further restrict
    the resulting grants.
@@ -401,6 +443,24 @@ To keep Council under a restrictive policy, allow its synthesis agent and the
 configured `councillor-<seat>` IDs as well. OpenCode enforces the rules even for
 hidden seats. Existing Slim `permission.task` maps still project to native rules.
 
+### Local skills and skill policies
+
+`skills_include_local: true` adds discovered native project skills and the
+accepted supplemental skills from `resource_prefixes`. Native skills win
+name collisions. Overlapping supplemental roots are searched nearest ancestor
+first, then in prefix order. Hidden directories and hidden skill names are
+skipped. An empty `resource_prefixes` list leaves native skill discovery to
+OpenCode. See [Skills](skills.md) for command modes and resource layout.
+
+In skill selection arrays, `*` allows all, `!name` denies a name, and `?name`
+asks before use. Names may be patterns where the host permission language
+supports them. `skills_add` and `skills_remove` adjust the inherited list. An
+actual discovered or disabled skill ID must be literal and cannot contain
+`*` or `?`. Exact decimal IDs from `0` through `4294967294` are rejected in
+skill policy because JavaScript would reorder those keys and change the
+decision. For example, `123*` is a valid rule pattern, and `01` is a valid
+literal ID.
+
 ## Model fallback
 
 | Setting | Default | Effect |
@@ -431,7 +491,7 @@ through a fallback restore or landing on an exhausted primary is not itself
 fresh recovery. Request-rejected models stay excluded until the next external
 prompt even if other recovery resets occur.
 
-OpenCode 2.3 ends content-filter steps without a retry-hook call. Slim uses the
+OpenCode ends content-filter steps without a retry-hook call. Slim uses the
 failed-step evidence to switch and continue that same session. The host reports
 child periods; Slim adds no second completion notifier. A late model switch is
 reconciled only if the observed selection is still its source or target; a
@@ -446,10 +506,11 @@ the last valid profiles. Remove the keys; see [Upgrading](installation.md#upgrad
 
 ## Background Job Management
 
-`backgroundJobs.mode` selects optional Slim controls, not child execution.
-OpenCode owns spawn, continuation, steering, completion delivery and restart
-recovery. See [Background Orchestration](background-orchestration.md) for
-ownership and limits; [Tools](tools.md#background-task-control) owns tool usage.
+`backgroundJobs.mode` selects Slim's admission and task tools. OpenCode owns
+spawn, continuation, steering, completion delivery and restart recovery. The
+queue gates native calls with parent-scoped dependencies and directory-wide
+admission limits. See [Background Orchestration](background-orchestration.md)
+for queue controls, retained listing and native lifecycle behavior.
 
 ## Hooks
 
@@ -474,15 +535,23 @@ as unset so a lower layer's list still applies.
 ## Slash Commands
 
 `disabled_commands` accepts `interview`, `implement`, `deepwork`, `reflect`,
-`preset`, `killall` and `subagent`. A disabled command is neither registered nor
+`preset`, `killall`, `subagent` and `queue`. A disabled command is neither registered nor
 intercepted, leaving a same-named user command alone. Disabling the `reflect`
 skill also disables its command; disabling `deepwork` skill alone does not
 remove its self-contained command.
 
-`killall` and `subagent` are TUI commands. `tui: false` removes the entire Slim
+`killall`, `subagent` and `queue` are TUI commands. `tui: false` removes the entire Slim
 TUI surface; granular command disables leave other TUI features active. See
 [Skills](skills.md) for workflow commands and [Preset Switching](presets/preset-switching.md)
 for `/preset`.
+
+### Generated skill commands
+
+Set `skillCommandMode` to `"full"` to inline skill content, `"reference"` to
+direct the agent to load the exact skill by ID, or `"none"` to omit generic
+skill commands. A skill can override the global choice with `slim.command`
+in its `SKILL.md` frontmatter. Explicit commands and skill availability are
+independent of this setting. See [Skill Slash Commands](skills.md#skill-slash-commands).
 
 ## Feature Guides
 
@@ -502,14 +571,8 @@ for `/preset`.
 ## Invalid or Retired Settings
 
 The option tables above contain active settings only. `doctor` reports retired
-keys and unsupported host limits with their source paths. The plugin does not
-provide a reusable-session pool, job board, alias authority, idle TODO scheduler,
-wall-clock watchdog or concurrency queue. No line-count/token budget replaces
-those retired mechanisms. Positive old concurrency/wall-clock limits refuse
-startup because the native host does not enforce them for Slim.
-
-Some older keys are discarded with warnings, and `managed` task mode is read as
-`native` by the existing loader. This is not an equivalent implementation of
-the retired feature. Review all inherited layers and remove obsolete settings;
-see [Upgrading](installation.md#upgrading). Other unknown or invalid fields make
-their configuration layer invalid.
+keys and unsupported host limits with their source paths. Positive legacy
+wall-clock watchdog limits refuse startup. The legacy `managed` mode retains
+admission settings and runs child sessions through OpenCode's native Jobs.
+See [Upgrading](installation.md#upgrading) for retired board, alias,
+reusable-session and periodic wake settings.

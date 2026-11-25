@@ -261,18 +261,53 @@ export function splitSidebarModelId(model: string): {
   };
 }
 
-export function getSidebarAgentNames(
+function configuredSidebarAgentNames(
   snapshot: TuiSnapshot,
-  showHiddenAgents = false,
+  showHiddenAgents: boolean,
 ): string[] {
-  const configuredAgents = Object.keys(snapshot.agentModels).filter(
+  const names = Object.keys(snapshot.agentModels).filter(
     (agent) => showHiddenAgents || !isCouncilSidebarAgent(agent),
   );
-  return configuredAgents.length > 0
-    ? configuredAgents
-    : showHiddenAgents
-      ? FALLBACK_SIDEBAR_AGENTS_WITH_HIDDEN
-      : FALLBACK_SIDEBAR_AGENTS;
+  return names.length > 0
+    ? names
+    : [
+        ...(showHiddenAgents
+          ? FALLBACK_SIDEBAR_AGENTS_WITH_HIDDEN
+          : FALLBACK_SIDEBAR_AGENTS),
+      ];
+}
+
+function mergeSidebarAgentNames(
+  snapshot: TuiSnapshot,
+  activeAgentNames: ReadonlySet<string>,
+  showHiddenAgents = false,
+): string[] {
+  const names = configuredSidebarAgentNames(snapshot, showHiddenAgents);
+  const seen = new Set(names);
+  for (const agent of activeAgentNames) {
+    if (seen.has(agent)) continue;
+    seen.add(agent);
+    names.push(agent);
+  }
+  return names;
+}
+
+export function getSidebarAgentNames(
+  snapshot: TuiSnapshot,
+  showHiddenAgentsOrRootID: boolean | string = false,
+  visibleRootID?: string,
+): string[] {
+  const showHiddenAgents =
+    typeof showHiddenAgentsOrRootID === 'boolean' && showHiddenAgentsOrRootID;
+  const rootID =
+    typeof showHiddenAgentsOrRootID === 'string'
+      ? showHiddenAgentsOrRootID
+      : visibleRootID;
+  return mergeSidebarAgentNames(
+    snapshot,
+    getActiveSidebarAgentNames(snapshot, rootID, showHiddenAgents),
+    showHiddenAgents,
+  );
 }
 
 type AgentListFn = (
@@ -706,6 +741,7 @@ function visibleConversationRoot(snapshot: TuiSnapshot, id?: string) {
 export function getActiveSidebarAgentNames(
   snapshot: TuiSnapshot,
   visibleRootID?: string,
+  showHiddenAgents = false,
 ): ReadonlySet<string> {
   const names = new Set<string>();
   // Both sides resolve against the same persistent sessionParents index:
@@ -720,8 +756,9 @@ export function getActiveSidebarAgentNames(
     snapshot.activeSessions,
   )) {
     if (
-      root === undefined ||
-      resolveTuiSnapshotRoot(snapshot, sessionID) === root
+      (showHiddenAgents || !isCouncilSidebarAgent(agentName)) &&
+      (root === undefined ||
+        resolveTuiSnapshotRoot(snapshot, sessionID) === root)
     ) {
       names.add(agentName);
     }
@@ -735,12 +772,51 @@ export function getActiveSidebarAgentNames(
     }
     for (const [agentName, entries] of Object.entries(byAgent)) {
       // The projection prepends running jobs ahead of terminal history.
-      if (entries[0]?.running === true) {
+      if (
+        entries[0]?.running === true &&
+        (showHiddenAgents || !isCouncilSidebarAgent(agentName))
+      ) {
         names.add(agentName);
       }
     }
   }
   return names;
+}
+
+/**
+ * Memoized "does this window show any spinner?" answer for the activity
+ * tick. The snapshot identity, route session and hidden-agent gate only
+ * change when they affect the rendered rows. Unchanged inputs reuse the
+ * previous answer without traversing the session tree.
+ */
+export function createSidebarActivityPredicate(
+  readSnapshot: () => TuiSnapshot,
+  readVisibleSession: () => string | undefined,
+  readShowHiddenAgents: () => boolean = () => false,
+): () => boolean {
+  let snapshot: TuiSnapshot | undefined;
+  let visible: string | undefined;
+  let showHiddenAgents = false;
+  let active = false;
+  return () => {
+    const nextSnapshot = readSnapshot();
+    const nextVisible = readVisibleSession();
+    const nextShowHiddenAgents = readShowHiddenAgents();
+    if (
+      snapshot === undefined ||
+      nextSnapshot !== snapshot ||
+      nextVisible !== visible ||
+      nextShowHiddenAgents !== showHiddenAgents
+    ) {
+      snapshot = nextSnapshot;
+      visible = nextVisible;
+      showHiddenAgents = nextShowHiddenAgents;
+      active =
+        getActiveSidebarAgentNames(nextSnapshot, nextVisible, showHiddenAgents)
+          .size > 0;
+    }
+    return active;
+  };
 }
 
 /** One clickable sidebar destination: an active subagent session. */
@@ -1382,7 +1458,7 @@ function agentHeaderCells({
         fg: agentColor(color, theme),
         wrapMode: 'none',
         truncate: true,
-        flexShrink: 1,
+        flexShrink: annotation === undefined ? 1 : 0,
       },
       [label],
     ),
@@ -1399,7 +1475,7 @@ function agentHeaderCells({
           ),
         ]
       : []),
-    ...(sessionCount !== undefined && sessionCount > 1
+    ...(sessionCount !== undefined && sessionCount > 0
       ? [
           text({ fg: theme.textMuted, wrapMode: 'none', flexShrink: 0 }, [
             ` ${expanded ? '▾' : '▸'}${sessionCount}`,
@@ -1489,7 +1565,9 @@ function compactAgentRow(options: AgentRowOptions): JSX.Element {
     [
       box(
         {
-          width: options.annotation !== undefined ? 24 : 16,
+          // Leave room for an unknown agent's full name and its task count.
+          // Nested attribution needs extra space; truncate it before the name.
+          width: options.annotation !== undefined ? 24 : 20,
           flexShrink: 0,
           flexDirection: 'row',
           shouldFill: false,
@@ -1701,7 +1779,7 @@ export function projectSidebarTeam(
   else variants.orchestrator = rootVariant;
   const names = new Set(
     [
-      ...getSidebarAgentNames(snapshot, showHiddenAgents),
+      ...configuredSidebarAgentNames(snapshot, showHiddenAgents),
       ...Object.keys(team.agentModels),
       ...Object.keys(team.inheritance),
     ]
@@ -1799,7 +1877,11 @@ export function renderSidebar(
         interaction?.hasSelectedText,
       )
     : null;
-  const activeAgents = getActiveSidebarAgentNames(snapshot, visibleRootID);
+  const activeAgents = getActiveSidebarAgentNames(
+    snapshot,
+    visibleRootID,
+    showHiddenAgents,
+  );
   const live =
     registry && registryResolved(registry)
       ? new Set(registry.names)
@@ -1807,8 +1889,9 @@ export function renderSidebar(
   const { canonicalName } = createTeamDisplayIdentity(
     snapshot.agentDisplayNames,
   );
-  const sidebarAgentNames = getSidebarAgentNames(
+  const sidebarAgentNames = mergeSidebarAgentNames(
     snapshot,
+    activeAgents,
     showHiddenAgents,
   ).filter((name) => !live || live.has(name) || live.has(canonicalName(name)));
   const targetsByAgent = new Map(
@@ -1903,22 +1986,36 @@ export function renderSidebar(
             );
             const clickable =
               interaction?.navigate !== undefined && mergedTargets.length > 0;
+            const runningTargets = [
+              ...sessions,
+              ...reusableTargets.filter((target) => target.status === 'busy'),
+            ];
+            // Live rows show current runs, while stopped runs remain available
+            // for inspection/revival without inflating the running count.
+            const disclosedTargets =
+              runningTargets.length > 0
+                ? [
+                    ...runningTargets,
+                    ...reusableTargets.filter(
+                      (target) => target.status === 'stopped',
+                    ),
+                  ]
+                : mergedTargets;
+            const canExpand =
+              runningTargets.length > 0 || disclosedTargets.length > 1;
             const expanded =
-              mergedTargets.length > 1 &&
-              clickable &&
-              expandedAgents.has(agentName);
-            // Only annotate when the rows are actually rendered: a collapsed
-            // agent row never reaches sessionTargetRow, so computing the
-            // sibling/via annotation there is wasted work on every tick.
-            const allTargets = expanded
-              ? annotateSiblingAttribution(snapshot, mergedTargets)
-              : mergedTargets;
+              canExpand && clickable && expandedAgents.has(agentName);
+            // Only annotate disclosed rows. Terminal history never joins the
+            // running sibling count, but nested rows retain their via marker.
+            const annotatedTargets = expanded
+              ? annotateSiblingAttribution(snapshot, disclosedTargets)
+              : disclosedTargets;
             const onAgentClick = clickable
               ? () => {
-                  if (allTargets.length === 1) {
-                    interaction?.navigate?.(allTargets[0].sessionID);
-                  } else if (allTargets.length > 1) {
+                  if (canExpand) {
                     interaction?.toggleAgent(agentName);
+                  } else if (mergedTargets.length > 0) {
+                    interaction?.navigate?.(mergedTargets[0].sessionID);
                   }
                 }
               : undefined;
@@ -1930,15 +2027,25 @@ export function renderSidebar(
               // Label only: every lookup below stays keyed by the canonical
               // agent ID so models, activity, expansion and history keep
               // resolving.
-              label: snapshot.agentDisplayNames?.[agentName] || agentName,
-              color: snapshot.agentColors?.[agentName],
+              label:
+                snapshot.agentDisplayNames &&
+                Object.hasOwn(snapshot.agentDisplayNames, agentName)
+                  ? snapshot.agentDisplayNames[agentName] || agentName
+                  : agentName,
+              color:
+                snapshot.agentColors &&
+                Object.hasOwn(snapshot.agentColors, agentName)
+                  ? snapshot.agentColors[agentName]
+                  : undefined,
               model,
               modelName: modelNames?.get(model),
               variant,
               active,
               now,
               theme,
-              sessionCount: clickable ? allTargets.length : undefined,
+              sessionCount:
+                runningTargets.length ||
+                (clickable && canExpand ? disclosedTargets.length : undefined),
               expanded,
               onClick: onAgentClick,
               hoverBackground,
@@ -1952,7 +2059,7 @@ export function renderSidebar(
             if (!expanded) return [agentRowEl];
             return [
               agentRowEl,
-              ...allTargets.map((target) =>
+              ...annotatedTargets.map((target) =>
                 sessionTargetRow(
                   target,
                   theme,
@@ -2658,13 +2765,14 @@ function createSidebarRuntime(
     sidebarEnabled ? scheduleRefresh : pollConfigOnly,
     sidebarEnabled ? (envRefreshMs ?? 1000) : (envRefreshMs ?? 5000),
   );
+  const hasActiveSpinners = createSidebarActivityPredicate(
+    snapshot,
+    adapter.getVisibleSession,
+    () => showHiddenAgents,
+  );
   const animationTimer = sidebarEnabled
     ? setInterval(() => {
-        if (
-          !disposed &&
-          getActiveSidebarAgentNames(snapshot(), adapter.getVisibleSession())
-            .size > 0
-        ) {
+        if (!disposed && hasActiveSpinners()) {
           setAnimationNow(Date.now());
         }
       }, ACTIVITY_FRAME_MS)

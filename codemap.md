@@ -38,6 +38,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 | `src/hooks/apply-patch/` | Structured `apply_patch` parsing, matching, recovery, and rewrite pipeline. | [View Map](src/hooks/apply-patch/codemap.md) |
 | `src/hooks/foreground-fallback/` | Interactive-session fallback control path for rate-limit or degraded foreground execution with event-driven agent mapping. | [View Map](src/hooks/foreground-fallback/codemap.md) |
 | `src/hooks/phase-reminder/` | Message-transform reminder enforcing orchestrator workflow phases. | [View Map](src/hooks/phase-reminder/codemap.md) |
+| `src/hooks/rules-injector/` | Injects matched project/global rules only into successful tool-result tails, with boundary checks, per-session deduplication, context budgeting, and compaction/disposal cleanup. | `hook.ts`, `matcher.ts`, `rule-files.ts` |
 | `src/hooks/search-path-guard/` | Pre-checks `grep`/`glob` `args.path` validity in `tool.execute.before` and fails fast with an actionable error instead of upstream ripgrep noise. | [View Map](src/hooks/search-path-guard/codemap.md) |
 | `src/hooks/tool-loop-guard/` | Detects byte-identical repeated tool calls per session; corrective warning at 3, hard block at 5, with task-lifecycle exemptions and per-turn wait-tool counting. | [View Map](src/hooks/tool-loop-guard/codemap.md) |
 | `src/hooks/cache-monitor/` | Observation-only runtime watchdog over provider cache telemetry (`tokens.cache.read/write`) that warns on prompt-cache busts and frozen-prefix plateaus. | [View Map](src/hooks/cache-monitor/codemap.md) |
@@ -53,7 +54,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 | `src/skills/codemap/` | Repository-mapping skill package and codemap state-management script. | [View Map](src/skills/codemap/codemap.md) |
 | `src/skills/clonedeps/` | Workflow-only dependency source mirroring skill that routes discovery/ref resolution through explorer and direct orchestrator git operations. | [View Map](src/skills/clonedeps/codemap.md) |
 | `src/skills/simplify/` | Behavior-preserving simplification skill package. | [View Map](src/skills/simplify/codemap.md) |
-| `src/tools/` | Tool factory surface for AST-grep, smartfetch, ACP, and task lifecycle controls (cancel/status/result/revive/wait-for-user, plus the v1-only amendment channel `task_message`), plus shared task-status policy and activity trackers and on-disk preset-switching helpers. | [View Map](src/tools/codemap.md) |
+| `src/tools/` | Tool factory surface for AST-grep, smartfetch, ACP, model/session/time helpers, retained task inventory, queue/dependency controls, and task lifecycle controls (cancel/status/revive/wait-for-user, plus v1-only `task_message`), plus shared task-status policy and activity trackers and on-disk preset-switching helpers. | [View Map](src/tools/codemap.md) |
 | `src/tools/ast-grep/` | AST-grep binary management and AST-aware search/replace tool flow. | [View Map](src/tools/ast-grep/codemap.md) |
 | `src/tools/smartfetch/` | Fetch/extract/cache pipeline for web content and binary persistence. | [View Map](src/tools/smartfetch/codemap.md) |
 | `src/utils/` | Cross-cutting helpers: logging, session metadata, live session-status reads, in-process opencode client access, task parsing, env, compat/zip, and client call-shape contracts. | [View Map](src/utils/codemap.md) |
@@ -79,7 +80,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
    - Prompt content is injected only through the cache-safe helpers in `src/hooks/cache-safe-injection.ts` so provider prompt-cache prefixes stay byte-stable.
 
 3. **Delegated execution**
-   - On V2, OpenCode 2.3+ owns native background child execution, same-session continuation, steering, Job persistence, completion delivery, and restart recovery. The plugin registers exact-ID `task_status`/`task_cancel`/`task_reply` and child `task_report`; it reads host sessions on demand, keeps no child-job ledger, and adds no second completion message.
+   - OpenCode 2.4+ owns native background child execution, same-session continuation, steering, Job persistence, completion delivery, and restart recovery. The plugin registers exact-ID `task_status`/`task_cancel`/`task_reply` and child `task_report`; it reads host sessions on demand and adds no second completion message. Optional dependency admission keeps process-local coordination records and observes native execution; it does not persist a second child-job ledger.
    - The TUI client (`src/tui.ts` → `src/multiplexer/client/`) optionally mirrors those sessions into tmux, Zellij, Herdr, cmux, kitty, WezTerm, or Orca panes/surfaces; each client anchors new panes to its own pane resolved from the client environment at spawn time (never a shared registry).
    - Results flow back into the parent session through notifications/output polling.
 
@@ -139,7 +140,7 @@ This codemap covers the plugin repository itself and excludes the nested `openco
 - `biome.json`: formatting/lint policy.
 - `tsconfig.json`: TypeScript compiler settings.
 - `knip.jsonc`: dead-code audit config (entries cover files the import graph cannot see); run via `bun run knip`; deliberate export keeps carry `@public knip:` tags with inline reasons.
-- `.slim/codemap.json`: codemap change-detection state for this repository.
+- `.local/.slim/codemap.json`: codemap change-detection state for this repository.
 - `scripts/verify-release-artifact.ts`: release artifact validation script.
 - `src/health-check.ts`: plugin init health-check thresholds (`HEALTH_CHECK`) and `minimumExpectedToolCount` (accounts for disabled baseline tools); kept internal — never re-exported from the package root — so the legacy plugin loader cannot mis-invoke helpers as plugin factories (issue #894).
 - `src/plugin-entry.ts`: `INSTALLER_MANAGED_PLUGIN_OPTION` marker and `PluginEntry` type for installer-managed config entries.

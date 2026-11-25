@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { RGBA } from '@opentui/core';
 import { testRender } from '@opentui/solid';
 import { createSignal } from 'solid-js';
 import sidebarFrameGolden from './sidebar-frame-golden.json';
+import { createTmpDir, removeTmpDir } from './test-utils';
 import type { ModelNamesCache } from './tui';
 import {
   applyRemoteAgentModels,
@@ -27,6 +27,7 @@ import {
   makeRouteNavigator,
   overlaySelectedRootModel,
   paneWiringOptions,
+  projectSidebarTeam,
   readConfigState,
   reconcileAgentModels,
   renderSidebar,
@@ -332,6 +333,54 @@ describe('tui sidebar agents', () => {
     expect(getActiveSidebarAgentNames(snapshot, 'root-a')).toEqual(
       new Set(['oracle']),
     );
+  });
+
+  test('a saved preset does not promote other conversations’ active agents into its roster', () => {
+    const snapshot = createSnapshot({
+      agentModels: { orchestrator: 'test/main', oracle: 'test/oracle' },
+      activeSessions: {
+        'child-a': 'nearby',
+        'child-b': 'foreign',
+        seat: 'councillor-alpha',
+      },
+      sessionParents: {
+        'child-a': 'root-a',
+        'child-b': 'root-b',
+        seat: 'root-a',
+      },
+    });
+    const projected = projectSidebarTeam(snapshot, {
+      sessionID: 'root-a',
+      status: 'bound',
+      presetName: 'saved',
+      affects: 'future-children-only',
+      team: {
+        agentModels: { oracle: 'test/saved' },
+        agentVariants: {},
+        inheritance: {},
+      },
+    });
+    expect(projected.agentModels).toEqual({
+      orchestrator: 'test/main',
+      oracle: 'test/saved',
+    });
+    expect(getSidebarAgentNames(projected, 'child-a')).toEqual([
+      'orchestrator',
+      'oracle',
+      'nearby',
+    ]);
+    expect(getSidebarAgentNames(projected, true, 'root-a')).toEqual([
+      'orchestrator',
+      'oracle',
+      'nearby',
+      'councillor-alpha',
+    ]);
+    expect(getSidebarAgentNames(projected)).toEqual([
+      'orchestrator',
+      'oracle',
+      'nearby',
+      'foreign',
+    ]);
   });
 
   test('hides disabled agents when models are persisted explicitly', () => {
@@ -1007,17 +1056,17 @@ describe('readConfigState', () => {
     // Isolate from real user config and env presets
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
-    configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-env-'));
+    configHome = createTmpDir('omos-tui-env-');
     process.env.XDG_CONFIG_HOME = configHome;
   });
 
   afterEach(() => {
-    fs.rmSync(configHome, { recursive: true, force: true });
+    removeTmpDir(configHome);
     process.env = originalEnv;
   });
 
   test('detects invalid config from the current directory without persisted state', () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
+    const tempDir = createTmpDir('omos-tui-');
     try {
       const projectDir = path.join(tempDir, 'project');
       const configDir = path.join(projectDir, '.opencode');
@@ -1029,12 +1078,12 @@ describe('readConfigState', () => {
 
       expect(readConfigState(projectDir).configInvalid).toBe(true);
     } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      removeTmpDir(tempDir);
     }
   });
 
   test('returns false for valid config', () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
+    const tempDir = createTmpDir('omos-tui-');
     try {
       const projectDir = path.join(tempDir, 'project');
       const configDir = path.join(projectDir, '.opencode');
@@ -1046,12 +1095,12 @@ describe('readConfigState', () => {
 
       expect(readConfigState(projectDir).configInvalid).toBe(false);
     } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      removeTmpDir(tempDir);
     }
   });
 
   test('does not flag config with removed fallback keys as invalid', () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
+    const tempDir = createTmpDir('omos-tui-');
     try {
       const projectDir = path.join(tempDir, 'project');
       const configDir = path.join(projectDir, '.opencode');
@@ -1073,12 +1122,12 @@ describe('readConfigState', () => {
       // NOT show "Config invalid".
       expect(readConfigState(projectDir).configInvalid).toBe(false);
     } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      removeTmpDir(tempDir);
     }
   });
 
   test('returns false for config with normalized disabled_* string', () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
+    const tempDir = createTmpDir('omos-tui-');
     try {
       const projectDir = path.join(tempDir, 'project');
       const configDir = path.join(projectDir, '.opencode');
@@ -1096,24 +1145,24 @@ describe('readConfigState', () => {
       // NOT show "Config invalid".
       expect(readConfigState(projectDir).configInvalid).toBe(false);
     } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      removeTmpDir(tempDir);
     }
   });
 
   test('uses compact sidebar by default', () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
+    const tempDir = createTmpDir('omos-tui-');
     try {
       const projectDir = path.join(tempDir, 'project');
       fs.mkdirSync(projectDir, { recursive: true });
 
       expect(readConfigState(projectDir).compactSidebar).toBe(true);
     } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      removeTmpDir(tempDir);
     }
   });
 
   test('allows expanded sidebar config', () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
+    const tempDir = createTmpDir('omos-tui-');
     try {
       const projectDir = path.join(tempDir, 'project');
       const configDir = path.join(projectDir, '.opencode');
@@ -1125,7 +1174,7 @@ describe('readConfigState', () => {
 
       expect(readConfigState(projectDir).compactSidebar).toBe(false);
     } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      removeTmpDir(tempDir);
     }
   });
 });
@@ -1246,7 +1295,7 @@ describe('OpenCode 2 sidebar module', () => {
   });
 
   test('setup registers one sidebar.content slot and cleanup disposes it', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-v2-'));
+    const tempDir = createTmpDir('omos-tui-v2-');
     let cleanup: (() => void) | undefined;
     try {
       const { ctx, slotClaims, getDisposeCalls } = createV2Context(tempDir);
@@ -1263,13 +1312,13 @@ describe('OpenCode 2 sidebar module', () => {
       expect(getDisposeCalls()).toBe(1);
     } finally {
       cleanup?.();
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      removeTmpDir(tempDir);
     }
   });
 
   test('setup returns early without registering a slot when disabled by env', async () => {
     process.env.OH_MY_OPENCODE_SLIM_DISABLE = '1';
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-v2-'));
+    const tempDir = createTmpDir('omos-tui-v2-');
     try {
       const { ctx, slotClaims } = createV2Context(tempDir);
       const cleanup = await tuiPlugin.setup(ctx as unknown as V2Context);
@@ -1277,16 +1326,14 @@ describe('OpenCode 2 sidebar module', () => {
       expect(slotClaims).toHaveLength(0);
       expect(cleanup).toBeUndefined();
     } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      removeTmpDir(tempDir);
     }
   });
 });
 
 describe('clickable sidebar sessions', () => {
   test('pruning keeps ancestry of reusable destinations and their live siblings', () => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'omos-reusable-parents-'),
-    );
+    const root = createTmpDir('omos-reusable-parents-');
     const restore = withIsolatedDataHome(root);
     try {
       const snapshot = createSnapshot();
@@ -1324,7 +1371,7 @@ describe('clickable sidebar sessions', () => {
       ).toBe('retained');
     } finally {
       restore();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -1627,6 +1674,45 @@ describe('clickable sidebar sessions', () => {
     expect(optedInFrame).toContain('councillor-alpha');
   });
 
+  test('active-only rows require both the visible conversation and a native registry identity', async () => {
+    const snapshot = createSnapshot({
+      agentModels: { oracle: 'test/oracle', removed: 'test/old' },
+      activeSessions: {
+        present: 'nearby',
+        elsewhere: 'foreign',
+        expired: 'removed',
+      },
+      sessionParents: {
+        present: 'child-a',
+        'child-a': 'root-a',
+        elsewhere: 'root-b',
+        expired: 'root-a',
+      },
+    });
+    const frame = await renderAttributionFrame(() =>
+      renderSidebar(
+        snapshot,
+        'test',
+        attributionTheme,
+        false,
+        false,
+        () => 0,
+        'child-a',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { names: ['oracle', 'nearby', 'foreign'], models: {} },
+      ),
+    );
+    expect(frame).toContain('oracle');
+    expect(frame).toContain('nearby');
+    expect(frame).toContain('pending');
+    expect(frame).not.toContain('foreign');
+    expect(frame).not.toContain('removed');
+  });
+
   test('sidebar frame marks depth-2 rows with their intermediate parent', async () => {
     const snapshot = createSnapshot({
       agentModels: { explorer: 'openai/gpt-6' },
@@ -1669,14 +1755,9 @@ describe('clickable sidebar sessions', () => {
       },
     });
     const navigated: string[] = [];
-    const collapsedInteraction = (): Parameters<typeof renderSidebar>[7] => ({
-      navigate: (id: string) => navigated.push(id),
-      isOpen: () => true,
-      toggleOpen: () => {},
-      expandedAgents: () => new Set<string>(),
-      toggleAgent: () => {},
-      syncScope: () => false,
-    });
+    const interaction = createSidebarInteraction((id) => navigated.push(id));
+    const collapsedInteraction = () =>
+      createSidebarInteraction((id) => navigated.push(id));
     const frame = await renderAttributionFrame(() =>
       renderSidebar(
         snapshot,
@@ -1695,19 +1776,20 @@ describe('clickable sidebar sessions', () => {
     // Collapsed: the child session row itself is absent.
     expect(frame).not.toContain('exp-1');
 
-    // Clicking the collapsed agent row navigates straight to its session.
+    // A running child is disclosed before the user navigates to it.
     const setup = await testRender(
       () =>
-        renderSidebar(
-          snapshot,
-          'test',
-          attributionTheme,
-          false,
-          false,
-          () => 0,
-          'conv-1',
-          collapsedInteraction(),
-        ) as never,
+        (() =>
+          renderSidebar(
+            snapshot,
+            'test',
+            attributionTheme,
+            false,
+            false,
+            () => 0,
+            'conv-1',
+            interaction,
+          )) as never,
       { width: 60, height: 24 },
     );
     try {
@@ -1716,7 +1798,16 @@ describe('clickable sidebar sessions', () => {
       const row = lines.findIndex((l) => l.includes('explorer'));
       expect(row).toBeGreaterThan(-1);
       const col = Math.max(lines[row].indexOf('explorer'), 0);
+      expect(lines[row]).toContain('▸1');
       await setup.mockMouse.click(col + 2, row);
+      expect(navigated).toEqual([]);
+      await setup.renderOnce();
+      const expanded = setup.captureCharFrame().split('\n');
+      const child = expanded.findIndex((line) =>
+        line.includes('exp-1 via fix-1'),
+      );
+      expect(child).toBeGreaterThan(-1);
+      await setup.mockMouse.click(expanded[child].indexOf('exp-1') + 1, child);
       expect(navigated).toEqual(['exp_a']);
     } finally {
       setup.renderer.destroy();
@@ -1931,27 +2022,21 @@ describe('clickable sidebar sessions', () => {
       sessionDetails: { rev_a: { alias: 'rev-1', status: 'busy' } },
     });
     const navigated: string[] = [];
-    const interaction: Parameters<typeof renderSidebar>[7] = {
-      navigate: (id: string) => navigated.push(id),
-      isOpen: () => true,
-      toggleOpen: () => {},
-      expandedAgents: () => new Set<string>(),
-      toggleAgent: () => {},
-      syncScope: () => false,
-    };
+    const interaction = createSidebarInteraction((id) => navigated.push(id));
 
     const setup = await testRender(
       () =>
-        renderSidebar(
-          snapshot,
-          'test',
-          attributionTheme,
-          false,
-          false,
-          () => 0,
-          'conv-1',
-          interaction,
-        ) as never,
+        (() =>
+          renderSidebar(
+            snapshot,
+            'test',
+            attributionTheme,
+            false,
+            false,
+            () => 0,
+            'conv-1',
+            interaction,
+          )) as never,
       { width: 60, height: 24 },
     );
     try {
@@ -1962,8 +2047,8 @@ describe('clickable sidebar sessions', () => {
       expect(frame).not.toContain('arbiter');
       expect(frame).not.toContain('paladin');
 
-      // Activity still resolves through the canonical ID, and a click on the
-      // display-labelled row targets the canonical agent's session.
+      // Display labels leave the activity, expansion and navigation keys
+      // tied to the canonical ID.
       expect(getActiveSidebarAgentNames(snapshot, 'conv-1')).toEqual(
         new Set(['arbiter']),
       );
@@ -1974,6 +2059,13 @@ describe('clickable sidebar sessions', () => {
         Math.max(lines[row].indexOf('reviewer'), 0) + 2,
         row,
       );
+      expect(navigated).toEqual([]);
+      expect(interaction.expandedAgents()).toEqual(new Set(['arbiter']));
+      await setup.renderOnce();
+      const expanded = setup.captureCharFrame().split('\n');
+      const child = expanded.findIndex((line) => line.includes('rev-1'));
+      expect(child).toBeGreaterThan(-1);
+      await setup.mockMouse.click(expanded[child].indexOf('rev-1') + 1, child);
       expect(navigated).toEqual(['rev_a']);
     } finally {
       setup.renderer.destroy();
@@ -2429,7 +2521,7 @@ describe('clickable sidebar sessions', () => {
     'removed roster',
   ] as const) {
     test(`live registry final rows: ${scenario} (#1943)`, async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-roster-'));
+      const root = createTmpDir('omos-roster-');
       const restore = withIsolatedDataHome(root);
       const configDir = path.join(root, '.opencode');
       fs.mkdirSync(configDir, { recursive: true });
@@ -2538,13 +2630,13 @@ describe('clickable sidebar sessions', () => {
         screen?.renderer.destroy();
         for (const dispose of mounted?.disposers ?? []) dispose();
         restore();
-        fs.rmSync(root, { recursive: true, force: true });
+        removeTmpDir(root);
       }
     });
   }
 
   test('host catalog update repaints saved session rows with a warm cache and unchanged Slim config (#1943)', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-roster-change-'));
+    const root = createTmpDir('omos-roster-change-');
     const restore = withIsolatedDataHome(root);
     const configDir = path.join(root, '.opencode');
     fs.mkdirSync(configDir, { recursive: true });
@@ -2618,12 +2710,12 @@ describe('clickable sidebar sessions', () => {
       screen?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restore();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('host overlay excludes stale rows before the first refresh completes', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-host-initial-'));
+    const root = createTmpDir('omos-host-initial-');
     const restore = withIsolatedDataHome(root);
     const navigated: unknown[] = [];
     const data = fakeHostData({
@@ -2684,12 +2776,12 @@ describe('clickable sidebar sessions', () => {
       screen?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restore();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('host overlay refreshes immediately when the visible root changes', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-host-scope-'));
+    const root = createTmpDir('omos-host-scope-');
     const restore = withIsolatedDataHome(root);
     const data = fakeHostData(
       { id: 'root-a', agent: 'orchestrator', time: { created: 1 } },
@@ -2759,12 +2851,12 @@ describe('clickable sidebar sessions', () => {
       screen?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restore();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('host finished child shows history and its row navigates', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-host-finished-'));
+    const root = createTmpDir('omos-host-finished-');
     const restore = withIsolatedDataHome(root);
     const navigated: unknown[] = [];
     const data = fakeHostData(
@@ -2806,12 +2898,12 @@ describe('clickable sidebar sessions', () => {
       screen?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restore();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('host interrupted child alone gets a coffin in expanded history', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-host-stopped-'));
+    const root = createTmpDir('omos-host-stopped-');
     const restore = withIsolatedDataHome(root);
     const data = fakeHostData(
       { id: 'root', agent: 'orchestrator', time: { created: 1 } },
@@ -2871,14 +2963,12 @@ describe('clickable sidebar sessions', () => {
       screen?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restore();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('host running to idle event preserves a clickable row', async () => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'omos-host-transition-'),
-    );
+    const root = createTmpDir('omos-host-transition-');
     const restore = withIsolatedDataHome(root);
     const navigated: unknown[] = [];
     const data = fakeHostData(
@@ -2915,6 +3005,15 @@ describe('clickable sidebar sessions', () => {
       let row = lines.findIndex((line) => line.includes('oracle'));
       expect(lines[row]).toMatch(ACTIVITY_FRAME_PATTERN);
       await screen.mockMouse.click(lines[row].indexOf('oracle') + 1, row);
+      expect(navigated).toEqual([]);
+      await screen.renderOnce();
+      const expanded = screen.captureCharFrame().split('\n');
+      const childRow = expanded.findIndex((line) => line.includes('ora-1'));
+      expect(childRow).toBeGreaterThan(-1);
+      await screen.mockMouse.click(
+        expanded[childRow].indexOf('ora-1') + 1,
+        childRow,
+      );
       expect(navigated).toEqual([['session', { sessionID: 'child' }]]);
       for (const type of [
         'session.created',
@@ -2950,14 +3049,12 @@ describe('clickable sidebar sessions', () => {
       screen?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restore();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('hover contrasts with the sidebar on matching and transparent themes', async () => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'omos-transparent-hover-'),
-    );
+    const root = createTmpDir('omos-transparent-hover-');
     const restore = withIsolatedDataHome(root);
     const disposers: Array<() => void> = [];
     const screens: Array<Awaited<ReturnType<typeof testRender>>> = [];
@@ -3007,7 +3104,7 @@ describe('clickable sidebar sessions', () => {
       for (const dispose of disposers) dispose();
       for (const screen of screens) screen.renderer.destroy();
       restore();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -3032,7 +3129,7 @@ describe('clickable sidebar sessions', () => {
   }
 
   test('mounted sidebar heading toggles local content visibility', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-sidebar-toggle-'));
+    const root = createTmpDir('omos-sidebar-toggle-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(path.join(projectDir, '.opencode'), { recursive: true });
     fs.writeFileSync(
@@ -3126,7 +3223,7 @@ describe('clickable sidebar sessions', () => {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -3179,9 +3276,7 @@ describe('clickable sidebar sessions', () => {
   });
 
   test('sidebar heading never highlights on hover but still toggles on click', async () => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'omos-sidebar-nohover-'),
-    );
+    const root = createTmpDir('omos-sidebar-nohover-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(path.join(projectDir, '.opencode'), { recursive: true });
     fs.writeFileSync(
@@ -3240,13 +3335,13 @@ describe('clickable sidebar sessions', () => {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('places the session disclosure after the agent name in both layouts', async () => {
     for (const compactSidebar of [true, false]) {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-sidebar-row-'));
+      const root = createTmpDir('omos-sidebar-row-');
       const projectDir = path.join(root, 'project');
       fs.mkdirSync(path.join(projectDir, '.opencode'), { recursive: true });
       fs.writeFileSync(
@@ -3306,15 +3401,15 @@ describe('clickable sidebar sessions', () => {
         setup?.renderer.destroy();
         for (const dispose of mounted?.disposers ?? []) dispose();
         restoreDataHome();
-        fs.rmSync(root, { recursive: true, force: true });
+        removeTmpDir(root);
       }
     }
   });
 
   // v2 only: guards the v2 route shape; the v1 shape is covered by the
   // other click tests below.
-  test('mounted sidebar: 1 session navigates (v2)', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-click-'));
+  test('mounted sidebar: a single running session expands before navigation (v2)', async () => {
+    const root = createTmpDir('omos-click-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     const restoreDataHome = withIsolatedDataHome(root);
@@ -3356,17 +3451,24 @@ describe('clickable sidebar sessions', () => {
       expect(oracleRow).toBeGreaterThan(-1);
       const col = Math.max(lines[oracleRow].indexOf('oracle'), 0);
       await setup.mockMouse.click(col + 2, oracleRow);
+      expect(navigated).toEqual([]);
+      await setup.renderOnce();
+      const expanded = setup.captureCharFrame().split('\n');
+      expect(expanded[oracleRow]).toContain('▾1');
+      const child = expanded.findIndex((line) => line.includes('ora-1'));
+      expect(child).toBeGreaterThan(-1);
+      await setup.mockMouse.click(expanded[child].indexOf('ora-1') + 1, child);
       expect(navigated).toEqual([['session', { sessionID: 'ora-only' }]]);
     } finally {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('mounted sidebar: N sessions expand on first click, child click navigates', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-click-n-'));
+    const root = createTmpDir('omos-click-n-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     const restoreDataHome = withIsolatedDataHome(root);
@@ -3480,12 +3582,12 @@ describe('clickable sidebar sessions', () => {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('mounted sidebar without navigate does not act', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-click-none-'));
+    const root = createTmpDir('omos-click-none-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     const restoreDataHome = withIsolatedDataHome(root);
@@ -3545,12 +3647,12 @@ describe('clickable sidebar sessions', () => {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('mounted sidebar: idle row with history is clickable on the whole line', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-dot-'));
+    const root = createTmpDir('omos-dot-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     const restoreDataHome = withIsolatedDataHome(root);
@@ -3607,13 +3709,13 @@ describe('clickable sidebar sessions', () => {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('mounted sidebar marks only the stopped session row with ⚰', async () => {
     expect(Bun.stringWidth(STATUS_STOPPED_GLYPH)).toBe(1);
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-stopped-'));
+    const root = createTmpDir('omos-stopped-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     const restoreDataHome = withIsolatedDataHome(root);
@@ -3716,12 +3818,12 @@ describe('clickable sidebar sessions', () => {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
-  test('mounted sidebar: live sessions hide the history dot and keep #1197 click', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-dot-live-'));
+  test('mounted sidebar: running items hide completed history and keep their click target', async () => {
+    const root = createTmpDir('omos-dot-live-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     const restoreDataHome = withIsolatedDataHome(root);
@@ -3787,22 +3889,11 @@ describe('clickable sidebar sessions', () => {
       const expandedLines = setup.captureCharFrame().split('\n');
       const liveRow = expandedLines.findIndex((line) => line.includes('ora-1'));
       expect(liveRow).toBeGreaterThan(-1);
-      const reusableRow = expandedLines.findIndex(
-        (line, index) => index > liveRow && line.includes('ora-1'),
-      );
-      expect(reusableRow).toBeGreaterThan(liveRow);
-      expect(expandedLines[reusableRow]).not.toContain('✦');
-      expect(expandedLines[reusableRow]).not.toContain('reusable');
-      expect(expandedLines[reusableRow]).not.toContain('gpt-6');
-      const liveAliasCol = expandedLines[liveRow].indexOf('ora-1');
-      const reusableAliasCol = expandedLines[reusableRow].indexOf('ora-1');
-      expect(reusableAliasCol).toBe(liveAliasCol);
+      expect(expandedLines[oracleRow]).toContain('▾1');
       expect(
-        expandedLines[reusableRow].slice(
-          reusableAliasCol - 2,
-          reusableAliasCol,
-        ),
-      ).toBe('• ');
+        expandedLines.filter((line) => line.includes('ora-1')),
+      ).toHaveLength(1);
+      expect(navigated).toEqual([]);
       await setup.mockMouse.click(
         expandedLines[liveRow].indexOf('ora-1') + 1,
         liveRow,
@@ -3812,12 +3903,12 @@ describe('clickable sidebar sessions', () => {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('mounted sidebar: animated status remains clickable without history', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-dot-spin-'));
+    const root = createTmpDir('omos-dot-spin-');
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     const restoreDataHome = withIsolatedDataHome(root);
@@ -3874,12 +3965,18 @@ describe('clickable sidebar sessions', () => {
       ).toBeLessThan(nextLines[nextRow]?.indexOf('oracle') ?? -1);
       const oracleCol = nextLines[nextRow]?.indexOf('oracle') ?? 0;
       await setup.mockMouse.click(oracleCol + 1, nextRow);
+      expect(navigated).toEqual([]);
+      await setup.renderOnce();
+      const expanded = setup.captureCharFrame().split('\n');
+      const child = expanded.findIndex((line) => line.includes('ora-1'));
+      expect(child).toBeGreaterThan(-1);
+      await setup.mockMouse.click(expanded[child].indexOf('ora-1') + 1, child);
       expect(navigated).toEqual([['session', { sessionID: 'ora-live' }]]);
     } finally {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
-      fs.rmSync(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -3895,7 +3992,7 @@ describe('clickable sidebar sessions', () => {
     for (const compactSidebar of [false, true]) {
       for (const state of ['active', 'retry', 'history', 'idle'] as const) {
         for (const disclosure of ['one', 'closed', 'open'] as const) {
-          const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-frame-'));
+          const root = createTmpDir('omos-frame-');
           const projectDir = path.join(root, 'project');
           fs.mkdirSync(path.join(projectDir, '.opencode'), {
             recursive: true,
@@ -3992,7 +4089,7 @@ describe('clickable sidebar sessions', () => {
             setup?.renderer.destroy();
             for (const dispose of mounted?.disposers ?? []) dispose();
             restoreDataHome();
-            fs.rmSync(root, { recursive: true, force: true });
+            removeTmpDir(root);
           }
         }
       }
@@ -4047,13 +4144,13 @@ describe('kill-all running subagents', () => {
   let originalDataHome: string | undefined;
   beforeEach(() => {
     originalDataHome = process.env.XDG_DATA_HOME;
-    dataHome = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-kill-data-'));
+    dataHome = createTmpDir('omos-kill-data-');
     process.env.XDG_DATA_HOME = dataHome;
   });
   afterEach(() => {
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalDataHome;
-    fs.rmSync(dataHome, { recursive: true, force: true });
+    removeTmpDir(dataHome);
   });
 
   function killSnapshot() {

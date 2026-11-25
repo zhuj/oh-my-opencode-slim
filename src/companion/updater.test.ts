@@ -5,12 +5,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  rmSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import * as zip from '../utils/zip-extractor';
 import {
   COMPANION_MANIFEST,
@@ -19,22 +18,20 @@ import {
   getCompanionTarget,
 } from './updater';
 
-const TEST_DIR = path.join(
-  os.tmpdir(),
-  `companion-updater-test-${process.pid}`,
-);
 const originalXdg = process.env.XDG_DATA_HOME;
 const originalFetch = globalThis.fetch;
 
 describe('companion updater', () => {
+  let testDir = '';
+
   beforeEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
-    process.env.XDG_DATA_HOME = TEST_DIR;
+    testDir = createTmpDir();
+    process.env.XDG_DATA_HOME = testDir;
     globalThis.fetch = originalFetch;
   });
 
   afterEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
+    removeTmpDir(testDir);
     if (originalXdg === undefined) {
       delete process.env.XDG_DATA_HOME;
     } else {

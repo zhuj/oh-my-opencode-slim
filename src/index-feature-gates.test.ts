@@ -7,9 +7,7 @@ import {
   spyOn,
   test,
 } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import os from 'node:os';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { withTuiAttachment } from './companion/attachment-test-helper';
 import {
@@ -20,6 +18,7 @@ import {
 import * as foregroundFallbackFactories from './hooks/foreground-fallback';
 import { OhMyOpenCodeLite as plugin } from './index';
 import * as interviewFactories from './interview';
+import { createTmpDir, removeTmpDir } from './test-utils';
 import * as interviewSubmitStateFactories from './tools/interview-submit-state';
 import * as nativeTaskControlFactories from './tools/native-task-control';
 import * as taskReportFactories from './tools/task-report';
@@ -57,9 +56,7 @@ describe('plugin feature gates through exported hooks', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-feature-gates-'),
-    );
+    projectDir = createTmpDir('oh-my-opencode-slim-feature-gates-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -73,7 +70,7 @@ describe('plugin feature gates through exported hooks', () => {
 
   afterEach(async () => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   });
 
   const configure = async (overrides: Record<string, unknown>) => {
@@ -582,20 +579,44 @@ describe('plugin feature gates through exported hooks', () => {
     });
   });
 
-  for (const flavor of ['v2'] as const) {
-    test(`${flavor}: no post-tool consumers means no v1 after hook`, async () => {
+  test('rules result processing stays available with task controls and the loop guard off', async () => {
+    await configure({
+      backgroundJobs: { mode: 'off' },
+      disabled_hooks: ['tool-loop-guard'],
+    });
+    const hooks = await createHooks('v2');
+    try {
+      expect(hooks['tool.execute.after']).toBeFunction();
+      expect(hooks.tool?.task_cancel).toBeUndefined();
+      expect(hooks.tool?.task_report).toBeUndefined();
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test.each(['current_datetime', 'get_session_id', 'resolve_model'])(
+    'the %s utility has its own tool gate even with task controls off',
+    async (disabled) => {
       await configure({
         backgroundJobs: { mode: 'off' },
-        disabled_hooks: ['tool-loop-guard'],
+        disabled_tools: ['webfetch', disabled],
       });
-      const hooks = await createHooks(flavor);
+      const hooks = await createHooks('v2');
       try {
-        expect(hooks['tool.execute.after']).toBeUndefined();
+        expect(hooks.tool?.[disabled]).toBeUndefined();
+        for (const enabled of [
+          'current_datetime',
+          'get_session_id',
+          'resolve_model',
+        ]) {
+          if (enabled !== disabled)
+            expect(hooks.tool?.[enabled]?.execute).toBeFunction();
+        }
       } finally {
         await hooks.dispose?.();
       }
-    });
-  }
+    },
+  );
 
   async function exerciseSidebar(hooks: PluginHooks, externalDir: string) {
     const call = { tool: 'task', sessionID: 'ses_p', callID: 'call_1' };
@@ -651,7 +672,8 @@ describe('plugin feature gates through exported hooks', () => {
   }
 
   test('tui false overrides sidebar true: no server state writes or parent hydration', async () => {
-    const externalDir = await mkdtemp(path.join(projectDir, 'external-'));
+    const externalDir = path.join(projectDir, 'external');
+    mkdirSync(externalDir);
     await configure({
       tui: false,
       sidebar: true,

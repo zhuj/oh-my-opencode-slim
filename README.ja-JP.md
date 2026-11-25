@@ -36,6 +36,10 @@ oh-my-opencode-slim は OpenCode 向けのエージェントオーケストレ�
 
 - **[6つの専門エージェント](#meet-the-pantheon)** - Orchestrator、Explorer、Oracle、Council、Designer、Fixer。各作業に最適なエージェントを割り当て、プロバイダーを問わず任意のモデルを組み合わせられます。
 - **[バックグラウンドオーケストレーション](docs/background-orchestration.md)** - Orchestrator が専門家をバックグラウンドタスクとして派遣・追跡し、続行前に結果を統合します。並列作業がデフォルトです。
+  任意の `id`/`depends_on` で依存順序を指定し、`task_wait` でタスク群の正常完了を待機します。
+  `task_dependency_tree` は件数制限付きの依存ツリーと阻害要因を表示します。
+  `task_queue_list` で確認し、`task_queue_manage` で実行中のタスクを中断せず待機タスクを管理できます。
+  ローカルの `/queue` は選択した親セッションのキューを表示します。
 - **[同梱スキル](#skills)** - `deepwork`、`codemap`、`verification-planning`、`reflect` などのプロンプトベースのワークフローを、エージェントごとに割り当てます。
 - **[Council](docs/council.md)** - `@council` で同じ質問を複数モデルに並列で投げ、1 つの回答に統合します。
 - **[Companion](docs/companion.md)** - 並列のバックグラウンド専門家を含む、稼働中のエージェントを表示する任意のフローティングデスクトップウィンドウです。
@@ -572,7 +576,7 @@ bunx oh-my-opencode-slim@latest companion install
 | **[Multiplexer Integration](docs/multiplexer-integration.md)** | エージェントの動作を Tmux、Zellij、Herdr、cmux、kitty、や WezTerm のペインでライブ表示します |
 | **[Codemap](docs/skills.md#codemap)** | 階層的なコードマップを生成し、大規模コードベースを迅速に理解します |
 | **[Clonedeps](docs/skills.md#clonedeps)** | 選択した依存関係のソースを ignore 済みのローカルワークスペースにクローンし、調査できるようにします |
-| **[Worktrees](docs/skills.md#worktrees)** | `.slim/worktrees/` lane を使い、隔離された並列または高リスクなコーディング作業を行います |
+| **[Worktrees](docs/skills.md#worktrees)** | `.local/.slim/worktrees/` lane を使い、隔離された並列または高リスクなコーディング作業を行います |
 | **[Preset Switching](docs/presets/preset-switching.md)** | `/preset` で実行時にエージェントモデルのプリセットを切り替えます |
 | **[Interview](docs/interview.md)** | ブラウザベースの Q&A フローで、ざっくりとしたアイデアを構造化された Markdown 仕様に変換します |
 | **[Companion](docs/companion.md)** | 解析、ヘルプ、型情報のためのフローティングウィンドウ companion |
@@ -581,7 +585,7 @@ bunx oh-my-opencode-slim@latest companion install
 
 | Doc | 内容 |
 |-----|----------------|
-| **[Installation Guide](docs/installation.md)** | プラグインのインストール、CLI フラグの使用、設定のリセット、セットアップのトラブルシューティング |
+| **[Installation Guide](docs/installation.md)** | OpenCode 2.4.0 以降が必要です。プラグインのインストール、CLI フラグ、設定のリセット、トラブルシューティング |
 | **[Configuration](docs/configuration.md)** | 設定ファイルの配置場所、JSONC サポート、プロンプトの上書き、全オプションのリファレンス |
 | **[Project Customization](docs/configuration.md)** | リポジトリ固有のカスタムエージェント、プロンプト上書き、エージェントごとのスキル、および優先順位 |
 | **[Background Orchestration](docs/background-orchestration.md)** | ネイティブのバックグラウンドサブエージェントを中心にした、スケジューラー優先の Orchestrator モデル |

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// allow: SIZE_OK — cohesive dependency-free CLI shipped as one skill script.
 
 import { createHash } from 'node:crypto';
 import {
@@ -6,7 +7,6 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  renameSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -14,9 +14,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const VERSION = '1.0.0';
-export const STATE_DIR = '.slim';
+export const STATE_DIR = path.join('.local', '.slim');
+export const LEGACY_STATE_DIR = '.slim';
 export const STATE_FILE = 'codemap.json';
 export const LEGACY_STATE_FILE = 'cartography.json';
+export const CODEMAPS_DIR = 'codemaps';
 export const CODEMAP_FILE = 'codemap.md';
 
 export class PatternMatcher {
@@ -126,15 +128,93 @@ export function computeFileHash(filePath) {
   }
 }
 
+/**
+ * Visits every ancestor folder of a relative file path, shallowest first.
+ *
+ * Walking separators avoids splitting the path and repeatedly slicing and
+ * joining segment arrays. Materializing all ancestor names still costs their
+ * total prefix length. Top-level files visit `.` only.
+ *
+ * @param {string} filePath
+ * @param {(folder: string) => void} visit
+ */
+function forEachAncestorFolder(filePath, visit) {
+  const firstSlash = filePath.indexOf('/');
+  if (firstSlash === -1) {
+    visit('.');
+    return;
+  }
+
+  let folder = filePath.slice(0, firstSlash);
+  visit(folder);
+
+  let segmentStart = firstSlash + 1;
+  for (;;) {
+    const slash = filePath.indexOf('/', segmentStart);
+    if (slash === -1) return;
+    folder = `${folder}/${filePath.slice(segmentStart, slash)}`;
+    visit(folder);
+    segmentStart = slash + 1;
+  }
+}
+
+/**
+ * Derives every folder hash in a single pass over the file hash map.
+ *
+ * Each file belongs to exactly its own ancestor folders, so the entries are
+ * listed and collation-sorted once and then replayed in that order: every
+ * folder's hasher sees exactly the `localeCompare` order (and the same stable
+ * tie-break among collation-equal paths) that sorting a filtered subset
+ * produced, without re-materializing the whole entry list per folder.
+ *
+ * @param {Record<string, string>} fileHashes
+ */
+export function buildFolderHashIndex(fileHashes) {
+  const entries = Object.entries(fileHashes);
+  entries.sort(([a], [b]) => a.localeCompare(b));
+
+  const hashers = new Map();
+  let pairChecks = 0;
+  for (const [filePath, hash] of entries) {
+    const hashLine = `${filePath}:${hash}\n`;
+    forEachAncestorFolder(filePath, (folder) => {
+      pairChecks++;
+      let hasher = hashers.get(folder);
+      if (!hasher) {
+        hasher = createHash('md5');
+        hashers.set(folder, hasher);
+      }
+      hasher.update(hashLine);
+    });
+  }
+
+  const hashes = new Map();
+  for (const [folder, hasher] of hashers) {
+    hashes.set(folder, hasher.digest('hex'));
+  }
+
+  return {
+    /** Folders that contain at least one file, in first-seen order. */
+    folders: hashes,
+    /** @param {string} folder */
+    hashFor(folder) {
+      return hashes.get(folder) ?? '';
+    },
+    /** Work counters, so cost claims can be asserted instead of timed. */
+    stats: { entryLists: 1, entryElements: entries.length, pairChecks },
+  };
+}
+
 export function computeFolderHash(folder, fileHashes) {
+  // Standalone callers only need one hash; don't build all ancestor hashers.
+  const prefix = `${folder}/`;
   const folderFiles = Object.entries(fileHashes)
     .filter(
       ([filePath]) =>
-        filePath.startsWith(`${folder}/`) ||
+        filePath.startsWith(prefix) ||
         (folder === '.' && !filePath.includes('/')),
     )
     .sort(([a], [b]) => a.localeCompare(b));
-
   if (!folderFiles.length) return '';
 
   const hasher = createHash('md5');
@@ -149,10 +229,8 @@ export function getFoldersWithFiles(files, root) {
 
   for (const filePath of files) {
     const relPath = path.relative(root, filePath).replaceAll(path.sep, '/');
-    const parts = relPath.split('/').slice(0, -1);
-    for (let i = 0; i < parts.length; i++) {
-      folders.add(parts.slice(0, i + 1).join('/'));
-    }
+    // Top-level files visit `.` only, which the seed already covers.
+    forEachAncestorFolder(relPath, (folder) => folders.add(folder));
   }
 
   return folders;
@@ -160,19 +238,30 @@ export function getFoldersWithFiles(files, root) {
 
 export function migrateLegacyState(root) {
   const stateDir = path.join(root, STATE_DIR);
-  const legacyPath = path.join(stateDir, LEGACY_STATE_FILE);
   const statePath = path.join(stateDir, STATE_FILE);
 
-  if (existsSync(statePath) || !existsSync(legacyPath)) {
+  if (existsSync(statePath)) {
     return false;
   }
 
-  mkdirSync(stateDir, { recursive: true });
-  renameSync(legacyPath, statePath);
-  console.log(
-    `Migrated ${STATE_DIR}/${LEGACY_STATE_FILE} -> ${STATE_DIR}/${STATE_FILE}`,
-  );
-  return true;
+  for (const legacyFile of [STATE_FILE, LEGACY_STATE_FILE]) {
+    const legacyPath = path.join(root, LEGACY_STATE_DIR, legacyFile);
+    if (!existsSync(legacyPath)) continue;
+
+    try {
+      const state = JSON.parse(readFileSync(legacyPath, 'utf8'));
+      saveState(root, state);
+      console.log(
+        `Migrated ${LEGACY_STATE_DIR}/${legacyFile} -> ${STATE_DIR}/${STATE_FILE} (legacy file preserved)`,
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof SyntaxError) continue;
+      throw error;
+    }
+  }
+
+  return false;
 }
 
 export function loadState(root) {
@@ -199,6 +288,8 @@ export function saveState(root, state) {
 export function createEmptyCodemap(folderPath, folderName) {
   const codemapPath = path.join(folderPath, CODEMAP_FILE);
   if (existsSync(codemapPath)) return;
+
+  mkdirSync(folderPath, { recursive: true });
 
   const content = `# ${folderName}/
 
@@ -237,10 +328,11 @@ function buildState(
     fileHashes[relPath] = computeFileHash(filePath);
   }
 
+  const folderIndex = buildFolderHashIndex(fileHashes);
   const folders = getFoldersWithFiles(selectedFiles, root);
   const folderHashes = {};
   for (const folder of folders) {
-    folderHashes[folder] = computeFolderHash(folder, fileHashes);
+    folderHashes[folder] = folderIndex.hashFor(folder);
   }
 
   const state = {
@@ -259,6 +351,14 @@ function buildState(
   return { state, folders };
 }
 
+/**
+ * @param {{
+ *   root: string,
+ *   include?: string[],
+ *   exclude?: string[],
+ *   exception?: string[]
+ * }} options
+ */
 export function cmdInit({ root, include = [], exclude = [], exception = [] }) {
   const resolvedRoot = path.resolve(root);
   if (!existsSync(resolvedRoot) || !statSync(resolvedRoot).isDirectory()) {
@@ -297,14 +397,17 @@ export function cmdInit({ root, include = [], exclude = [], exception = [] }) {
   saveState(resolvedRoot, state);
   console.log(`Created ${STATE_DIR}/${STATE_FILE}`);
 
+  const codemapsRoot = path.join(resolvedRoot, STATE_DIR, CODEMAPS_DIR);
   for (const folder of folders) {
     const folderPath =
-      folder === '.' ? resolvedRoot : path.join(resolvedRoot, folder);
+      folder === '.' ? codemapsRoot : path.join(codemapsRoot, folder);
     const folderName = folder === '.' ? path.basename(resolvedRoot) : folder;
     createEmptyCodemap(folderPath, folderName);
   }
 
-  console.log(`Created ${folders.size} empty codemap.md files`);
+  console.log(
+    `Created ${folders.size} empty maps under ${STATE_DIR}/${CODEMAPS_DIR}`,
+  );
   return 0;
 }
 
@@ -374,10 +477,7 @@ export function cmdChanges({ root }) {
 
   const affectedFolders = new Set(['.']);
   for (const filePath of [...added, ...removed, ...modified]) {
-    const parts = filePath.split('/').slice(0, -1);
-    for (let i = 0; i < parts.length; i++) {
-      affectedFolders.add(parts.slice(0, i + 1).join('/'));
-    }
+    forEachAncestorFolder(filePath, (folder) => affectedFolders.add(folder));
   }
 
   const sortedFolders = [...affectedFolders].sort();

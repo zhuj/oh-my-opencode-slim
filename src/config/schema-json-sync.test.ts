@@ -13,12 +13,15 @@ test('published background jobs schema retires managed settings', () => {
     ),
   );
   const properties = schema.properties.backgroundJobs.properties;
-  expect(properties.mode.enum).toEqual(['native', 'off']);
+  expect(properties.mode.enum).toEqual(['managed', 'native', 'off']);
+  expect(properties.queue.properties.enabled.type).toBe('boolean');
+  expect(properties.concurrency.properties.defaultConcurrency.maximum).toBe(
+    1000,
+  );
   for (const key of [
     'maxSessionsPerAgent',
     'stopConfirmationMs',
     'wallClockTimeoutMs',
-    'concurrency',
     'sameProviderPolicy',
     'waitForUserGuard',
     'childInputWake',

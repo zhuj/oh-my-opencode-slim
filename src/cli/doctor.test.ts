@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   doctor,
   formatJsonDoctorResult,
@@ -50,7 +50,7 @@ describe('runDoctorCheck', () => {
   let originalEnv: typeof process.env;
 
   function setupTempDir(): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-test-'));
+    const dir = createTmpDir();
     return dir;
   }
 
@@ -65,7 +65,7 @@ describe('runDoctorCheck', () => {
 
   afterEach(() => {
     process.chdir(originalCwd);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
     }
@@ -87,7 +87,7 @@ describe('runDoctorCheck', () => {
     expect(result.presetCheck).toBeUndefined();
   });
 
-  test('reports a retired v2 setting in an inherited file even when a closer file selects native mode', () => {
+  test('reports an inherited wall-clock limit and accepts admission concurrency in the same layer', () => {
     const project = path.join(tempDir, 'workspace', 'repo');
     const oldConfig = path.join(
       tempDir,
@@ -104,7 +104,12 @@ describe('runDoctorCheck', () => {
       fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(
       oldConfig,
-      '{"backgroundJobs":{"concurrency":{"providerConcurrency":{"openai":2}}}}',
+      JSON.stringify({
+        backgroundJobs: {
+          wallClockTimeoutMs: 60_000,
+          concurrency: { providerConcurrency: { openai: 2 } },
+        },
+      }),
     );
     fs.writeFileSync(newConfig, '{"backgroundJobs":{"mode":"native"}}');
 
@@ -116,13 +121,26 @@ describe('runDoctorCheck', () => {
         ok: false,
         error: {
           kind: 'unsupported-host',
-          message: expect.stringContaining(
-            'backgroundJobs.concurrency.providerConcurrency.openai',
-          ),
+          message: expect.stringContaining('backgroundJobs.wallClockTimeoutMs'),
         },
       }),
     );
-    expect(runDoctorCheck(project, 'v1').ok).toBe(true);
+    fs.writeFileSync(
+      oldConfig,
+      JSON.stringify({
+        backgroundJobs: { concurrency: { providerConcurrency: { openai: 2 } } },
+      }),
+    );
+    const repaired = runDoctorCheck(project, 'v2');
+    expect(repaired.ok).toBe(true);
+    expect(
+      repaired.configs.find((config) => config.path === oldConfig),
+    ).toMatchObject({
+      ok: true,
+      config: {
+        backgroundJobs: { concurrency: { providerConcurrency: { openai: 2 } } },
+      },
+    });
   });
 
   test('removed fallback keys name the invalid layer without hiding valid disables', () => {
@@ -198,14 +216,11 @@ describe('runDoctorCheck', () => {
     }
   });
 
-  test('reports the retired allowlist with its file and native replacement', () => {
+  test('reports patterns in a legacy allowlist and accepts exact names', () => {
     const configDir = path.join(tempDir, 'project', '.opencode');
     fs.mkdirSync(configDir, { recursive: true });
     const file = path.join(configDir, 'oh-my-opencode-slim.json');
-    fs.writeFileSync(
-      file,
-      '{"agents":{"orchestrator":{"subagents":["fixer"]}}}',
-    );
+    fs.writeFileSync(file, '{"agents":{"orchestrator":{"subagents":["@*"]}}}');
     const result = runDoctorCheck(path.dirname(configDir));
     expect(result.ok).toBe(false);
     expect(result.configs).toContainEqual(
@@ -219,6 +234,18 @@ describe('runDoctorCheck', () => {
       }),
     );
     expect(formatJsonDoctorResult(result)).toContain('opencode.json[c]');
+    fs.writeFileSync(
+      file,
+      '{"agents":{"orchestrator":{"subagents":["fixer"]}}}',
+    );
+    const repaired = runDoctorCheck(path.dirname(configDir));
+    expect(repaired.ok).toBe(true);
+    expect(
+      repaired.configs.find((config) => config.path === file),
+    ).toMatchObject({
+      ok: true,
+      config: { agents: { orchestrator: { subagents: ['fixer'] } } },
+    });
   });
 
   test('checks all inherited layers and resolves presets across them', () => {
@@ -281,7 +308,7 @@ describe('runDoctorCheck', () => {
     fs.mkdirSync(bin, { recursive: true });
     fs.writeFileSync(
       path.join(bin, 'opencode'),
-      '#!/bin/sh\necho opencode v2.3.2\n',
+      '#!/bin/sh\necho opencode v2.4.1\n',
       { mode: 0o755 },
     );
     process.env.PATH = `${bin}:/usr/bin:/bin`;
@@ -884,7 +911,7 @@ describe('doctor CLI wrapper', () => {
   }
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-cli-test-'));
+    tempDir = createTmpDir();
     originalCwd = process.cwd();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
@@ -894,7 +921,7 @@ describe('doctor CLI wrapper', () => {
 
   afterEach(() => {
     process.chdir(originalCwd);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
     }

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { withTmpDirSync } from '../test-utils';
 import { adaptPermissions } from '../v2/adapters';
 import { loadPluginConfig } from './loader';
 import {
@@ -676,53 +676,54 @@ describe('preset inheritance', () => {
   });
 
   test('resolves a project preset extending a user preset', () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'preset-layers-'));
-    const userDir = path.join(tempDir, 'user', 'opencode');
-    const projectDir = path.join(tempDir, 'project');
-    const projectConfigDir = path.join(projectDir, '.opencode');
     const previousXdg = process.env.XDG_CONFIG_HOME;
     const previousCustom = process.env.OPENCODE_CONFIG_DIR;
 
     try {
-      fs.mkdirSync(userDir, { recursive: true });
-      fs.mkdirSync(projectConfigDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(userDir, 'oh-my-opencode-slim.json'),
-        JSON.stringify({
-          presets: {
-            shared: {
-              oracle: {
-                model: 'provider/shared',
-                options: { fromUser: true },
+      withTmpDirSync((tempDir) => {
+        const userDir = path.join(tempDir, 'user', 'opencode');
+        const projectDir = path.join(tempDir, 'project');
+        const projectConfigDir = path.join(projectDir, '.opencode');
+
+        fs.mkdirSync(userDir, { recursive: true });
+        fs.mkdirSync(projectConfigDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(userDir, 'oh-my-opencode-slim.json'),
+          JSON.stringify({
+            presets: {
+              shared: {
+                oracle: {
+                  model: 'provider/shared',
+                  options: { fromUser: true },
+                },
               },
             },
-          },
-        }),
-      );
-      fs.writeFileSync(
-        path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
-        JSON.stringify({
-          preset: 'project',
-          presets: {
-            project: {
-              extends: 'shared',
-              agents: { oracle: { temperature: 0.7 } },
+          }),
+        );
+        fs.writeFileSync(
+          path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+          JSON.stringify({
+            preset: 'project',
+            presets: {
+              project: {
+                extends: 'shared',
+                agents: { oracle: { temperature: 0.7 } },
+              },
             },
-          },
-          agents: { oracle: { options: { fromProject: true } } },
-        }),
-      );
-      process.env.XDG_CONFIG_HOME = path.join(tempDir, 'user');
-      delete process.env.OPENCODE_CONFIG_DIR;
+            agents: { oracle: { options: { fromProject: true } } },
+          }),
+        );
+        process.env.XDG_CONFIG_HOME = path.join(tempDir, 'user');
+        delete process.env.OPENCODE_CONFIG_DIR;
 
-      const config = loadPluginConfig(projectDir, { silent: true });
-      expect(config.agents?.oracle).toEqual({
-        model: 'provider/shared',
-        temperature: 0.7,
-        options: { fromUser: true, fromProject: true },
+        const config = loadPluginConfig(projectDir, { silent: true });
+        expect(config.agents?.oracle).toEqual({
+          model: 'provider/shared',
+          temperature: 0.7,
+          options: { fromUser: true, fromProject: true },
+        });
       });
     } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
       if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousXdg;
       if (previousCustom === undefined) delete process.env.OPENCODE_CONFIG_DIR;

@@ -284,7 +284,7 @@ When the conversation calls for multi-model consensus, run this procedure:
         "synthetic": true,
         "text": 
 "<system-reminder>
-Deepwork router head: \`.slim/deepwork/ses_cache_safety_fixture.md\`.
+Deepwork router head: \`.local/.slim/deepwork/ses_cache_safety_fixture.md\`.
 </system-reminder>"
 ,
         "type": "text",

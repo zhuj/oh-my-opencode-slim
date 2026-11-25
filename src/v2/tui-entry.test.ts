@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 
 /** OS scratch root; the repo tree stays untouched. */
 
@@ -107,7 +107,7 @@ function buildFixture(root: string, scenario: Scenario): string {
  * surfaces its stderr instead of a bare exit code.
  */
 function runProbe(scenario: Scenario): ProbeReport {
-  const root = mkdtempSync(join(tmpdir(), 'omos-tui-entry-'));
+  const root = createTmpDir('omos-tui-entry-');
   const project = buildFixture(root, scenario);
   const scriptPath = join(root, 'probe.ts');
   writeFileSync(scriptPath, PROBE_SCRIPT);
@@ -144,7 +144,7 @@ function runProbe(scenario: Scenario): ProbeReport {
     ).toMatch(/^PROBE /);
     return JSON.parse(line.slice('PROBE '.length)) as ProbeReport;
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTmpDir(root);
   }
 }
 

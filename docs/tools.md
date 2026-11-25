@@ -2,6 +2,28 @@
 
 What Slim adds to OpenCode. Native tools are documented upstream; this page covers the tools Slim registers and the native calls it intercepts.
 
+## Session and model helpers
+
+| Tool | Purpose |
+|---|---|
+| `get_session_id` | Return the current invocation's exact session ID. |
+| `current_datetime` | Format the current local date/time or UTC time. |
+| `resolve_model` | Rank configured model references for a text query. |
+
+`resolve_model` preserves executable provider/model IDs, including nested
+slashes and literal colons. Only `#variant` separates an executable variant;
+variant text does not establish that the host supports that variant. The tool
+prefers the connected runtime catalog and uses built-in preset references only
+when discovery is unavailable. A successful empty catalog remains empty. An
+empty query returns the bounded model inventory.
+
+These helpers remain available in managed, native, and off background-job
+modes, subject to `disabled_tools`.
+
+`current_datetime` returns the current date and time. Its optional `format`
+argument defaults to `YYYYMMDD-HHmm`; supported tokens are `YYYY`, `MM`, `DD`,
+`HH`, `mm`, and `ss`. Set `utc` to `true` for UTC instead of local time.
+
 ## apply_patch rescue
 
 Slim intercepts the native `patch` tool before it runs. It rewrites recoverable stale patches, canonizes safe tolerant matches against the real file when unicode/trim drift is the only mismatch, keeps the authored `new_lines` bytes intact, preserves the existing file EOL/final-newline state for updates, validates malformed patches strictly before helper execution, uses a conservative bounded LCS fallback, accumulates helper state when the same path appears in multiple `Update File` hunks, blocks the call before native execution if any patch path falls outside the allowed root/worktree, and fails on ambiguity instead of guessing. It does not rewrite `edit` or `write` inputs. Disable with `disabled_hooks: ["apply-patch"]` (see [Hooks](configuration.md#hooks)).
@@ -81,12 +103,33 @@ conservatively passes the path through. Disable with
 | `task_report` | (V2 native) Steer a bounded progress update or blocker from a running subagent to its owning parent |
 | `task_reply` | Answer a child's pending control request by exact session ID and request ID. On V2 it is a permission-only host bridge; answer questions in the host UI |
 | `task_cancel` | Ask the host to interrupt the child's active execution while retaining its session |
+| `task_list` | List bounded pages of retained native child sessions, scoped to the invoking parent |
+| `task_queue_list` | Inspect parent-owned admission records, dependencies, queue positions and observed outcomes |
+| `task_queue_manage` | Pause, postpone, resume or cancel queued admission; edit dependencies and concurrency limits |
+| `task_wait` | Wait for specified parent-owned logical task IDs or admission IDs to succeed |
+| `task_dependency_tree` | Inspect a bounded dependency graph for specified parent-owned task IDs |
 
-`backgroundJobs.mode: "native"` is the V2 default. It leaves child execution,
-continuation, completion delivery, and restart recovery to the host and
-registers these controls:
+OpenCode owns child execution, continuation, completion delivery and restart
+recovery in every enabled task mode. Slim registers the native controls:
 `task_status`, `task_cancel`, and `task_reply` on the parent, plus the
-child-only `task_report`. They take an exact child `sessionID` and verify `parentID` with a bounded host read. `mode: "off"` registers no OMOS task tool at all.
+child-only `task_report`. Exact-child operations take a native `sessionID` and
+verify `parentID` with a bounded host read. `task_list` uses native paginated
+session records instead of rebuilding a plugin job ledger. `mode: "off"`
+registers no Slim task tool.
+
+The four queue tools are available when admission scheduling is enabled.
+Omitting `backgroundJobs.mode`, or retaining the old `"managed"` spelling,
+preserves the my-v2 admission queue. An explicit `"native"` uses the upstream
+native path unless `queue.enabled: true` or concurrency configuration requests
+admission scheduling. `queue.enabled: false` disables that layer. All tools
+still honor `disabled_tools`.
+
+With the queue enabled, native `subagent` additionally accepts a parent-local
+`id` and `depends_on`. Dependencies use those logical IDs or the returned
+`admission_id`; native continuation and control use `sessionID`. The original
+native executor still validates agents, models, permissions and nesting depth.
+See [Background Orchestration](background-orchestration.md) for queue actions,
+scope and restart behavior.
 
 `task_status` reports what the host round and trailing transcript prove. On V2
 that evidence is reconstructed from the child transcript, so an unfinished round

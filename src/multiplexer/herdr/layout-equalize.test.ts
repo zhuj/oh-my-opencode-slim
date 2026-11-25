@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { createServer, type Server } from 'node:net';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir, withTmpDir } from '../../test-utils';
 import {
   collectPaneIds,
   equalizeAgentPanes,
@@ -208,13 +209,15 @@ interface FakeHerdr {
   close: () => Promise<void>;
 }
 
+const malformedReply = Symbol('malformed Herdr reply');
+
 async function startFakeHerdr(
   reply: (request: {
     method: string;
     params: Record<string, unknown>;
   }) => unknown,
 ): Promise<FakeHerdr> {
-  const dir = mkdtempSync(join(tmpdir(), 'herdr-eq-'));
+  const dir = createTmpDir('herdr-eq-');
   const socketPath = join(dir, 'herdr.sock');
   const received: FakeHerdr['received'] = [];
 
@@ -229,23 +232,100 @@ async function startFakeHerdr(
       received.push(request);
       const response = reply(request);
       if (response === undefined) return; // never answer: timeout path
-      socket.end(`${JSON.stringify(response)}\n`);
+      socket.end(
+        response === malformedReply
+          ? 'not json\n'
+          : `${JSON.stringify(response)}\n`,
+      );
     });
   });
 
-  await new Promise<void>((resolve) =>
-    server.listen(herdrSocketEndpoint(socketPath), resolve),
-  );
+  try {
+    await once(server.listen(herdrSocketEndpoint(socketPath)), 'listening');
+  } catch (error) {
+    removeTmpDir(dir);
+    throw error;
+  }
 
   return {
     socketPath,
     received,
     close: async () => {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      } finally {
+        removeTmpDir(dir);
+      }
     },
   };
 }
+
+function socketPermissionCode(error: unknown): 'EPERM' | 'EACCES' | undefined {
+  if (
+    error instanceof Error &&
+    'code' in error &&
+    (error.code === 'EPERM' || error.code === 'EACCES')
+  )
+    return error.code;
+}
+
+async function deniedUnixSocketPermission() {
+  if (process.platform === 'win32') return;
+  try {
+    const fake = await startFakeHerdr(() => undefined);
+    await fake.close();
+    return;
+  } catch (error) {
+    const code = socketPermissionCode(error);
+    if (code) return code;
+    // Bun can discard the errno when opening a Unix socket. Ask Node for the
+    // OS error only when Bun reports this generic listen failure. Any other
+    // failure still runs the integration tests and fails in their fixtures.
+    if (
+      !(error instanceof Error) ||
+      !error.message.startsWith('Failed to listen at ')
+    )
+      return;
+  }
+  const node = Bun.which('node');
+  if (!node) return;
+  return withTmpDir(async (dir) => {
+    const probe = spawnSync(
+      node,
+      [
+        '-e',
+        `
+      const server = require('node:net').createServer();
+      server.once('error', (error) => {
+        if (error.code === 'EPERM' || error.code === 'EACCES') {
+          process.stdout.write(error.code);
+          process.exitCode = 77;
+        } else {
+          process.exitCode = 1;
+        }
+      });
+      server.listen(process.argv[1], () => server.close());
+    `,
+        join(dir, 'probe.sock'),
+      ],
+      { encoding: 'utf8', timeout: 1_000 },
+    );
+    if (
+      probe.status === 77 &&
+      (probe.stdout === 'EPERM' || probe.stdout === 'EACCES')
+    )
+      return probe.stdout;
+  });
+}
+
+const unixSocketDenied = await deniedUnixSocketPermission();
+if (unixSocketDenied)
+  console.warn(
+    `[herdr] Unix socket listener denied (${unixSocketDenied}). Skipping listener integration tests.`,
+  );
+const testWithListener = test.skipIf(unixSocketDenied !== undefined);
 
 const agentChain: HerdrLayoutNode = split('down', pane('a'), pane('b'));
 const layoutExport = (root: HerdrLayoutNode, zoomed = false) => ({
@@ -289,56 +369,62 @@ describe('herdrSocketEndpoint', () => {
 });
 
 describe('equalizeAgentPanes (socket)', () => {
-  test('writes the main boundary and skips ratios already on target', async () => {
-    const fake = await startFakeHerdr((request) =>
-      request.method === 'layout.export'
-        ? layoutExport(split('right', pane('main'), agentChain))
-        : { result: {} },
-    );
-    try {
-      const ok = await equalizeAgentPanes({
-        socketPath: fake.socketPath,
-        tabId: 't1',
-        mainPaneId: 'main',
-        mainPaneShare: 0.8,
-      });
-
-      expect(ok).toBe(true);
-      const writes = fake.received.filter(
-        (r) => r.method === 'layout.set_split_ratio',
+  testWithListener(
+    'writes the main boundary and skips ratios already on target',
+    async () => {
+      const fake = await startFakeHerdr((request) =>
+        request.method === 'layout.export'
+          ? layoutExport(split('right', pane('main'), agentChain))
+          : { result: {} },
       );
-      // Root ratio 0.5 → 0.8 (boundary); the agent split is already 1/2.
-      expect(writes).toHaveLength(1);
-      expect(writes[0].params).toEqual({
-        tab_id: 't1',
-        path: [],
-        ratio: 0.8,
-      });
-    } finally {
-      await fake.close();
-    }
-  });
+      try {
+        const ok = await equalizeAgentPanes({
+          socketPath: fake.socketPath,
+          tabId: 't1',
+          mainPaneId: 'main',
+          mainPaneShare: 0.8,
+        });
 
-  test('does nothing when every split is already equal', async () => {
-    const root = split('right', pane('main'), agentChain);
-    (root as { ratio: number }).ratio = 0.8;
-    const fake = await startFakeHerdr(() => layoutExport(root));
-    try {
-      const ok = await equalizeAgentPanes({
-        socketPath: fake.socketPath,
-        tabId: 't1',
-        mainPaneId: 'main',
-        mainPaneShare: 0.8,
-      });
-      expect(ok).toBe(true);
-      expect(fake.received).toHaveLength(1);
-      expect(fake.received[0].method).toBe('layout.export');
-    } finally {
-      await fake.close();
-    }
-  });
+        expect(ok).toBe(true);
+        const writes = fake.received.filter(
+          (r) => r.method === 'layout.set_split_ratio',
+        );
+        // Root ratio 0.5 → 0.8 (boundary); the agent split is already 1/2.
+        expect(writes).toHaveLength(1);
+        expect(writes[0].params).toEqual({
+          tab_id: 't1',
+          path: [],
+          ratio: 0.8,
+        });
+      } finally {
+        await fake.close();
+      }
+    },
+  );
 
-  test('skips a zoomed tab without writing', async () => {
+  testWithListener(
+    'does nothing when every split is already equal',
+    async () => {
+      const root = split('right', pane('main'), agentChain);
+      (root as { ratio: number }).ratio = 0.8;
+      const fake = await startFakeHerdr(() => layoutExport(root));
+      try {
+        const ok = await equalizeAgentPanes({
+          socketPath: fake.socketPath,
+          tabId: 't1',
+          mainPaneId: 'main',
+          mainPaneShare: 0.8,
+        });
+        expect(ok).toBe(true);
+        expect(fake.received).toHaveLength(1);
+        expect(fake.received[0].method).toBe('layout.export');
+      } finally {
+        await fake.close();
+      }
+    },
+  );
+
+  testWithListener('skips a zoomed tab without writing', async () => {
     const fake = await startFakeHerdr(() =>
       layoutExport(split('right', pane('main'), agentChain), true),
     );
@@ -356,7 +442,7 @@ describe('equalizeAgentPanes (socket)', () => {
     }
   });
 
-  test('reports pane ids for pruning', async () => {
+  testWithListener('reports pane ids for pruning', async () => {
     const fake = await startFakeHerdr(() =>
       layoutExport(split('right', pane('main'), agentChain)),
     );
@@ -376,33 +462,36 @@ describe('equalizeAgentPanes (socket)', () => {
     }
   });
 
-  test('does not rewrite the boundary when pruning removes the last agent', async () => {
-    const fake = await startFakeHerdr(() =>
-      layoutExport(split('right', pane('main'), pane('user'))),
-    );
-    try {
-      const agents = new Set(['stale']);
-      const ok = await equalizeAgentPanes({
-        socketPath: fake.socketPath,
-        tabId: 't1',
-        mainPaneId: 'main',
-        mainPaneShare: 0.6,
-        agentPaneIds: agents,
-        onPanesSeen: (ids) => {
-          for (const id of agents) if (!ids.has(id)) agents.delete(id);
-        },
-      });
-      expect(ok).toBe(true);
-      expect(agents.size).toBe(0);
-      expect(fake.received.map((request) => request.method)).toEqual([
-        'layout.export',
-      ]);
-    } finally {
-      await fake.close();
-    }
-  });
+  testWithListener(
+    'does not rewrite the boundary when pruning removes the last agent',
+    async () => {
+      const fake = await startFakeHerdr(() =>
+        layoutExport(split('right', pane('main'), pane('user'))),
+      );
+      try {
+        const agents = new Set(['stale']);
+        const ok = await equalizeAgentPanes({
+          socketPath: fake.socketPath,
+          tabId: 't1',
+          mainPaneId: 'main',
+          mainPaneShare: 0.6,
+          agentPaneIds: agents,
+          onPanesSeen: (ids) => {
+            for (const id of agents) if (!ids.has(id)) agents.delete(id);
+          },
+        });
+        expect(ok).toBe(true);
+        expect(agents.size).toBe(0);
+        expect(fake.received.map((request) => request.method)).toEqual([
+          'layout.export',
+        ]);
+      } finally {
+        await fake.close();
+      }
+    },
+  );
 
-  test('returns false when a ratio write is rejected', async () => {
+  testWithListener('returns false when a ratio write is rejected', async () => {
     const fake = await startFakeHerdr((request) =>
       request.method === 'layout.export'
         ? layoutExport(split('right', pane('main'), agentChain))
@@ -421,40 +510,34 @@ describe('equalizeAgentPanes (socket)', () => {
     }
   });
 
-  test('returns false on malformed JSON', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'herdr-eq-'));
-    const socketPath = join(dir, 'herdr.sock');
-    const server = createServer((socket) => {
-      socket.on('data', () => socket.end('not json\n'));
-    });
-    await new Promise<void>((resolve) =>
-      server.listen(herdrSocketEndpoint(socketPath), resolve),
-    );
+  testWithListener('returns false on malformed JSON', async () => {
+    const fake = await startFakeHerdr(() => malformedReply);
     try {
       const ok = await equalizeAgentPanes({
-        socketPath,
+        socketPath: fake.socketPath,
         tabId: 't1',
         mainPaneId: 'main',
       });
       expect(ok).toBe(false);
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      rmSync(dir, { recursive: true, force: true });
+      await fake.close();
     }
   });
 
   test('returns false when the socket is missing', async () => {
-    const ok = await equalizeAgentPanes({
-      socketPath: join(tmpdir(), 'definitely-not-a-herdr.sock'),
-      tabId: 't1',
-      mainPaneId: 'main',
+    await withTmpDir(async (dir) => {
+      const ok = await equalizeAgentPanes({
+        socketPath: join(dir, 'missing.sock'),
+        tabId: 't1',
+        mainPaneId: 'main',
+      });
+      expect(ok).toBe(false);
     });
-    expect(ok).toBe(false);
   });
 
   // Real timing on purpose: a timeout can only be observed by waiting for it.
   // Kept to a 50 ms budget so the suite stays fast.
-  test('returns false when herdr never answers', async () => {
+  testWithListener('returns false when herdr never answers', async () => {
     const fake = await startFakeHerdr(() => undefined);
     try {
       const ok = await equalizeAgentPanes({

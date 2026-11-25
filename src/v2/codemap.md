@@ -1,17 +1,19 @@
 # OpenCode 2 adapter
 
-Slim requires **OpenCode 2.3.0+**. `src/plugin.ts` exports `{ id, setup }`
+Slim requires **OpenCode 2.4.0+**. `src/plugin.ts` exports `{ id, setup }`
 and loads `setup.ts`, which adapts the shared factory's V1-shaped hooks into
 OpenCode 2 registrations. This is an internal calling convention, not a V1
 runtime entry point. `types.ts` mirrors the consumed Promise hook surface;
-`mirror-conformance.ts` checks it against `@opencode/plugin` 2.3.2 at typecheck.
-That pin is not integration coverage for every provider or unreleased host.
+`mirror-conformance.ts` checks it against `@opencode/plugin` 2.4.1 at typecheck.
+The [repository guide](../../AGENTS.md#cloned-dependency-source) records the
+matching OpenCode 2.4.1 source pin and its commit.
 
 [Installation](../../docs/installation.md) covers package loading and upgrades;
 [Background Orchestration](../../docs/background-orchestration.md) and
 [Tools](../../docs/tools.md#background-task-control) own the lifecycle and
-control contracts. The host owns execution, Jobs, delivery and recovery. Slim
-keeps no child-job ledger or secondary completion path.
+control contracts. The host owns execution, Jobs, delivery and recovery.
+Slim can queue calls before native admission and observe native outcomes
+to release their admission slots.
 
 ## Setup and policy
 
@@ -92,6 +94,12 @@ hooks, translating edits back. Before-hook rejection reaches the host. After
 hooks preserve error versus completion and are omitted when no consumer or
 preset admission capture needs them. Council's `Seats:` rewrite reads verified
 host results on demand, independently of Slim task controls.
+
+`native-admission.ts` projects native input validators through the host's
+Standard Schema boundary and adds logical task IDs and dependency references. When enabled, it admits calls under the configured
+limits and updates the scoped queue projection. The original native executor
+owns dispatch. See [Background Job Management](../../docs/configuration.md#background-job-management)
+for mode selection.
 
 `event-subscription.ts` freezes the needed event types. `event-adapter.ts`
 passes raw events first and maps their `data` to the shared consumers' shapes:

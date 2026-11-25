@@ -32,6 +32,31 @@ import {
   type MessageWithParts,
 } from './types';
 
+export interface TaggedToolOutput {
+  title: string;
+  output: string;
+  metadata: unknown;
+}
+
+const appendedToolOutputTags = new WeakMap<object, Set<string>>();
+
+/** Append a tagged block without rewriting the original tool-result prefix. */
+export function appendTaggedToolOutput(
+  output: TaggedToolOutput,
+  text: string,
+  tag: string,
+): boolean {
+  let tags = appendedToolOutputTags.get(output);
+  if (!tags) {
+    tags = new Set();
+    appendedToolOutputTags.set(output, tags);
+  }
+  if (tags.has(tag)) return false;
+  output.output += `${output.output.endsWith('\n') ? '' : '\n'}\n<${tag}>\n${text}\n</${tag}>`;
+  tags.add(tag);
+  return true;
+}
+
 interface TaggedSyntheticPartSpec {
   /** Text content of the injected part. */
   text: string;

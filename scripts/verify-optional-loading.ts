@@ -59,7 +59,10 @@ const ALL_HOOKS = [
   'council-inject',
 ] as const;
 
+const UTILITY_TOOLS = ['current_datetime', 'get_session_id', 'resolve_model'];
+
 const BASE_DISABLED_TOOLS = [
+  ...UTILITY_TOOLS,
   'webfetch',
   'ast_grep_search',
   'ast_grep_replace',
@@ -81,6 +84,7 @@ const BASE_DISABLED_COMMANDS = [
  * thin host-read controls (native) and in-file guards (hooks, council seats)
  * may legitimately share minimal's chunks. */
 const STRICT_CONTROLS: readonly string[] = [
+  'utilities',
   'ast',
   'fallback',
   'acp',
@@ -101,6 +105,7 @@ const baseConfig: CaseConfig = {
   marketplace: { enabled: false },
   companion: { enabled: false },
   multiplexer: { type: 'none' },
+  skillCommandMode: 'none',
   disabled_mcps: ['context7', 'gh_grep'],
   disabled_commands: BASE_DISABLED_COMMANDS,
   disabled_hooks: ALL_HOOKS,
@@ -124,6 +129,14 @@ const CASES: readonly Case[] = [
     name: 'native',
     config: { ...baseConfig, backgroundJobs: { mode: 'native' } },
     note: 'host task delegation only',
+  },
+  {
+    name: 'utilities',
+    config: {
+      ...baseConfig,
+      disabled_tools: without(BASE_DISABLED_TOOLS, UTILITY_TOOLS),
+    },
+    note: 'session, time, and model utilities registered',
   },
   {
     name: 'ast',
@@ -535,7 +548,7 @@ function caseChecks(
   const registration = [...result.tools];
   switch (result.case) {
     case 'minimal':
-      expectTools(checks, 'minimal', [], ['webfetch'], registration);
+      expectTools(checks, 'minimal', [], BASE_DISABLED_TOOLS, registration);
       checks.push({
         name: 'minimal leaves JSDOM unloaded',
         ok: !result.timing.jsdomLoaded,
@@ -550,6 +563,9 @@ function caseChecks(
         ['task_revive', 'task_message', 'wait_for_user'],
         registration,
       );
+      break;
+    case 'utilities':
+      expectTools(checks, 'utilities', UTILITY_TOOLS, [], registration);
       break;
     case 'ast':
       expectTools(

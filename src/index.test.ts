@@ -13,8 +13,7 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import * as os from 'node:os';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import * as promiseTimers from 'node:timers/promises';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
@@ -36,6 +35,7 @@ import type { MessageWithParts } from './hooks/types';
 import { OhMyOpenCodeLite as plugin } from './index';
 import { MarketplaceStore } from './marketplace/store';
 import { createBuiltinMcps } from './mcp';
+import { createTmpDir, removeTmpDir } from './test-utils';
 import {
   getTuiStatePath,
   readTuiSnapshot,
@@ -121,12 +121,15 @@ describe('plugin tool registration', () => {
     Record<(typeof ENV_KEYS)[number], string | undefined>
   > = {};
 
+  let hitlRoot: string;
+
   beforeEach(() => {
     for (const key of ENV_KEYS) {
       originalEnv[key] = process.env[key];
     }
     delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
-    const base = path.join(os.tmpdir(), 'oh-my-opencode-slim-hitl-empty');
+    hitlRoot = createTmpDir('oh-my-opencode-slim-hitl-empty-');
+    const base = path.join(hitlRoot, 'env');
     process.env.OPENCODE_CONFIG_DIR = `${base}-config`;
     process.env.XDG_CONFIG_HOME = `${base}-xdg`;
     process.env.XDG_DATA_HOME = `${base}-data`;
@@ -135,6 +138,7 @@ describe('plugin tool registration', () => {
   });
 
   afterEach(() => {
+    removeTmpDir(hitlRoot);
     for (const key of ENV_KEYS) {
       const orig = originalEnv[key];
       if (orig === undefined) {
@@ -146,7 +150,7 @@ describe('plugin tool registration', () => {
   });
 
   test('v2 host leaves wait_for_user unregistered', async () => {
-    const projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-wfu-gate-');
+    const projectDir = createTmpDir('oh-my-opencode-slim-wfu-gate-');
     const noop = async () => ({});
     const session = new Proxy({}, { get: () => noop }) as Record<
       string,
@@ -182,12 +186,12 @@ describe('plugin tool registration', () => {
       expect(hooks.tool?.task_revive).toBeUndefined();
       await hooks.dispose?.();
     } finally {
-      await rm(projectDir, { recursive: true, force: true });
+      removeTmpDir(projectDir);
     }
   });
 
   test('does not retain loop-guard state when search-path validation rejects', async () => {
-    const projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-search-hook-');
+    const projectDir = createTmpDir('oh-my-opencode-slim-search-hook-');
     const client = createPluginClient(async () => ({}));
     let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
 
@@ -235,7 +239,7 @@ describe('plugin tool registration', () => {
       ).resolves.toBeUndefined();
     } finally {
       await hooks?.dispose?.();
-      await rm(projectDir, { recursive: true, force: true });
+      removeTmpDir(projectDir);
     }
   });
 
@@ -271,9 +275,7 @@ describe('plugin tool registration', () => {
 
   test('status and reload report a disabled marketplace against the live registry', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), 'marketplace-disabled-live-'),
-    );
+    const root = createTmpDir('marketplace-disabled-live-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -335,15 +337,13 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('activates only marketplace packages selected by the resolved preset at first host finalization', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-marketplace-finalize-'),
-    );
+    const root = createTmpDir('oh-my-opencode-slim-marketplace-finalize-');
     const configDir = path.join(root, 'config');
     const dataDir = path.join(root, 'data');
     await mkdir(configDir, { recursive: true });
@@ -584,15 +584,13 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('fresh desired projection uses newly enabled builtin MCPs', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      '/tmp/oh-my-opencode-slim-marketplace-fresh-mcp-',
-    );
+    const root = createTmpDir('oh-my-opencode-slim-marketplace-fresh-mcp-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -671,13 +669,13 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('user-defined MCP override wins and reconciles back when removed', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp('/tmp/oh-my-opencode-slim-mcp-override-');
+    const root = createTmpDir('oh-my-opencode-slim-mcp-override-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -733,13 +731,13 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('config re-invocation with the same mutated object keeps built-ins', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp('/tmp/oh-my-opencode-slim-mcp-reinvoke-');
+    const root = createTmpDir('oh-my-opencode-slim-mcp-reinvoke-');
     const configDir = path.join(root, 'config');
     await mkdir(configDir, { recursive: true });
     process.env = {
@@ -791,14 +789,14 @@ describe('plugin tool registration', () => {
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
   test('marketplace status follows the active runtime preset over disk and environment selection', async () => {
     const originalEnv = { ...process.env };
-    const root = await mkdtemp(
-      '/tmp/oh-my-opencode-slim-marketplace-runtime-preset-',
+    const root = createTmpDir(
+      'oh-my-opencode-slim-marketplace-runtime-preset-',
     );
     const configDir = path.join(root, 'config');
     const dataDir = path.join(root, 'data');
@@ -896,7 +894,7 @@ describe('plugin tool registration', () => {
       await hooks.dispose?.();
       RuntimeConfig.reset(root);
       process.env = originalEnv;
-      await rm(root, { recursive: true, force: true });
+      removeTmpDir(root);
     }
   });
 
@@ -947,8 +945,8 @@ describe('plugin tool registration', () => {
     };
     try {
       for (const invalidPreset of invalidPresetCases) {
-        const root = await mkdtemp(
-          '/tmp/oh-my-opencode-slim-invalid-marketplace-preset-',
+        const root = createTmpDir(
+          'oh-my-opencode-slim-invalid-marketplace-preset-',
         );
         const configDir = path.join(root, 'config');
         await mkdir(configDir, { recursive: true });
@@ -980,7 +978,7 @@ describe('plugin tool registration', () => {
           expect(hostConfig.agent).not.toHaveProperty('selected-agent');
         } finally {
           await hooks.dispose?.();
-          await rm(root, { recursive: true, force: true });
+          removeTmpDir(root);
         }
       }
     } finally {
@@ -995,7 +993,7 @@ describe('plugin built-in agent disabling', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-builtin-agents-');
+    projectDir = createTmpDir('oh-my-opencode-slim-builtin-agents-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -1012,7 +1010,7 @@ describe('plugin built-in agent disabling', () => {
 
   afterEach(async () => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   });
 
   const createHooks = () =>
@@ -1237,7 +1235,7 @@ describe('plugin reload generation cleanup', () => {
     taggedParts(messages, PHASE_REMINDER_METADATA_KEY);
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-gens-');
+    projectDir = createTmpDir('oh-my-opencode-slim-gens-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -1254,7 +1252,7 @@ describe('plugin reload generation cleanup', () => {
 
   afterEach(async () => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   });
 
   test('file read leaves the composed reminder payload byte-identical', async () => {
@@ -1897,7 +1895,7 @@ describe('plugin TUI agent activity', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-tui-activity-');
+    projectDir = createTmpDir('oh-my-opencode-slim-tui-activity-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -1917,7 +1915,7 @@ describe('plugin TUI agent activity', () => {
   afterEach(async () => {
     await hooks?.dispose?.();
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   });
 
   const busy = (sessionID: string) =>
@@ -2535,7 +2533,7 @@ describe('plugin config model inheritance', () => {
     while (configDirs.length > 0) {
       const configDir = configDirs.pop();
       if (configDir) {
-        await rm(configDir, { recursive: true, force: true });
+        removeTmpDir(configDir);
       }
     }
   });
@@ -2546,8 +2544,7 @@ describe('plugin config model inheritance', () => {
     hostFlavor?: 'v2',
   ) {
     const configDir =
-      existingDirectory ??
-      (await mkdtemp(path.join(os.tmpdir(), 'oh-my-opencode-inheritance-')));
+      existingDirectory ?? createTmpDir('oh-my-opencode-inheritance-');
     if (!existingDirectory) configDirs.push(configDir);
     lastConfigDir = configDir;
     await Bun.write(
@@ -3379,7 +3376,7 @@ describe('system.transform orchestrator injection', () => {
     while (configDirs.length > 0) {
       const configDir = configDirs.pop();
       if (configDir) {
-        await rm(configDir, { recursive: true, force: true });
+        removeTmpDir(configDir);
       }
     }
   });
@@ -3387,9 +3384,7 @@ describe('system.transform orchestrator injection', () => {
   async function loadPluginWithOrchestratorSession(
     config: Record<string, unknown> = {},
   ) {
-    const configDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-system-transform-'),
-    );
+    const configDir = createTmpDir('oh-my-system-transform-');
     configDirs.push(configDir);
     await Bun.write(
       `${configDir}/oh-my-opencode-slim.json`,
@@ -3566,9 +3561,7 @@ describe('plugin foreground fallback host gating', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-fallback-gate-'),
-    );
+    projectDir = createTmpDir('oh-my-opencode-slim-fallback-gate-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -3593,7 +3586,7 @@ describe('plugin foreground fallback host gating', () => {
   afterEach(async () => {
     jest.useRealTimers();
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   });
 
   test('v2 external admission preserves the host retry budget', async () => {
@@ -4157,9 +4150,7 @@ describe('plugin command registration gating', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    projectDir = await mkdtemp(
-      path.join(os.tmpdir(), 'oh-my-opencode-slim-command-gate-'),
-    );
+    projectDir = createTmpDir('oh-my-opencode-slim-command-gate-');
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: projectDir,
@@ -4173,7 +4164,7 @@ describe('plugin command registration gating', () => {
 
   afterEach(async () => {
     process.env = originalEnv;
-    await rm(projectDir, { recursive: true, force: true });
+    removeTmpDir(projectDir);
   });
 
   test('disabled commands stay execution-inert while enabled ones intercept', async () => {

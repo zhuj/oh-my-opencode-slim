@@ -19,11 +19,12 @@ import type { BackgroundJobsMode } from './config/schema';
  * Minimum expected registrations for a healthy plugin load.
  *
  * In native mode the baseline includes task_cancel, task_status, task_reply,
- * webfetch and the two AST tools. Off mode omits the three task controls.
+ * webfetch, the two AST tools, and three utility tools. Off mode omits the
+ * three task controls.
  */
 export const HEALTH_CHECK = {
   minAgents: 5,
-  minTools: 6,
+  minTools: 9,
   minMcps: 1,
 } as const;
 
@@ -61,6 +62,9 @@ const BASELINE_TOOL_NAMES = new Set([
   'webfetch',
   'ast_grep_search',
   'ast_grep_replace',
+  'current_datetime',
+  'get_session_id',
+  'resolve_model',
 ]);
 
 /** Tools that disappear together when the native lifecycle is off. */

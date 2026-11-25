@@ -7,24 +7,35 @@ import {
 } from './feature-gates';
 import type { PluginConfig } from './schema';
 
-test('retired delegation settings refuse to load without a host version', () => {
-  const scope = { orchestrator: { subagents: [] } };
-  const cases = [
-    [{ routingBlock: true }, 'routingBlock'],
-    [{ routingBlock: false }, 'routingBlock'],
+test('valid legacy primary scopes are accepted across config layers', () => {
+  const scope = { orchestrator: { subagents: ['fixer', '@Researcher'] } };
+  for (const config of [
+    { routingBlock: true },
+    { routingBlock: false },
+    { agents: scope },
+    { presets: { old: scope } },
+    { presets: { old: { extends: 'base', agents: scope } } },
+  ]) {
+    expect(() => validateExplicitHostConfig(config, 'v2')).not.toThrow();
+  }
+});
+
+test('invalid delegation scopes still fail before a later layer can mask them', () => {
+  const scope = { orchestrator: { subagents: ['@*'] } };
+  for (const [config, key] of [
     [{ agents: scope }, 'agents.orchestrator.subagents'],
     [{ presets: { old: scope } }, 'presets.old.orchestrator.subagents'],
     [
       { presets: { old: { extends: 'base', agents: scope } } },
       'presets.old.agents.orchestrator.subagents',
     ],
-  ] as const;
-  for (const [config, key] of cases) {
+  ] as const) {
     const validate = () =>
-      validateExplicitHostConfig(config, undefined, '/config/slim.json');
+      validateExplicitHostConfig(config, 'v2', '/config/slim.json');
     expect(validate).toThrow(UnsupportedHostConfigError);
-    expect(validate).toThrow(`/config/slim.json: ${key} was removed`);
-    expect(validate).toThrow('then run /reload');
+    expect(validate).toThrow(
+      `/config/slim.json: ${key} must list valid specialist names`,
+    );
   }
 });
 
@@ -71,62 +82,22 @@ test('removed fallback keys refuse startup even without task controls', () => {
   ).not.toThrow();
 });
 
-test('explicit positive managed limits are refused with their full paths', () => {
-  const cases = [
-    [
-      { concurrency: { providerConcurrency: { openai: 2 } } },
-      'concurrency.providerConcurrency.openai',
-      2,
-    ],
-    [
-      { concurrency: { modelConcurrency: { 'openai/model': 3 } } },
-      'concurrency.modelConcurrency.openai/model',
-      3,
-    ],
-    [
-      { concurrency: { defaultConcurrency: 4 } },
-      'concurrency.defaultConcurrency',
-      4,
-    ],
-    [{ wallClockTimeoutMs: 900000 }, 'wallClockTimeoutMs', 900000],
-  ] as const;
-  for (const [backgroundJobs, key, value] of cases) {
-    const validate = () =>
-      validateExplicitHostConfig({ backgroundJobs }, 'v2', '/config/slim.json');
-    expect(validate).toThrow(UnsupportedHostConfigError);
-    expect(validate).toThrow('/config/slim.json');
-    expect(validate).toThrow(`backgroundJobs.${key}`);
-    expect(validate).toThrow(String(value));
-    expect(validate).toThrow('then run /reload');
-  }
-});
-
-test('reports every positive managed limit in one error', () => {
+test('refuses the retired positive wall-clock limit with its full path', () => {
   const validate = () =>
     validateExplicitHostConfig(
       {
         backgroundJobs: {
           wallClockTimeoutMs: 900000,
-          concurrency: {
-            defaultConcurrency: 4,
-            providerConcurrency: { openai: 2 },
-            modelConcurrency: { 'openai/model': 3 },
-          },
+          concurrency: { defaultConcurrency: 4 },
         },
       },
       'v2',
       '/config/slim.json',
     );
-
+  expect(validate).toThrow(UnsupportedHostConfigError);
   expect(validate).toThrow('/config/slim.json');
   expect(validate).toThrow('backgroundJobs.wallClockTimeoutMs = 900000');
-  expect(validate).toThrow('backgroundJobs.concurrency.defaultConcurrency = 4');
-  expect(validate).toThrow(
-    'backgroundJobs.concurrency.providerConcurrency.openai = 2',
-  );
-  expect(validate).toThrow(
-    'backgroundJobs.concurrency.modelConcurrency.openai/model = 3',
-  );
+  expect(validate).toThrow('then run /reload');
 });
 
 describe('resolveFeatureGates', () => {
@@ -135,6 +106,7 @@ describe('resolveFeatureGates', () => {
 
     expect(gates).toEqual({
       backgroundJobsMode: 'native',
+      admissionQueue: true,
       presetRouting: true,
       replaceBuiltinSubagents: true,
       tui: true,
@@ -148,18 +120,56 @@ describe('resolveFeatureGates', () => {
     expect(Object.isFrozen(gates)).toBe(true);
   });
 
-  test('throws UnsupportedHostConfigError when mode is explicitly managed on v2', () => {
-    expect(() =>
+  test('legacy managed mode enables admission with the native lifecycle', () => {
+    expect(
       resolveFeatureGates({ backgroundJobs: { mode: 'managed' } }),
-    ).toThrow(UnsupportedHostConfigError);
-    expect(() =>
-      resolveFeatureGates({ backgroundJobs: { mode: 'managed' } }),
-    ).toThrow(/Unsupported backgroundJobs\.mode "managed" on OpenCode v2/);
+    ).toMatchObject({
+      backgroundJobsMode: 'native',
+      admissionQueue: true,
+      presetRouting: true,
+    });
+  });
+
+  test('queue and preset routing are independently configurable', () => {
+    expect(
+      resolveFeatureGates({
+        backgroundJobs: { mode: 'native', queue: { enabled: true } },
+        sessionPresetRouting: false,
+      }),
+    ).toMatchObject({ admissionQueue: true, presetRouting: false });
+    expect(
+      resolveFeatureGates({
+        backgroundJobs: {
+          mode: 'native',
+          concurrency: { defaultConcurrency: 2 },
+        },
+      }).admissionQueue,
+    ).toBe(true);
+    expect(
+      resolveFeatureGates({
+        backgroundJobs: {
+          mode: 'managed',
+          queue: { enabled: false },
+          concurrency: { defaultConcurrency: 2 },
+        },
+      }).admissionQueue,
+    ).toBe(false);
+    expect(
+      resolveFeatureGates({
+        backgroundJobs: {
+          mode: 'off',
+          queue: { enabled: true },
+          concurrency: { defaultConcurrency: 2 },
+        },
+        sessionPresetRouting: true,
+      }),
+    ).toMatchObject({ admissionQueue: false, presetRouting: true });
   });
 
   test('accepts explicit native and off modes on v2', () => {
     const native = resolveFeatureGates({ backgroundJobs: { mode: 'native' } });
     expect(native.backgroundJobsMode).toBe('native');
+    expect(native.admissionQueue).toBe(false);
     expect(native.presetRouting).toBe(true);
 
     const off = resolveFeatureGates({ backgroundJobs: { mode: 'off' } });
@@ -310,6 +320,7 @@ describe('resolveFeatureGates', () => {
     const gates = resolveFeatureGates(config);
     expect(gates).toEqual({
       backgroundJobsMode: 'native',
+      admissionQueue: false,
       presetRouting: true,
       replaceBuiltinSubagents: true,
       tui: false,

@@ -1,3 +1,8 @@
+import {
+  assertSkillPermissionMap,
+  assertSkillRules,
+  permissionPatternMatches,
+} from '../utils/skill-policy-validation';
 import type { V2PermissionRule } from './types';
 
 type PermissionEffect = V2PermissionRule['effect'];
@@ -39,6 +44,12 @@ const EFFECT_RANK: Record<PermissionEffect, number> = {
 export function compilePermissionPolicy(
   input: PermissionPolicyInput,
 ): PermissionPolicy {
+  assertSkillRules(input.baselineRules);
+  assertSkillRules(input.hostRules);
+  assertSkillPermissionMap(
+    input.ceilings?.resources,
+    'permission resource ceilings',
+  );
   const rules = input.ceilings
     ? compileCeilingRules(
         input.baselineRules,
@@ -53,6 +64,7 @@ export function compilePermissionPolicy(
       effect: 'deny' as const,
     })),
   );
+  assertSkillRules(rules, 'compiled permission rules');
   const frozenRules = Object.freeze(rules.map((rule) => Object.freeze(rule)));
   return Object.freeze({
     rules: frozenRules,
@@ -386,13 +398,5 @@ function cloneRule(rule: V2PermissionRule): V2PermissionRule {
 
 /** Mirrors the host matcher: slash normalization, `?`, `*`, and `git *`. */
 function patternMatches(pattern: string, value: string): boolean {
-  const normalizedPattern = normalizePattern(pattern);
-  const normalizedValue = normalizePattern(value);
-  return sourceVariants(normalizedPattern).some((variant) => {
-    const expression = variant
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*/g, '.*')
-      .replace(/\?/g, '.');
-    return new RegExp(`^${expression}$`, 's').test(normalizedValue);
-  });
+  return permissionPatternMatches(pattern, value);
 }

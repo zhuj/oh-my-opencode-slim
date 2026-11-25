@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from 'node:util';
 import { gte, major, valid } from 'semver';
 
-export const MINIMUM_OPENCODE_VERSION = '2.3.0';
+export const MINIMUM_OPENCODE_VERSION = '2.4.0';
 
 export function parseOpenCodeVersion(output: string): string | null {
   return valid(

@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { createAgents } from '../agents';
 import {
   getDefaultGrantedSkillNames,
   resolveEffectiveSkills,
 } from '../cli/skills';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { loadPluginConfig } from './loader';
 import { RuntimeConfig } from './runtime';
 import {
@@ -29,7 +29,7 @@ describe('skills_add / skills_remove directives', () => {
   let originalEnv: typeof process.env;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-add-remove-test-'));
+    tempDir = createTmpDir();
     originalEnv = { ...process.env };
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
@@ -39,7 +39,7 @@ describe('skills_add / skills_remove directives', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTmpDir(tempDir);
     process.env = originalEnv;
     RuntimeConfig.reset(RUNTIME_TEST_DIRECTORY);
   });

@@ -23,6 +23,7 @@ import {
   loadRawPluginConfigFromPath,
   mergePluginConfigs,
 } from '../config/loader';
+import { usesSelectedModel } from '../config/model-sentinel';
 import { mergePresetMaps, resolvePresetDefinition } from '../config/presets';
 import {
   isPrototypeSensitiveName,
@@ -100,6 +101,7 @@ export interface AgentUpdate {
   inheritModelFrom?: string;
   temperature?: number;
   variant?: string;
+  dynamic?: boolean;
   options?: Record<string, unknown>;
   skills?: string[];
   skills_add?: string[];
@@ -112,6 +114,8 @@ export interface AgentUpdate {
   description?: string;
   color?: string;
   permission?: unknown;
+  primary?: boolean;
+  subagents?: string[];
 }
 
 /**
@@ -378,7 +382,9 @@ function buildAgentUpdates(preset: Preset): Record<string, AgentUpdate> {
 function mapOverrideToAgentConfig(override: AgentOverrideConfig): AgentUpdate {
   const agentConfig: AgentUpdate = {};
 
-  if (typeof override.model === 'string') {
+  if (usesSelectedModel(override.model)) {
+    agentConfig.dynamic = true;
+  } else if (typeof override.model === 'string') {
     agentConfig.model = override.model;
   } else if (Array.isArray(override.model) && override.model.length > 0) {
     // Array-form model (fallback chain): pick the first entry. Full chain
@@ -454,6 +460,10 @@ function mapOverrideToAgentConfig(override: AgentOverrideConfig): AgentUpdate {
     agentConfig.color = override.color;
   }
 
+  if (override.primary !== undefined) agentConfig.primary = override.primary;
+  if (override.subagents !== undefined)
+    agentConfig.subagents = override.subagents;
+
   if (override.permission !== undefined) {
     agentConfig.permission = override.permission;
   }
@@ -470,6 +480,10 @@ export function buildPresetSummary(
     const parts: string[] = [name];
     if (cfg.model) parts.push(`model: ${cfg.model}`);
     if (cfg.inheritModelFrom) parts.push(`inherit: ${cfg.inheritModelFrom}`);
+    if (cfg.dynamic) parts.push('dynamic: inherit');
+    if (cfg.primary) parts.push('primary');
+    if (cfg.subagents)
+      parts.push(`subagents: ${cfg.subagents.join(',') || 'none'}`);
     if (cfg.variant) parts.push(`variant: ${cfg.variant}`);
     if (cfg.temperature !== undefined) parts.push(`temp: ${cfg.temperature}`);
     if (cfg.options) parts.push('options: yes');

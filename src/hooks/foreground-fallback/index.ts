@@ -1144,8 +1144,9 @@ export class ForegroundFallbackManager {
         return;
       const current = data.model;
       const hostModel =
-        typeof current.providerID === 'string' && typeof current.id === 'string'
-          ? `${current.providerID}/${current.id}`
+        typeof current.providerID === 'string' &&
+        typeof (current.modelID ?? current.id) === 'string'
+          ? `${current.providerID}/${current.modelID ?? current.id}`
           : undefined;
       if (!hostModel) return;
       // A native agent switch may retain the fallback model. Check the
@@ -1172,7 +1173,7 @@ export class ForegroundFallbackManager {
         return;
       }
       const ref = parseModelReference(target.model);
-      if (!ref) return;
+      if (!ref?.providerID) return;
       if (midTurn) this.restoredFrom.set(sessionID, descent);
       await withTimeout(
         switchModel(sessionID, {
@@ -1796,16 +1797,16 @@ export class ForegroundFallbackManager {
       const failure =
         noRouteModel(error.message) ??
         (typeof current?.providerID === 'string' &&
-        typeof current.id === 'string'
-          ? `${current.providerID}/${current.id}`
+        typeof (current.modelID ?? current.id) === 'string'
+          ? `${current.providerID}/${current.modelID ?? current.id}`
           : this.sessionModel.get(sessionID));
       const ref = failure ? parseModelReference(failure) : undefined;
-      const model = ref
+      const model = ref?.providerID
         ? {
             providerID: ref.providerID,
             id: ref.modelID,
             ...(current?.providerID === ref.providerID &&
-            current.id === ref.modelID &&
+            (current.modelID ?? current.id) === ref.modelID &&
             typeof current.variant === 'string'
               ? { variant: current.variant }
               : {}),
@@ -1892,8 +1893,9 @@ export class ForegroundFallbackManager {
           (restored.fallbackVariant ?? 'default') &&
         isRecord(current) &&
         typeof current.providerID === 'string' &&
-        typeof current.id === 'string' &&
-        `${current.providerID}/${current.id}` === restored.model &&
+        typeof (current.modelID ?? current.id) === 'string' &&
+        `${current.providerID}/${current.modelID ?? current.id}` ===
+          restored.model &&
         (current.variant ?? 'default') === (restored.variant ?? 'default');
       if (
         (typeof data.agent === 'string' && data.agent !== step.agent) ||
@@ -1902,7 +1904,7 @@ export class ForegroundFallbackManager {
           step.model !== undefined &&
           (!isRecord(current) ||
             current.providerID !== step.model.providerID ||
-            current.id !== step.model.id ||
+            (current.modelID ?? current.id) !== step.model.id ||
             (current.variant ?? 'default') !==
               (step.model.variant ?? 'default')))
       )
@@ -2205,15 +2207,22 @@ export class ForegroundFallbackManager {
     }
     tried.add(nextModel);
     const ref = parseModelReference(nextModel);
-    if (!ref) {
+    if (!ref?.providerID) {
       log('[foreground-fallback] invalid model format', {
         sessionID,
         nextModel,
       });
       return;
     }
-    const variant = entries.find((entry) => entry.id === nextModel)?.variant;
-    return { agentName, currentModel, nextModel, ref, variant };
+    const variant =
+      entries.find((entry) => entry.id === nextModel)?.variant ?? ref.variant;
+    return {
+      agentName,
+      currentModel,
+      nextModel,
+      ref: { providerID: ref.providerID, modelID: ref.modelID },
+      variant,
+    };
   }
   /**
    * Surface a TUI toast when the fallback switches models, so the user isn't

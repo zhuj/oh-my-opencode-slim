@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { findOpenCode } from './system';
 
 test('finds and identifies OpenCode in ~/.opencode/bin', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'opencode-system-test-'));
+  const dir = createTmpDir('opencode-system-test-');
   try {
     const bin = join(dir, '.opencode', 'bin');
     const opencode = join(bin, 'opencode');
@@ -20,18 +20,18 @@ test('finds and identifies OpenCode in ~/.opencode/bin', () => {
       version: 'opencode v2.2.4',
     });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });
 
 test('uses the opencode command when a legacy shim also exists on PATH', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'opencode-system-test-'));
+  const dir = createTmpDir('opencode-system-test-');
   try {
     const opencode = join(dir, 'opencode');
     writeFileSync(opencode, '#!/bin/sh\necho opencode v2.3.1\n', {
       mode: 0o755,
     });
-    writeFileSync(join(dir, 'opencode2'), '#!/bin/sh\necho opencode v2.3.0\n', {
+    writeFileSync(join(dir, 'opencode2'), '#!/bin/sh\necho opencode v2.4.0\n', {
       mode: 0o755,
     });
     expect(
@@ -41,12 +41,12 @@ test('uses the opencode command when a legacy shim also exists on PATH', () => {
       version: 'opencode v2.3.1',
     });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });
 
 test('prefers an unknown preview on PATH over another supported host', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'opencode-system-test-'));
+  const dir = createTmpDir('opencode-system-test-');
   try {
     const bin = join(dir, 'bin');
     const fallback = join(dir, '.opencode', 'bin');
@@ -57,7 +57,7 @@ test('prefers an unknown preview on PATH over another supported host', () => {
     });
     writeFileSync(
       join(fallback, 'opencode'),
-      '#!/bin/sh\necho opencode v2.3.0\n',
+      '#!/bin/sh\necho opencode v2.4.0\n',
       { mode: 0o755 },
     );
     expect(
@@ -65,6 +65,6 @@ test('prefers an unknown preview on PATH over another supported host', () => {
         ?.path,
     ).toBe(join(bin, 'opencode'));
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   }
 });

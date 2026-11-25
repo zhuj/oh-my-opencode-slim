@@ -10,7 +10,14 @@ import {
 } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { getConfigDir } from '../config/paths';
-import { CUSTOM_SKILLS } from './custom-skills-registry';
+import {
+  assertSkillIdentifier,
+  assertSkillNames,
+  InvalidSkillPolicyError,
+} from '../utils/skill-policy-validation';
+import { CUSTOM_SKILLS, type CustomSkill } from './custom-skills-registry';
+
+export { CUSTOM_SKILLS, type CustomSkill };
 
 export interface BundledSkillInfo {
   id: string;
@@ -52,6 +59,9 @@ export function buildBundledSkillInfos(
   packageRoot: string,
   disabled: readonly string[],
 ): BundledSkillInfo[] {
+  assertSkillNames(disabled, 'disabled bundled skill names');
+  for (const skill of CUSTOM_SKILLS)
+    assertSkillIdentifier(skill.name, 'bundled skill registry');
   const skip = new Set(disabled);
   const infos: BundledSkillInfo[] = [];
   for (const skill of CUSTOM_SKILLS) {
@@ -61,6 +71,7 @@ export function buildBundledSkillInfos(
       if (!existsSync(mdPath)) continue;
       const raw = readFileSync(mdPath, 'utf-8').replace(/^\uFEFF/, '');
       const fm = parseFrontmatter(raw);
+      if (fm.name !== undefined) assertSkillIdentifier(fm.name, mdPath);
       infos.push({
         id: skill.name,
         name: skill.name,
@@ -68,7 +79,8 @@ export function buildBundledSkillInfos(
         path: mdPath,
         content: stripFrontmatter(raw).trim(),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof InvalidSkillPolicyError) throw error;
       // Unreadable skill source: skip rather than break registration.
     }
   }

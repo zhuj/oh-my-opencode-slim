@@ -11,12 +11,18 @@
  * alive for a live per-session enable; the latter removes the hook entirely).
  */
 import { isRecord } from '../utils/guards';
-import { AgentOverrideConfigSchema, type BackgroundJobsMode } from './schema';
+import {
+  AgentOverrideConfigSchema,
+  type BackgroundJobsMode,
+  SubagentScopeSchema,
+} from './schema';
 
 /** Structural slice of the plugin config the gates depend on. */
 export interface FeatureGateConfig {
   readonly backgroundJobs?: {
     readonly mode?: BackgroundJobsMode;
+    readonly queue?: { readonly enabled?: boolean };
+    readonly concurrency?: object;
   };
   readonly sessionPresetRouting?: boolean;
   readonly replaceBuiltinSubagents?: boolean;
@@ -41,15 +47,19 @@ export class UnsupportedHostConfigError extends Error {
   }
 }
 
-const UNSUPPORTED_MANAGED_MODE_MESSAGE =
-  'Unsupported backgroundJobs.mode "managed" on OpenCode v2; use "native" or "off".';
-
-function retiredSubagentScope(agents: unknown): string | undefined {
+function invalidSubagentScope(
+  agents: unknown,
+  excludeWrapper = false,
+): string | undefined {
   if (!isRecord(agents)) return;
   return Object.keys(agents).find((name) => {
+    if (excludeWrapper && name === 'agents') return false;
     const override = agents[name];
-    // The wrapper can itself contain a custom agent named "subagents".
-    return isRecord(override) && Array.isArray(override.subagents);
+    return (
+      isRecord(override) &&
+      Object.hasOwn(override, 'subagents') &&
+      !SubagentScopeSchema.safeParse(override.subagents).success
+    );
   });
 }
 
@@ -61,30 +71,35 @@ export function validateExplicitHostConfig(
 ): void {
   if (!isRecord(config)) return;
   const source = sourcePath ? `${sourcePath}: ` : '';
-  if (Object.hasOwn(config, 'routingBlock')) {
+  if (
+    Object.hasOwn(config, 'routingBlock') &&
+    typeof config.routingBlock !== 'boolean'
+  ) {
     throw new UnsupportedHostConfigError(
-      `${source}routingBlock was removed. Remove the key, then run /reload.`,
+      `${source}routingBlock must be a boolean. Fix the key, then run /reload.`,
     );
   }
   const rejectScope = (path: string): never => {
     throw new UnsupportedHostConfigError(
-      `${source}${path}.subagents was removed. Use native subagent rules in agents.<id>.permissions in opencode.json[c], remove the old key, then run /reload.`,
+      `${source}${path}.subagents must list valid specialist names. For pattern rules, use native subagent permissions in agents.<id>.permissions in opencode.json[c], then run /reload.`,
     );
   };
-  const root = retiredSubagentScope(config.agents);
+  const root = invalidSubagentScope(config.agents);
   if (root !== undefined) rejectScope(`agents.${root}`);
   if (isRecord(config.presets)) {
     for (const [name, preset] of Object.entries(config.presets)) {
       if (!isRecord(preset)) continue;
-      const flat = retiredSubagentScope(preset);
+      // "agents" can also be the name of a custom agent in flat syntax.
+      const wrapper =
+        isRecord(preset.agents) &&
+        !AgentOverrideConfigSchema.safeParse(preset.agents).success &&
+        Object.values(preset.agents).some(isRecord);
+      const flat = invalidSubagentScope(preset, wrapper);
       if (flat !== undefined) rejectScope(`presets.${name}.${flat}`);
-      const wrapped = retiredSubagentScope(preset.agents);
-      // A flat preset may instead define a custom agent named "agents".
-      if (
-        wrapped !== undefined &&
-        !AgentOverrideConfigSchema.safeParse(preset.agents).success
-      ) {
-        rejectScope(`presets.${name}.agents.${wrapped}`);
+      if (wrapper) {
+        const wrapped = invalidSubagentScope(preset.agents);
+        if (wrapped !== undefined)
+          rejectScope(`presets.${name}.agents.${wrapped}`);
       }
     }
   }
@@ -117,47 +132,23 @@ export function validateExplicitHostConfig(
     jobs.mode !== 'managed'
   ) {
     throw new UnsupportedHostConfigError(
-      `${source}Invalid backgroundJobs.mode ${JSON.stringify(jobs.mode)}; use "native" or "off", then run /reload.`,
+      `${source}Invalid backgroundJobs.mode ${JSON.stringify(jobs.mode)}; use "native", "off", or legacy "managed", then run /reload.`,
     );
   }
-  const unsupported: string[] = [];
-  const collectLimit = (key: string, value: unknown) => {
-    if (typeof value === 'number' && value > 0) {
-      unsupported.push(`backgroundJobs.${key} = ${value}`);
-    }
-  };
-  collectLimit('wallClockTimeoutMs', jobs.wallClockTimeoutMs);
-  const concurrency = jobs.concurrency;
   if (
-    concurrency &&
-    typeof concurrency === 'object' &&
-    !Array.isArray(concurrency)
+    typeof jobs.wallClockTimeoutMs === 'number' &&
+    jobs.wallClockTimeoutMs > 0
   ) {
-    const limits = concurrency as Record<string, unknown>;
-    collectLimit('concurrency.defaultConcurrency', limits.defaultConcurrency);
-    for (const key of ['providerConcurrency', 'modelConcurrency']) {
-      const entries = limits[key];
-      if (!entries || typeof entries !== 'object' || Array.isArray(entries))
-        continue;
-      for (const [id, value] of Object.entries(entries)) {
-        collectLimit(`concurrency.${key}.${id}`, value);
-      }
-    }
-  }
-  if (unsupported.length > 0) {
-    const remedy =
-      unsupported.length === 1
-        ? 'this limit. Remove the key or set it'
-        : 'these limits. Remove the keys or set them';
     throw new UnsupportedHostConfigError(
-      `${source}Unsupported ${unsupported.join(', ')} on OpenCode v2: Slim no longer enforces ${remedy} to 0, then run /reload.`,
+      `${source}Unsupported backgroundJobs.wallClockTimeoutMs = ${jobs.wallClockTimeoutMs} on OpenCode v2: remove the retired limit or set it to 0, then run /reload.`,
     );
   }
 }
 
 /** Resolved enable/disable decisions for the optional subsystems. */
 export interface FeatureGates {
-  readonly backgroundJobsMode: BackgroundJobsMode;
+  readonly backgroundJobsMode: Exclude<BackgroundJobsMode, 'managed'>;
+  readonly admissionQueue: boolean;
   readonly presetRouting: boolean;
   readonly replaceBuiltinSubagents: boolean;
   readonly tui: boolean;
@@ -177,11 +168,9 @@ export interface FeatureGates {
 export function resolveFeatureGates(
   config: FeatureGateConfig = {},
 ): Readonly<FeatureGates> {
-  if (config.backgroundJobs?.mode === 'managed') {
-    throw new UnsupportedHostConfigError(UNSUPPORTED_MANAGED_MODE_MESSAGE);
-  }
   validateExplicitHostConfig(config, 'v2');
-  const backgroundJobsMode = config.backgroundJobs?.mode ?? 'native';
+  const jobs = config.backgroundJobs;
+  const backgroundJobsMode = jobs?.mode === 'off' ? 'off' : 'native';
   const tui = config.tui !== false;
   // User-edited config can be malformed despite the declared type; treat a
   // non-array disabled list as empty instead of failing plugin init.
@@ -190,6 +179,10 @@ export function resolveFeatureGates(
     : [];
   return Object.freeze({
     backgroundJobsMode,
+    admissionQueue:
+      backgroundJobsMode !== 'off' &&
+      (jobs?.queue?.enabled ??
+        (jobs?.mode !== 'native' || jobs.concurrency !== undefined)),
     presetRouting:
       config.sessionPresetRouting ?? backgroundJobsMode === 'native',
     replaceBuiltinSubagents: config.replaceBuiltinSubagents !== false,

@@ -27,6 +27,7 @@ import {
   MINIMUM_OPENCODE_VERSION,
   parseOpenCodeVersion,
 } from '../config/opencode-version';
+import { DEFAULT_RESOURCE_PREFIXES } from '../config/project-resource-paths';
 import { InterviewConfigSchema } from '../config/schema';
 import type { PluginConfigSnapshot } from '../config/snapshot';
 import { readPluginConfigSnapshot } from '../config/snapshot';
@@ -63,6 +64,10 @@ import {
   recordTuiAgentDisplayNames,
   withTuiSnapshotBatch,
 } from '../tui-state';
+import {
+  rewriteDelegationDescription,
+  rewriteDelegationSchema,
+} from '../utils/delegation-description';
 import { isPluginDisabledByEnv } from '../utils/env';
 import { createEventDirectoryScope } from '../utils/event-directory-scope';
 import { isRecord } from '../utils/guards';
@@ -76,6 +81,11 @@ import {
   modelExistsInCatalog,
 } from '../utils/model-image-capability';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
+import {
+  assertSkillPermissionMap,
+  assertSkillRules,
+  InvalidSkillPolicyError,
+} from '../utils/skill-policy-validation';
 import {
   adaptTool,
   applyAgentToDraft,
@@ -94,6 +104,7 @@ import {
 } from './config-watch';
 import {
   DELEGATION_TOOL_V2,
+  normalizeNewSessionResume,
   subagentArgsToV1,
   toolNameToV1,
   v1ArgsToSubagent,
@@ -106,8 +117,13 @@ import {
   recordInternalAdmission,
 } from './internal-admissions';
 import type { V2InterviewBridge } from './interview-bridge';
+import { createModelListSnapshot } from './model-list-shim';
 import { createPresetCommand, PRESET_COMMAND_NAME } from './preset-command';
 import { sessionPresetRpc } from './preset-rpc';
+import {
+  addMissingV2ProjectSkills,
+  prepareV2ProjectSkillProjection,
+} from './project-skill-loader';
 import {
   applyRuntimeProfileOptions,
   createSessionProfileBridge,
@@ -127,6 +143,8 @@ import {
   type V1CommandBeforeHook,
   type V2CommandSubmit,
 } from './session-submit';
+import { createSkillCommandController } from './skill-command-lifecycle';
+import { resolveV2TouchedFilePaths } from './tool-path-shim';
 import type {
   V2AgentDraft,
   V2Cleanup,
@@ -141,7 +159,33 @@ import type {
   V2SessionPromptEvent,
   V2ToolAfterEvent,
   V2ToolBeforeEvent,
+  V2ToolDefinition,
+  V2ToolDraft,
 } from './types';
+
+/** Probe callback editing first; object-only hosts need an inspectable snapshot. */
+function updateToolDraft(
+  draft: V2ToolDraft,
+  id: string,
+  patchFor: (tool: Partial<V2ToolDefinition>) => Partial<V2ToolDefinition>,
+): void {
+  if (typeof draft.update !== 'function') return;
+  let callbackCalled = false;
+  try {
+    draft.update(id, (tool) => {
+      callbackCalled = true;
+      Object.assign(tool, patchFor(tool));
+    });
+  } catch (err) {
+    // Never retry a callback that already ran: it may have partially mutated.
+    if (callbackCalled || typeof draft.get !== 'function') throw err;
+  }
+  if (callbackCalled || typeof draft.get !== 'function') return;
+  const tool = draft.get(id);
+  if (!tool) return;
+  const patch = patchFor(tool);
+  if (Object.keys(patch).length > 0) draft.update(id, patch);
+}
 
 /** Wrap slash-command arguments in the generic v2 command marker. v2 command
  * drafts are add-only (no `template`), so `execute` submits this marker as a
@@ -194,7 +238,7 @@ export function createCommandRegistration(
         await submit(
           invocation?.sessionID ?? '',
           wrapCommandMarker(name, invocation?.prompt?.text ?? ''),
-          ...(invocation?.prompt?.files ? [invocation.prompt.files] : []),
+          ...(invocation?.prompt?.files ? [[...invocation.prompt.files]] : []),
         );
       } catch (err) {
         log('[v2] command submit failed', { name, err: String(err) });
@@ -904,10 +948,21 @@ const COMPACTION_STRIP_METADATA_KEYS: readonly string[] = [
  */
 export function createSessionCompactionBridge(
   metadataKeys: readonly string[] = COMPACTION_STRIP_METADATA_KEYS,
+  v1Compacting?: (input: { sessionID: string }) => Promise<void>,
 ): (event: V2SessionCompactionEvent) => Promise<void> {
   return async (event) => {
     try {
       if (!event || typeof event !== 'object') return;
+      // Clear session-scoped v1 state before compaction completes. Keep this
+      // fail-soft and independent from stripping so a cleanup failure cannot
+      // preserve volatile injected content in the compacted transcript.
+      if (v1Compacting && typeof event.sessionID === 'string') {
+        try {
+          await v1Compacting({ sessionID: event.sessionID });
+        } catch (err) {
+          log('[v2] v1 compacting hook failed', String(err));
+        }
+      }
       if (!Array.isArray(event.messages)) return;
       // Same v1-view bridging as the context handler's messages
       // transform: `parts` shares the `content` array reference so
@@ -983,6 +1038,7 @@ function containsWildcard(value: string): boolean {
  * exact-match ruleset cannot express.
  */
 export function deriveExactPermissionRules(perm: unknown): V2PermissionRule[] {
+  assertSkillPermissionMap(perm);
   const rules: V2PermissionRule[] = [];
   if (!perm || typeof perm !== 'object' || Array.isArray(perm)) return rules;
   for (const [tool, value] of Object.entries(perm as Record<string, unknown>)) {
@@ -1175,6 +1231,7 @@ async function readFinalizedAgentPermissions(
   const native = listed.find((entry) => isRecord(entry) && entry.id === agent);
   if (!isRecord(native)) return undefined;
   const permission = native.permissions;
+  assertSkillRules(permission, 'finalized host agent permissions');
   if (!Array.isArray(permission)) {
     throw new Error(
       `native agent '${agent}' exposed a malformed permissions field`,
@@ -1222,6 +1279,140 @@ async function listHostAgentIds(
       isRecord(entry) && typeof entry.id === 'string' ? [entry.id] : [],
     ),
   );
+}
+
+/** Observe native selection for admission accounting without selecting a model.
+ * The official executor still owns overrides, agent changes and validation. */
+export async function resolveNativeAdmissionModel(
+  ctx: Pick<V2Context, 'agent' | 'session'>,
+  input: Record<string, unknown>,
+  parentSessionID: string,
+  knownParentModel?: Record<string, unknown>,
+): Promise<string | undefined> {
+  const unwrap = (value: unknown): unknown =>
+    isRecord(value) && value.data !== undefined ? value.data : value;
+  const sessionID =
+    typeof input.sessionID === 'string' ? input.sessionID : parentSessionID;
+  const [session, listed] = await withTimeout(
+    Promise.all([
+      ctx.session.get?.({ sessionID }).then(unwrap),
+      ctx.agent.list?.().then(unwrap),
+    ]),
+    PERMISSION_RULES_OPERATION_TIMEOUT_MS,
+    'Native admission model lookup timed out',
+  );
+  const agent = Array.isArray(listed)
+    ? listed.find(
+        (entry) =>
+          isRecord(entry) &&
+          (entry.id === input.agent || entry.name === input.agent),
+      )
+    : undefined;
+  const current = isRecord(session) ? session.model : undefined;
+  const configured = isRecord(agent) ? agent.model : undefined;
+  const resumed = typeof input.sessionID === 'string';
+  const unchanged =
+    resumed &&
+    isRecord(session) &&
+    isRecord(agent) &&
+    session.agent === agent.id;
+  const selected = unchanged
+    ? current
+    : (configured ?? current ?? (resumed ? undefined : knownParentModel));
+  if (
+    !isRecord(selected) ||
+    typeof selected.providerID !== 'string' ||
+    typeof selected.id !== 'string'
+  )
+    return undefined;
+  return `${selected.providerID}/${selected.id}`;
+}
+
+/** Registry as finalized by the setup closure's agent transform. */
+export type V2FinalizedRegistry = ReturnType<
+  RegistryFactoryBridge['requireRegistry']
+>;
+
+/** Agent-membership sets the permission rules bridge consults to classify an
+ * admitted prompt's session identity. */
+export interface V2AgentNameSets {
+  /** Canonical and visible identities of finalized marketplace agents. */
+  readonly marketplace: ReadonlySet<string>;
+  /** Every finalized plugin/native identity, foreign agents included. */
+  readonly known: ReadonlySet<string>;
+}
+
+/** Inputs the membership sets are derived from. An absent registry means
+ * agent finalization has not produced one yet, which yields an empty
+ * marketplace set — the same fail-open state an unfinalized setup had. */
+export interface V2AgentNameSetInputs {
+  readonly registry: V2FinalizedRegistry | undefined;
+  /** Plugin-managed roster, refilled IN PLACE by its single writer. */
+  readonly pluginAgents: ReadonlySet<string>;
+  /** Bumped by that writer so an in-place refill invalidates the cache. */
+  readonly pluginAgentsGeneration: number;
+  readonly nativeAgents:
+    | Readonly<Record<string, Readonly<Record<string, unknown>>>>
+    | undefined;
+}
+
+function buildAgentNameSets(inputs: V2AgentNameSetInputs): V2AgentNameSets {
+  const registry = inputs.registry;
+  const marketplace = new Set<string>();
+  const known = new Set<string>(inputs.pluginAgents);
+  for (const [name, config] of Object.entries(inputs.nativeAgents ?? {})) {
+    known.add(name);
+    if (typeof config.displayName === 'string') known.add(config.displayName);
+  }
+  if (registry) {
+    for (const name of registry.marketplaceAgentNames) {
+      marketplace.add(name);
+      marketplace.add(registry.identities[name] ?? name);
+    }
+    for (const [name, identity] of Object.entries(registry.identities)) {
+      known.add(name);
+      known.add(identity);
+    }
+  }
+  return { marketplace, known };
+}
+
+/**
+ * Cached reader for the two agent-membership sets the permission rules
+ * bridge reads on every prompt admission (its awaited prompt barrier makes
+ * one membership test per admitted prompt). Each set is rebuilt only when
+ * one of its inputs changes identity — registry finalization, the native
+ * agent snapshot, or a plugin-agent roster refill — so repeated admissions
+ * over a stable roster cost four comparisons instead of reconstructing both
+ * sets. Membership results are identical to building on every call; only
+ * the build frequency changes, so no admission can observe a stale or
+ * widened set.
+ *
+ * @internal `build` is a seam so tests can count set constructions, which
+ * cannot be observed without instrumentation.
+ */
+export function createAgentNameSetsReader(
+  readInputs: () => V2AgentNameSetInputs,
+  build: (inputs: V2AgentNameSetInputs) => V2AgentNameSets = buildAgentNameSets,
+): () => V2AgentNameSets {
+  let cache:
+    | { inputs: V2AgentNameSetInputs; sets: V2AgentNameSets }
+    | undefined;
+  return () => {
+    const inputs = readInputs();
+    if (
+      cache &&
+      cache.inputs.registry === inputs.registry &&
+      cache.inputs.pluginAgents === inputs.pluginAgents &&
+      cache.inputs.pluginAgentsGeneration === inputs.pluginAgentsGeneration &&
+      cache.inputs.nativeAgents === inputs.nativeAgents
+    ) {
+      return cache.sets;
+    }
+    const sets = build(inputs);
+    cache = { inputs, sets };
+    return sets;
+  };
 }
 
 function classifyPermissionIdentity(
@@ -1472,6 +1663,8 @@ export function createPermissionRulesBridge(
       throw new Error('ctx.session.update unavailable');
     }
     const permission = await options.permissionForAgent(agent);
+    assertSkillRules(permission, 'child permission policy');
+    assertSkillPermissionMap(permission, 'child permission policy');
     if (permission === undefined) {
       throw new Error(`permission policy unavailable for agent '${agent}'`);
     }
@@ -2140,6 +2333,7 @@ export function createToolExecuteBridges(
     callID: string;
     args: Record<string, unknown>;
   }) => string | undefined | Promise<string | undefined>,
+  resultPaths?: (tool: string, result: unknown) => readonly string[],
 ): V2ToolBridgeEvents {
   const beforeBridge = async (
     event: Record<string, unknown> & { input: unknown },
@@ -2150,6 +2344,7 @@ export function createToolExecuteBridges(
     const argsView = isDelegation
       ? subagentArgsToV1(e.input)
       : { ...(e.input as object) };
+    if (isDelegation) normalizeNewSessionResume(argsView);
     if (
       isDelegation &&
       resolveDelegatedModel &&
@@ -2226,10 +2421,16 @@ export function createToolExecuteBridges(
       output: unknown;
       title: string;
       metadata: Record<string, unknown>;
+      status?: 'error';
+      resolvedFilePaths?: readonly string[];
     } = {
       output: content,
       title: initialTitle,
       metadata: isRecord(originalMetadata) ? originalMetadata : {},
+      ...(errored ? { status: 'error' as const } : {}),
+      ...(resultPaths
+        ? { resolvedFilePaths: errored ? [] : resultPaths(e.tool, e.result) }
+        : {}),
     };
     await after(
       {
@@ -2324,7 +2525,28 @@ function assertSupportedV2Host(ctx: V2Context): void {
   }
 }
 
-export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
+/**
+ * Test-only seams. Production never registers one: the cached membership
+ * reader and the generation its single writer bumps both live inside the
+ * setup closure, so the writer→cache invalidation wiring cannot be observed
+ * from outside it. Asserting that wiring needs the real objects, never a
+ * replica of the writer. Optional and inert when omitted — `readAgentNameSets`
+ * and `pluginAgents` are passed by reference, so registering a seam cannot
+ * change what any bridge observes.
+ */
+export interface V2SetupSeams {
+  /** Receives the production reader (calling it drives the real cache) and
+   * the roster Set the production writer refills in place. */
+  agentNameSets?: (state: {
+    read: () => V2AgentNameSets;
+    pluginAgents: ReadonlySet<string>;
+  }) => void;
+}
+
+export function createV2Setup(
+  factory: typeof OhMyOpenCodeLite = OhMyOpenCodeLite,
+  seams: V2SetupSeams = {},
+): (ctx: V2Context) => Promise<V2Cleanup> {
   return async (ctx: V2Context): Promise<V2Cleanup> => {
     let retireSessionPresets: (() => Promise<void>) | undefined;
     initLogger();
@@ -2386,6 +2608,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     let stopPermissionEventIntake: (() => Promise<void>) | undefined;
     let v1Hooks: Record<string, unknown> | undefined;
     let registryBridge: RegistryFactoryBridge | undefined;
+    let skillCommands:
+      | ReturnType<typeof createSkillCommandController>
+      | undefined;
+    const modelListSnapshot = createModelListSnapshot();
+    let projectSkillProjection: Awaited<
+      ReturnType<typeof prepareV2ProjectSkillProjection>
+    > = { infos: [], permissionNames: [] };
 
     const boundedPermissionStop = (
       stop: () => Promise<void> | void,
@@ -2404,6 +2633,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     };
 
     try {
+      projectSkillProjection = await prepareV2ProjectSkillProjection({
+        activeDirectory: directory,
+        boundaryDirectory: ctx.location?.project?.directory,
+        prefixes:
+          preFlightConfig.resource_prefixes ?? DEFAULT_RESOURCE_PREFIXES,
+        readHostSkills: ctx.skill?.list?.bind(ctx.skill),
+      });
       log('[v2] importing v1 factory...');
       // Capability probe: the v2 model registry (`ctx.model`) resolves the
       // catalog ⊕ config view the host itself uses for media gating. Powers
@@ -2414,15 +2650,22 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         : undefined;
       log('[v2] ctx.model', { available: Boolean(modelDomain) });
       const pluginInput = {
-        ...buildPluginInput(ctx, {
-          ...(modelDomain ? { modelDomain } : {}),
-        }),
+        ...buildPluginInput(
+          ctx,
+          {
+            ...(modelDomain ? { modelDomain } : {}),
+          },
+          modelListSnapshot,
+          modelDomain?.list?.bind(modelDomain),
+        ),
         pluginConfigSnapshot: startupConfigSnapshot,
+        projectSkillPermissionNames: projectSkillProjection.permissionNames,
       };
       log('[v2] calling OhMyOpenCodeLite...');
-      v1Hooks = (await OhMyOpenCodeLite(
-        pluginInput as never,
-      )) as unknown as Record<string, unknown>;
+      v1Hooks = (await factory(pluginInput as never)) as unknown as Record<
+        string,
+        unknown
+      >;
       registryBridge = v1Hooks.registryBridge as RegistryFactoryBridge;
       log('[v2] v1 factory initialized', {
         agents: Object.keys((v1Hooks as { agent?: object }).agent ?? {}).length,
@@ -2451,6 +2694,17 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     // own semantics.
     try {
       const pluginConfig = startupConfigSnapshot.config;
+      if (typeof ctx.model?.transform === 'function') {
+        const reg = await ctx.model.transform((draft) =>
+          modelListSnapshot.capture(draft),
+        );
+        disposers.push(() => reg.dispose());
+      } else if (typeof ctx.provider?.transform === 'function') {
+        const reg = await ctx.provider.transform((draft) =>
+          modelListSnapshot.capture(draft),
+        );
+        disposers.push(() => reg.dispose());
+      }
       const interviewConfig = InterviewConfigSchema.parse(
         pluginConfig.interview ?? {},
       );
@@ -2466,8 +2720,52 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       const interviewEnabled = featureGates.interview;
       const sidebarEnabled = featureGates.sidebar;
       const liveRefreshEnabled = featureGates.liveConfigRefresh;
+      const admissionRecovery = await import('./native-admission-recovery');
+      const nativeEventHook = v1Hooks.event as
+        | ((input: { event: Record<string, unknown> }) => Promise<void>)
+        | undefined;
+      const refusalRecovery = v1Hooks['v2.refusalRecovery'] as
+        | ForegroundFallbackManager['refusalRecovery']
+        | undefined;
+      // A moved child can use this location's fallback even if this location
+      // has no admission queue. The shared observer calls exactly one live
+      // destination resolver before deciding the existing reservation.
+      disposers.push(
+        admissionRecovery.registerNativeAdmissionRecovery(
+          directory,
+          (raw, sessionID, message) => {
+            if (generationDisposed || eventDirectoryScope.isForeign(raw))
+              return undefined;
+            return (async () => {
+              if (nativeEventHook) {
+                for (const event of mapV2EventToV1(raw))
+                  await nativeEventHook({ event });
+              }
+              const recovery = refusalRecovery?.(sessionID);
+              return recovery?.message === message ? recovery.model : undefined;
+            })();
+          },
+        ),
+      );
+      const admissionModule =
+        featureGates.admissionQueue && typeof ctx.tool?.transform === 'function'
+          ? await import('./native-admission')
+          : undefined;
+      const nativeAdmission = admissionModule?.acquireNativeAdmissionRuntime(
+        directory,
+        pluginConfig.backgroundJobs?.concurrency,
+        { mirror: sidebarEnabled },
+      );
+      if (nativeAdmission) disposers.push(() => nativeAdmission.release());
+      const isPrimarySession = v1Hooks['v2.isPrimarySession'] as
+        | ((sessionID: string) => boolean)
+        | undefined;
+      const shouldManageQueueSession = (sessionID: string) =>
+        isPrimarySession?.(sessionID) === true ||
+        nativeAdmission?.ownsSession(sessionID) === true;
       log('[v2] feature switches', {
         backgroundJobsMode: featureGates.backgroundJobsMode,
+        admissionQueue: featureGates.admissionQueue,
         interview: featureGates.interview,
         sidebar: featureGates.sidebar,
         liveConfigRefresh: featureGates.liveConfigRefresh,
@@ -2503,6 +2801,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | ReturnType<RegistryFactoryBridge['requireRegistry']>
         | undefined;
       let permissionSnapshotReady = false;
+      let agentProjection: 'deferred' | 'pending' | 'applied' | 'failed' =
+        'deferred';
       let permissionSnapshotFailure: Error | undefined;
       let resolvePermissionSnapshotReady!: () => void;
       const permissionSnapshotReadiness = new Promise<void>((resolve) => {
@@ -2524,6 +2824,19 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | undefined;
       let permissionRulesBridgeEnabled = false;
       const pluginAgents = new Set<string>();
+      let pluginAgentsGeneration = 0;
+      const setPluginAgents = (names: Iterable<string>) => {
+        pluginAgents.clear();
+        for (const name of names) pluginAgents.add(name);
+        pluginAgentsGeneration += 1;
+      };
+      const readAgentNameSets = createAgentNameSetsReader(() => ({
+        registry: finalizedRegistry,
+        pluginAgents,
+        pluginAgentsGeneration,
+        nativeAgents: nativeAgentSnapshot?.agents,
+      }));
+      seams.agentNameSets?.({ read: readAgentNameSets, pluginAgents });
       // Startup request settings per agent. Primaries apply these in every
       // routing mode (a captured child profile supersedes them); `off` has no
       // profiles, so every agent applies its own static settings.
@@ -2635,11 +2948,12 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           string,
           Record<string, unknown>
         >;
-        pluginAgents.clear();
-        for (const name of Object.keys(resolvedAgents)) pluginAgents.add(name);
+        setPluginAgents(Object.keys(resolvedAgents));
         if (permissionRulesBridge) {
           permissionRulesBridge.refreshPluginAgents();
         }
+        const names: string[] = [];
+        const failed: string[] = [];
         for (const [name, cfg] of Object.entries(resolvedAgents)) {
           if (
             !registry.agentNames.includes(name) &&
@@ -2657,12 +2971,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 : {}),
             });
           }
-          applyAgentToDraft(
+          const applied = applyAgentToDraft(
             draft,
             name,
             cfg,
             registry.nativePolicies[name]?.rules,
           );
+          (applied ? names : failed).push(name);
         }
         if (
           preFlightConfig.setDefaultAgent !== false &&
@@ -2684,9 +2999,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         }
         // Log inside finalization because the transform await only confirms
         // registration; the callback may not have run yet.
-        log('[v2] agents registered', {
-          count: Object.keys(resolvedAgents).length,
-        });
+        agentProjection = failed.length ? 'failed' : 'applied';
+        log(
+          failed.length
+            ? '[v2] agent draft projection failed'
+            : '[v2] agent draft applied',
+          { count: names.length, names, failed },
+        );
         permissionSnapshotReady = true;
         resolvePermissionSnapshotReady();
       };
@@ -2711,6 +3030,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           });
       };
       const captureAgentDraft = (draft: V2AgentDraft) => {
+        agentProjection = 'pending';
         if (permissionSnapshotFailure) {
           if (generationDisposed) {
             throw new Error(
@@ -2801,6 +3121,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       try {
         const reg = await ctx.agent.transform(captureAgentDraft);
         disposers.push(() => reg.dispose());
+        log('[v2] agent transform registered', { projection: agentProjection });
         if (permissionSnapshotFailure) {
           if (
             permissionSnapshotFailure.message.startsWith(
@@ -3030,10 +3351,46 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
 
       // ── Tools ──
       try {
-        const tools = (v1Hooks.tool ?? {}) as Record<
+        const tools = { ...(v1Hooks.tool ?? {}) } as Record<
           string,
           Record<string, unknown>
         >;
+        const disabledTools = new Set(pluginConfig.disabled_tools ?? []);
+        if (
+          featureGates.backgroundJobsMode === 'native' &&
+          !disabledTools.has('task_list')
+        ) {
+          const { createTaskListTool } = await import('../tools/task-list');
+          Object.assign(tools, createTaskListTool({ session: ctx.session }));
+        }
+        if (nativeAdmission) {
+          const options = {
+            scheduler: nativeAdmission.scheduler,
+            shouldManageSession: shouldManageQueueSession,
+          };
+          if (!disabledTools.has('task_queue_list')) {
+            const { createTaskQueueListTool } = await import(
+              '../tools/task-queue-list'
+            );
+            Object.assign(tools, createTaskQueueListTool(options));
+          }
+          if (!disabledTools.has('task_queue_manage')) {
+            const { createTaskQueueManageTool } = await import(
+              '../tools/task-queue-manage'
+            );
+            Object.assign(tools, createTaskQueueManageTool(options));
+          }
+          if (!disabledTools.has('task_wait')) {
+            const { createTaskWaitTool } = await import('../tools/task-wait');
+            Object.assign(tools, createTaskWaitTool(options));
+          }
+          if (!disabledTools.has('task_dependency_tree')) {
+            const { createTaskDependencyTreeTool } = await import(
+              '../tools/task-dependency-tree'
+            );
+            Object.assign(tools, createTaskDependencyTreeTool(options));
+          }
+        }
         const toolEntries = Object.entries(tools);
         if (toolEntries.length > 0) {
           // Precompute JSON schemas from zod shapes (zod is bundled in v2 build).
@@ -3055,7 +3412,20 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             return { type: 'object', properties: {} };
           };
 
+          let toolProjection: 'applied' | 'failed' | 'deferred' = 'deferred';
           const reg = await ctx.tool.transform((draft) => {
+            updateToolDraft(draft, DELEGATION_TOOL_V2, (tool) => ({
+              ...(typeof tool.description === 'string'
+                ? {
+                    description: rewriteDelegationDescription(tool.description),
+                  }
+                : {}),
+              ...(tool.input
+                ? { input: rewriteDelegationSchema(tool.input) }
+                : {}),
+            }));
+            const names: string[] = [];
+            const failed: string[] = [];
             for (const [name, def] of toolEntries) {
               try {
                 // adaptTool stamps `options: { codemode: false }` on every
@@ -3071,13 +3441,25 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                     ctx.permission,
                   ),
                 );
+                names.push(name);
               } catch (err) {
+                failed.push(name);
                 log('[v2] tool adapt failed', { name, err: String(err) });
               }
             }
+            toolProjection = failed.length ? 'failed' : 'applied';
+            log(
+              failed.length
+                ? '[v2] core tool draft projection failed'
+                : '[v2] core tool draft applied',
+              { names, failed },
+            );
           });
           disposers.push(() => reg.dispose());
-          log('[v2] tools registered', { count: toolEntries.length });
+          log('[v2] core tool transform registered', {
+            expected: toolEntries.map(([name]) => name),
+            projection: toolProjection,
+          });
         }
       } catch (err) {
         log('[v2] tool.transform failed', String(err));
@@ -3158,80 +3540,76 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         }
       }
 
-      // ── Bundled skills (ctx.skill.transform — in-process, never disk-copied) ──
+      // Native skills retain their registration and permission owner. Supplemental
+      // project sources join the same draft; explicit native definitions win.
       try {
         if (typeof ctx.skill?.transform === 'function') {
           const runtimePackageJson = getCurrentRuntimePackageJsonPath();
-          if (!runtimePackageJson) {
-            log(
-              '[v2] bundled skill registration skipped: runtime package.json unresolved',
-            );
-          } else {
-            const packageRoot = path.dirname(runtimePackageJson);
-            const disabled = [...(pluginConfig.disabled_skills ?? [])];
-            const infos = buildBundledSkillInfos(packageRoot, disabled);
-            if (infos.length === 0) {
+          const disabled = [...(pluginConfig.disabled_skills ?? [])];
+          const infos = runtimePackageJson
+            ? buildBundledSkillInfos(path.dirname(runtimePackageJson), disabled)
+            : [];
+          let legacyMigrated = false;
+          const reg = await ctx.skill.transform((draft) => {
+            if (typeof draft.add !== 'function') {
               log(
-                '[v2] bundled skill registration produced no skills (check package root)',
-                { packageRoot },
+                '[v2] ctx.skill draft lacks add(); supplemental skills not registered',
               );
+              return;
             }
-            // A host resolves `transform` on callback *registration*; the
-            // callback body may not have run when the await returns. The
-            // handle is therefore disposed unconditionally — the one step
-            // that must not depend on the callback having run.
-            let legacyMigrated = false;
-            const reg = await ctx.skill.transform((draft) => {
-              // v1-era drafts expose {source,list}, not add — probe before use.
-              if (typeof draft.add !== 'function') {
-                log(
-                  '[v2] ctx.skill draft lacks add(); bundled skills not registered',
-                );
-                return;
-              }
-              for (const info of infos) draft.add(info);
-              log('[v2] bundled skills registered in-process', {
-                count: infos.length,
-                disabled: disabled.length,
-              });
-              if (!legacyMigrated) {
-                try {
-                  const legacy = removeLegacySkillSyncState(
-                    undefined,
-                    disabled,
-                  );
-                  // Latch only on success: a throwing cleanup is transient and
-                  // must be retried by a later rebuild. An unreadable manifest
-                  // returns normally, so it still latches and is not retried.
-                  legacyMigrated = true;
-                  if (legacy.kept.length > 0 || legacy.backedUp.length > 0) {
-                    log(
-                      '[v2] legacy skill copies: kept customized (shadow the in-process registration), backed up disabled',
-                      { kept: legacy.kept, backedUp: legacy.backedUp },
-                    );
-                  }
-                  if (legacy.manifestUnreadable) {
-                    log(
-                      '[v2] legacy skills manifest unreadable — stale copies may shadow registrations; remove ~/.config/opencode/.oh-my-opencode-slim manually',
-                    );
-                  }
-                } catch (err) {
-                  log('[v2] legacy skill cleanup failed', String(err));
-                }
-              }
+            for (const info of infos) draft.add(info);
+            addMissingV2ProjectSkills(draft, projectSkillProjection.infos);
+            log('[v2] skill draft applied', {
+              bundled: infos.length,
+              project: projectSkillProjection.infos.length,
             });
-            if (typeof reg?.dispose === 'function') {
-              disposers.push(() => reg.dispose());
+            if (!legacyMigrated) {
+              try {
+                const legacy = removeLegacySkillSyncState(undefined, disabled);
+                legacyMigrated = true;
+                if (legacy.kept.length || legacy.backedUp.length) {
+                  log(
+                    '[v2] legacy skill copies: kept customized, backed up disabled',
+                    {
+                      kept: legacy.kept,
+                      backedUp: legacy.backedUp,
+                    },
+                  );
+                }
+                if (legacy.manifestUnreadable) {
+                  log(
+                    '[v2] legacy skills manifest unreadable — stale copies may shadow registrations',
+                  );
+                }
+              } catch (error) {
+                log('[v2] legacy skill cleanup failed', String(error));
+              }
             }
-          }
+          });
+          disposers.push(() => reg.dispose());
         } else {
           log(
-            '[v2] ctx.skill.transform unavailable; bundled skills not registered',
+            '[v2] ctx.skill.transform unavailable; supplemental skills not registered',
           );
         }
-      } catch (err) {
-        log('[v2] bundled skill registration failed', String(err));
+      } catch (error) {
+        if (error instanceof InvalidSkillPolicyError) throw error;
+        log('[v2] supplemental skill registration failed', String(error));
       }
+
+      skillCommands = createSkillCommandController(
+        ctx,
+        [
+          ...Object.keys(synthCommands ?? {}),
+          'interview',
+          'implement',
+          PRESET_COMMAND_NAME,
+          ...disabledCommands,
+          ...(pluginConfig.disabled_skills ?? []),
+        ],
+        pluginConfig.skillCommandMode,
+      );
+      disposers.push(() => skillCommands?.dispose());
 
       // ── Session context hook: command markers + system/messages transforms ──
       // One registration handles: the interview marker bridge, generic command
@@ -3346,6 +3724,17 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       }
 
       if (ctx.session) {
+        // Observe the exact native inbox ID in its execution context. Native
+        // prompts remain byte-identical, including across location moves.
+        if (nativeAdmission) {
+          const registration = await ctx.session.hook(
+            'prompt',
+            async (event) => {
+              nativeAdmission.capturePrompt(event);
+            },
+          );
+          disposers.push(() => registration.dispose());
+        }
         // Native per-admission prompt hook (v2): `session.prompt` fires once
         // per admitted input with the eventual inbox User messageID — the
         // identity v1 chat.message consumers key on. With it registered the
@@ -3621,7 +4010,12 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         // is a correctness issue, not a summary-quality nicety).
         const compactionReg = await ctx.session.hook(
           'compaction',
-          createSessionCompactionBridge(),
+          createSessionCompactionBridge(
+            COMPACTION_STRIP_METADATA_KEYS,
+            v1Hooks['experimental.session.compacting'] as
+              | ((input: { sessionID: string }) => Promise<void>)
+              | undefined,
+          ),
         );
         disposers.push(() => compactionReg.dispose());
         log('[v2] compaction bridge registered (session.compaction)');
@@ -3827,6 +4221,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             before,
             after,
             resolvePresetRouting,
+            (tool, result) =>
+              resolveV2TouchedFilePaths(tool, result, ctx.location?.directory),
           );
           if (before) {
             const reg = await ctx.tool.hook('execute.before', async (event) => {
@@ -3855,6 +4251,33 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             });
             disposers.push(() => reg.dispose());
           }
+          // The admission layer waits before the official executor runs. The
+          // preset wrapper goes outside it so each captured team is consumed
+          // before queueing, and accounting sees the already-routed model.
+          if (nativeAdmission && admissionModule) {
+            const wrapped = new WeakSet<object>();
+            const registration = await ctx.tool.transform((draft) => {
+              updateToolDraft(draft, DELEGATION_TOOL_V2, (tool) => {
+                if (!tool.execute || wrapped.has(tool.execute)) return {};
+                const input = admissionModule.extendNativeSubagentInput(
+                  tool.input,
+                );
+                const execute = nativeAdmission.wrap(tool.execute, {
+                  session: ctx.session,
+                  resolveModel: (args, parentID) =>
+                    resolveNativeAdmissionModel(
+                      ctx,
+                      args,
+                      parentID,
+                      promptBridge?.modelForSession(parentID),
+                    ),
+                });
+                wrapped.add(execute);
+                return { input, execute };
+              });
+            });
+            disposers.push(() => registration.dispose());
+          }
           // Native delegation keeps session-frozen preset routing. Off leaves
           // the host executor untouched.
           if (before && presetRoutingEnabled) {
@@ -3870,6 +4293,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               const reg = await ctx.tool.transform((draft) => {
                 nativePresetWrapperReady = false;
                 try {
+                  if (typeof draft.update !== 'function') return;
                   draft.update(DELEGATION_TOOL_V2, (tool) => {
                     if (tool.execute && wrapped.has(tool.execute)) {
                       nativePresetWrapperReady = true;
@@ -3915,6 +4339,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           });
         } catch (err) {
           log('[v2] tool.hook registration failed', String(err));
+          if (nativeAdmission) throw err;
         }
 
         // ── Event stream ──
@@ -3922,7 +4347,12 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           const eventHook = v1Hooks.event as
             | ((i: { event: Record<string, unknown> }) => Promise<void>)
             | undefined;
-          if (eventHook || interviewBridge) {
+          if (
+            eventHook ||
+            interviewBridge ||
+            nativeAdmission ||
+            skillCommands
+          ) {
             // ── Per-session permission rules (ctx.session.update) ──
             // Plugin-managed child sessions get their agent's task-policy
             // installed as ordered session-scoped rules at creation
@@ -3952,6 +4382,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                       return registry.compileChildPermissions(agent, finalized);
                     }
                   } catch (err) {
+                    if (err instanceof InvalidSkillPolicyError) throw err;
                     log(
                       '[v2][permission-rules] finalized agent policy unavailable; using registered policy',
                       { agent, err: String(err) },
@@ -3962,38 +4393,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 pluginAgents,
                 requireKnownIdentity: () =>
                   marketplaceAgentsRequirePromptPolicy,
-                marketplaceAgentNames: () => {
-                  const registry = finalizedRegistry;
-                  if (!registry) return new Set();
-                  return new Set(
-                    registry.marketplaceAgentNames.flatMap((name) => [
-                      name,
-                      registry.identities[name] ?? name,
-                    ]),
-                  );
-                },
+                marketplaceAgentNames: () => readAgentNameSets().marketplace,
                 hostAgentNames: () => listHostAgentIds(ctx.agent),
-                knownAgentNames: () => {
-                  const names = new Set<string>(pluginAgents);
-                  for (const [name, config] of Object.entries(
-                    nativeAgentSnapshot?.agents ?? {},
-                  )) {
-                    names.add(name);
-                    if (typeof config.displayName === 'string') {
-                      names.add(config.displayName);
-                    }
-                  }
-                  const registry = finalizedRegistry;
-                  if (registry) {
-                    for (const [name, identity] of Object.entries(
-                      registry.identities,
-                    )) {
-                      names.add(name);
-                      names.add(identity);
-                    }
-                  }
-                  return names;
-                },
+                knownAgentNames: () => readAgentNameSets().known,
                 defaultAgent: () => {
                   try {
                     const merged = loadMergedOpenCodeConfig(directory);
@@ -4022,6 +4424,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               toolLoopGuard:
                 !pluginConfig.disabled_hooks?.includes('tool-loop-guard'),
               interview: interviewEnabled,
+              skills: true,
+              queue: nativeAdmission !== undefined,
             });
             const iter = ctx.event.subscribe({ types: eventTypes });
             const eventIterator = iter[Symbol.asyncIterator]();
@@ -4033,12 +4437,21 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                   if (next.done) break;
                   const rawType =
                     typeof next.value?.type === 'string' ? next.value.type : '';
-                  // Host jobs retain ownership across moves; this plugin only
-                  // observes events local to this setup's location.
+                  // Only exact tracked children can affect this queue. Observe
+                  // their native events across moves without widening the
+                  // location boundary for any other plugin subsystem.
+                  const queueHandledFailure =
+                    nativeAdmission?.observeEvent(next.value) === true ||
+                    admissionRecovery.observeTrackedAdmissionFailure(
+                      next.value,
+                    );
                   eventDirectoryScope.note(next.value);
-                  if (eventDirectoryScope.isForeign(next.value)) continue;
+                  if (eventDirectoryScope.isForeign(next.value)) {
+                    continue;
+                  }
                   try {
                     await batchEvent(async () => {
+                      skillCommands?.observeEvent(next.value);
                       await interviewBridge?.handleEvent(next.value);
                       // Only reduced hosts retain legacy created prewarming.
                       // With persistence, native progress must bind before the
@@ -4073,7 +4486,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                         }
                       }
                       await permissionRulesBridge?.observeEvent(next.value);
-                      if (eventHook) {
+                      if (eventHook && !queueHandledFailure) {
                         for (const ev of mapV2EventToV1(next.value)) {
                           await eventHook({ event: ev });
                         }
@@ -4113,10 +4526,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         log('[v2] health check passed', { bridges: disposers.length });
       }
 
+      // Native activation completes after setup returns; inventory events retry this initial scan.
+      void skillCommands?.refresh();
       const dispose = v1Hooks.dispose as (() => Promise<void>) | undefined;
 
       return async () => {
         log('[v2] dispose invoked');
+        skillCommands?.stop();
         generationDisposed = true;
         const presetDrain = retireSessionPresets?.();
         eventDirectoryScope.release();
@@ -4165,6 +4581,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         }
       };
     } catch (err) {
+      skillCommands?.stop();
+      generationDisposed = true;
       // The abort path never reaches the returned cleanup, so release the
       // scope claim here: a leaked live-directory entry would keep other
       // instances from ever reclaiming this location and would block the

@@ -5,6 +5,10 @@
     "preset": {
       "type": "string"
     },
+    "routingBlock": {
+      "description": "Opt in to a static agent inventory in the orchestrator prompt. OpenCode always provides the native permission-filtered roster.",
+      "type": "boolean"
+    },
     "setDefaultAgent": {
       "type": "boolean"
     },
@@ -31,8 +35,17 @@
       ]
     },
     "tui": {
-      "description": "Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, update notice). When false, the TUI entry registers nothing and the server records no sidebar state; other server-side features are untouched. Defaults to true.",
+      "description": "Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, /queue, update notice). When false, the TUI entry registers nothing and the server records no sidebar state; other server-side features are untouched. Defaults to true.",
       "type": "boolean"
+    },
+    "skillCommandMode": {
+      "description": "Mode for plugin-generated skill slash commands: \"full\" (default) inlines the skill body, \"reference\" asks the skill tool to load the exact skill ID, and \"none\" omits the generated command. SKILL.md slim.command overrides this value, including when it is \"none\". Does not disable skills or explicit commands. Reload required for global changes.",
+      "type": "string",
+      "enum": [
+        "none",
+        "full",
+        "reference"
+      ]
     },
     "compactSidebar": {
       "description": "Use the compact TUI sidebar layout. Defaults to true; set false to use the expanded layout.",
@@ -43,7 +56,7 @@
       "type": "boolean"
     },
     "sidebar": {
-      "description": "Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When false, the plugin never registers or renders the sidebar and writes no sidebar state; the other OMOS TUI surfaces (/preset, /killall, /subagent, update notice) are unaffected, and the native host sidebar is untouched. Defaults to true.",
+      "description": "Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When false, the plugin never registers or renders the sidebar and writes no sidebar state; the other OMOS TUI surfaces (/preset, /killall, /subagent, /queue, update notice) are unaffected, and the native host sidebar is untouched. Defaults to true.",
       "type": "boolean"
     },
     "liveConfigRefresh": {
@@ -109,6 +122,20 @@
                               }
                             ]
                           }
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "dynamic": {
+                              "type": "string",
+                              "enum": [
+                                "selected"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "dynamic"
+                          ]
                         }
                       ]
                     },
@@ -148,7 +175,7 @@
                       }
                     },
                     "skills_include_local": {
-                      "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees to this agent's effective skills before `skills_remove`. Global and external skill sources are excluded.",
+                      "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees and accepted supplemental resource roots before `skills_remove`. Global and external skill sources are excluded.",
                       "type": "boolean"
                     },
                     "mcps": {
@@ -200,6 +227,17 @@
                     "description": {
                       "type": "string",
                       "minLength": 1
+                    },
+                    "primary": {
+                      "description": "Expose a custom agent in the host primary-agent roster.",
+                      "type": "boolean"
+                    },
+                    "subagents": {
+                      "description": "Restrict a primary agent to the listed delegates using native subagent permissions. An explicit delegation permission takes precedence.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "permission": {
                       "anyOf": [
@@ -354,6 +392,20 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "dynamic": {
+                                "type": "string",
+                                "enum": [
+                                  "selected"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "dynamic"
+                            ]
                           }
                         ]
                       },
@@ -393,7 +445,7 @@
                         }
                       },
                       "skills_include_local": {
-                        "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees to this agent's effective skills before `skills_remove`. Global and external skill sources are excluded.",
+                        "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees and accepted supplemental resource roots before `skills_remove`. Global and external skill sources are excluded.",
                         "type": "boolean"
                       },
                       "mcps": {
@@ -445,6 +497,17 @@
                       "description": {
                         "type": "string",
                         "minLength": 1
+                      },
+                      "primary": {
+                        "description": "Expose a custom agent in the host primary-agent roster.",
+                        "type": "boolean"
+                      },
+                      "subagents": {
+                        "description": "Restrict a primary agent to the listed delegates using native subagent permissions. An explicit delegation permission takes precedence.",
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       },
                       "permission": {
                         "anyOf": [
@@ -531,6 +594,20 @@
                           }
                         ]
                       }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "dynamic": {
+                          "type": "string",
+                          "enum": [
+                            "selected"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "dynamic"
+                      ]
                     }
                   ]
                 },
@@ -570,7 +647,7 @@
                   }
                 },
                 "skills_include_local": {
-                  "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees to this agent's effective skills before `skills_remove`. Global and external skill sources are excluded.",
+                  "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees and accepted supplemental resource roots before `skills_remove`. Global and external skill sources are excluded.",
                   "type": "boolean"
                 },
                 "mcps": {
@@ -622,6 +699,17 @@
                 "description": {
                   "type": "string",
                   "minLength": 1
+                },
+                "primary": {
+                  "description": "Expose a custom agent in the host primary-agent roster.",
+                  "type": "boolean"
+                },
+                "subagents": {
+                  "description": "Restrict a primary agent to the listed delegates using native subagent permissions. An explicit delegation permission takes precedence.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 "permission": {
                   "anyOf": [
@@ -737,6 +825,20 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "dynamic": {
+                                "type": "string",
+                                "enum": [
+                                  "selected"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "dynamic"
+                            ]
                           }
                         ]
                       },
@@ -776,7 +878,7 @@
                         }
                       },
                       "skills_include_local": {
-                        "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees to this agent's effective skills before `skills_remove`. Global and external skill sources are excluded.",
+                        "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees and accepted supplemental resource roots before `skills_remove`. Global and external skill sources are excluded.",
                         "type": "boolean"
                       },
                       "mcps": {
@@ -828,6 +930,17 @@
                       "description": {
                         "type": "string",
                         "minLength": 1
+                      },
+                      "primary": {
+                        "description": "Expose a custom agent in the host primary-agent roster.",
+                        "type": "boolean"
+                      },
+                      "subagents": {
+                        "description": "Restrict a primary agent to the listed delegates using native subagent permissions. An explicit delegation permission takes precedence.",
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       },
                       "permission": {
                         "anyOf": [
@@ -911,6 +1024,20 @@
                           }
                         ]
                       }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "dynamic": {
+                          "type": "string",
+                          "enum": [
+                            "selected"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "dynamic"
+                      ]
                     }
                   ]
                 },
@@ -950,7 +1077,7 @@
                   }
                 },
                 "skills_include_local": {
-                  "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees to this agent's effective skills before `skills_remove`. Global and external skill sources are excluded.",
+                  "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees and accepted supplemental resource roots before `skills_remove`. Global and external skill sources are excluded.",
                   "type": "boolean"
                 },
                 "mcps": {
@@ -1002,6 +1129,17 @@
                 "description": {
                   "type": "string",
                   "minLength": 1
+                },
+                "primary": {
+                  "description": "Expose a custom agent in the host primary-agent roster.",
+                  "type": "boolean"
+                },
+                "subagents": {
+                  "description": "Restrict a primary agent to the listed delegates using native subagent permissions. An explicit delegation permission takes precedence.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 "permission": {
                   "anyOf": [
@@ -1091,6 +1229,20 @@
                     }
                   ]
                 }
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "dynamic": {
+                    "type": "string",
+                    "enum": [
+                      "selected"
+                    ]
+                  }
+                },
+                "required": [
+                  "dynamic"
+                ]
               }
             ]
           },
@@ -1130,7 +1282,7 @@
             }
           },
           "skills_include_local": {
-            "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees to this agent's effective skills before `skills_remove`. Global and external skill sources are excluded.",
+            "description": "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees and accepted supplemental resource roots before `skills_remove`. Global and external skill sources are excluded.",
             "type": "boolean"
           },
           "mcps": {
@@ -1182,6 +1334,17 @@
           "description": {
             "type": "string",
             "minLength": 1
+          },
+          "primary": {
+            "description": "Expose a custom agent in the host primary-agent roster.",
+            "type": "boolean"
+          },
+          "subagents": {
+            "description": "Restrict a primary agent to the listed delegates using native subagent permissions. An explicit delegation permission takes precedence.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "permission": {
             "anyOf": [
@@ -1287,7 +1450,7 @@
       }
     },
     "disabled_commands": {
-      "description": "Slash-command names to disable completely. Valid values: implement, interview, deepwork, reflect, preset, killall, subagent. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
+      "description": "Slash-command names to disable completely. Valid values: implement, interview, deepwork, reflect, preset, killall, subagent, queue. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
       "type": "array",
       "items": {
         "type": "string",
@@ -1298,7 +1461,8 @@
           "reflect",
           "preset",
           "killall",
-          "subagent"
+          "subagent",
+          "queue"
         ]
       }
     },
@@ -1419,12 +1583,23 @@
           "not": {}
         },
         "mode": {
-          "description": "Slim task controls: \"native\" (default) exposes task_status, task_cancel, task_reply and task_report; \"off\" registers none. Both use the native OpenCode lifecycle. Session preset routing defaults to on in native and off in off; sessionPresetRouting overrides that default.",
+          "description": "OpenCode owns execution in every mode. An omitted mode or the legacy \"managed\" value enables Slim admission and task controls. \"native\" keeps native task controls and enables admission when configured. \"off\" disables Slim task tools and admission. The separate sessionPresetRouting setting overrides preset routing.",
           "type": "string",
           "enum": [
+            "managed",
             "native",
             "off"
           ]
+        },
+        "queue": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Override admission queue enablement. mode \"off\" disables the queue.",
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         },
         "enabled": {
           "not": {}
@@ -1457,7 +1632,42 @@
           "not": {}
         },
         "concurrency": {
-          "not": {}
+          "type": "object",
+          "properties": {
+            "defaultConcurrency": {
+              "description": "Default open admission cap. 0 means unlimited.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "providerConcurrency": {
+              "description": "Caps by provider. A cap of 0 is unlimited for that provider.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              }
+            },
+            "modelConcurrency": {
+              "description": "Caps by provider/model. Model overrides provider, then the default.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              }
+            }
+          },
+          "additionalProperties": false
         },
         "sameProviderPolicy": {
           "not": {}
@@ -1660,7 +1870,7 @@
           },
           "wrapperModel": {
             "type": "string",
-            "pattern": "^[^/\\s]+\\/.+$"
+            "description": "Provider-qualified model reference: provider/model[#variant]. The first slash separates the provider; remaining slashes and all colons belong to the model ID. Only # separates the variant."
           },
           "timeoutMs": {
             "default": 0,
@@ -1704,6 +1914,14 @@
     },
     "tmux": {
       "not": {}
+    },
+    "resource_prefixes": {
+      "description": "Ordered project-local resource roots. Defaults to .local, .local/.slim, and .opencode. An empty array disables supplemental discovery.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+      }
     }
   },
   "title": "oh-my-opencode-slim",

@@ -7,9 +7,8 @@ describe('delay', () => {
     await delay(50);
     const elapsed = Date.now() - start;
 
-    // Allow some tolerance for timing
+    // Timers guarantee a minimum delay, not a maximum under event-loop load.
     expect(elapsed).toBeGreaterThanOrEqual(45);
-    expect(elapsed).toBeLessThan(100);
   });
 
   test('resolves without value', async () => {

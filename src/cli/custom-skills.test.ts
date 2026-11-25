@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   buildBundledSkillInfos,
   removeLegacySkillSyncState,
@@ -9,13 +9,18 @@ import {
 
 const EMPTY_MANAGED_HASH =
   'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-const _initialHome = os.homedir();
+
+const roots: string[] = [];
 
 function tmpDir(): string {
-  return fs.realpathSync(
-    fs.mkdtempSync(path.join(os.tmpdir(), 'omos-skills-')),
-  );
+  const root = createTmpDir();
+  roots.push(root);
+  return fs.realpathSync(root);
 }
+
+afterEach(() => {
+  for (const root of roots.splice(0)) removeTmpDir(root);
+});
 
 function writeSkill(root: string, name: string, skillMd: string): void {
   const dir = path.join(root, 'src', 'skills', name);

@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import type { Hooks } from '@opencode-ai/plugin';
 import * as agentFactory from '../agents';
 import * as councillorFactory from '../agents/councillor';
 import * as orchestratorFactory from '../agents/orchestrator';
 import { OhMyOpenCodeLite } from '../index';
 import { MarketplaceStore } from '../marketplace/store';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { readTuiSnapshot } from '../tui-state';
 import { makeTestEnv, type TestEnv } from './test-fixtures';
 
@@ -488,7 +487,7 @@ describe('v2 profile refresh hook', () => {
     });
   });
 
-  test('removed settings refuse refresh and retain last-good profiles', async () => {
+  test('removed or malformed settings refuse refresh and retain last-good profiles', async () => {
     env.writeUserConfig(CHEAP_DEEPSEEK);
     await withFactory(
       async ({ refresh, hooks }) => {
@@ -502,10 +501,10 @@ describe('v2 profile refresh hook', () => {
             'fallback.initialRetryDelayMs',
             { fallback: { initialRetryDelayMs: 0 } },
           ],
-          ['routingBlock', { routingBlock: false }],
+          ['routingBlock', { routingBlock: 'yes' }],
           [
             'agents.orchestrator.subagents',
-            { agents: { orchestrator: { subagents: [] } } },
+            { agents: { orchestrator: { subagents: ['@*'] } } },
           ],
         ] as const) {
           env.writeUserConfig({
@@ -519,7 +518,7 @@ describe('v2 profile refresh hook', () => {
           });
           const result = await refresh();
           expect(result.ok).toBe(false);
-          if (result.ok) throw new Error('expected removed setting rejection');
+          if (result.ok) throw new Error('expected config setting rejection');
           expect(result.reason).toContain(env.userConfigPath);
           expect(result.reason).toContain(key);
           expect(sidebarModels().explorer).toBe(
@@ -527,6 +526,16 @@ describe('v2 profile refresh hook', () => {
           );
           expect(JSON.stringify(hooks.agent?.explorer)).toBe(initialAgent);
         }
+
+        env.writeUserConfig({
+          preset: 'changed',
+          presets: { changed: { explorer: { model: 'openai/gpt-5-mini' } } },
+          routingBlock: false,
+          agents: { orchestrator: { subagents: ['fixer'] } },
+        });
+        expect((await refresh()).ok).toBe(true);
+        expect(sidebarModels().explorer).toBe('openai/gpt-5-mini');
+        expect(JSON.stringify(hooks.agent?.explorer)).toBe(initialAgent);
       },
       {},
       'v2',
@@ -554,7 +563,7 @@ describe('v2 profile refresh hook', () => {
   test('refresh preserves marketplace agents in the sidebar roster', async () => {
     // Isolate the marketplace store for this test (test-isolation also sets
     // XDG_DATA_HOME, but a per-test root avoids cross-test package leakage).
-    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-v2cr-data-'));
+    const dataDir = createTmpDir();
     const priorDataHome = process.env.XDG_DATA_HOME;
     process.env.XDG_DATA_HOME = dataDir;
     try {
@@ -615,7 +624,7 @@ describe('v2 profile refresh hook', () => {
     } finally {
       if (priorDataHome === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = priorDataHome;
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      removeTmpDir(dataDir);
     }
   });
 });
@@ -741,7 +750,7 @@ describe('v2 chain refresh', () => {
   });
 
   test('marketplace chains: user config wins, manifest chain survives refresh', async () => {
-    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-v2cr-chain-'));
+    const dataDir = createTmpDir('omos-v2cr-chain-');
     const priorDataHome = process.env.XDG_DATA_HOME;
     process.env.XDG_DATA_HOME = dataDir;
     try {
@@ -852,7 +861,7 @@ describe('v2 chain refresh', () => {
     } finally {
       if (priorDataHome === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = priorDataHome;
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      removeTmpDir(dataDir);
     }
   });
 
@@ -860,7 +869,7 @@ describe('v2 chain refresh', () => {
     // The startup modelCandidates merge user overrides. A refresh that
     // removes the override must serve the package's own manifest chain,
     // not republish the stale merged candidates.
-    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-v2cr-ovr-'));
+    const dataDir = createTmpDir('omos-v2cr-ovr-');
     const priorDataHome = process.env.XDG_DATA_HOME;
     process.env.XDG_DATA_HOME = dataDir;
     try {
@@ -926,7 +935,7 @@ describe('v2 chain refresh', () => {
     } finally {
       if (priorDataHome === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = priorDataHome;
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      removeTmpDir(dataDir);
     }
   });
 
@@ -934,7 +943,7 @@ describe('v2 chain refresh', () => {
     // A switched agent disabled at finalize must stay disabled even when a
     // refresh resolves its chain from a different source (config array →
     // manifest candidates). Guards the publish-time re-disable keying.
-    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-v2cr-dis-'));
+    const dataDir = createTmpDir('omos-v2cr-dis-');
     const priorDataHome = process.env.XDG_DATA_HOME;
     process.env.XDG_DATA_HOME = dataDir;
     try {
@@ -1028,7 +1037,7 @@ describe('v2 chain refresh', () => {
     } finally {
       if (priorDataHome === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = priorDataHome;
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      removeTmpDir(dataDir);
     }
   });
 });

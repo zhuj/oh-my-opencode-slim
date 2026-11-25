@@ -13,15 +13,14 @@
  *   swallowed with a fallback log (mirrors the model.request contract
  *   test in setup.e2e.test.ts)
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { readdirSync as readDirSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { createTaggedSyntheticPart } from '../hooks/cache-safe-injection';
 import { GOAL_POINTER_METADATA_KEY } from '../hooks/deepwork-goal';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/volatile-message';
+import { withTmpDir } from '../test-utils';
 import { flushLoggerForTesting } from '../utils/logger';
 import { createSessionCompactionBridge, createV2Setup } from './setup';
 import type { V2Context, V2SessionCompactionEvent } from './types';
@@ -257,54 +256,60 @@ function neverIterable(): AsyncIterable<Record<string, unknown>> {
 
 type CompactionCb = (event: V2SessionCompactionEvent) => Promise<void>;
 
-describe('createV2Setup compaction hook', () => {
-  let originalEnv: typeof process.env;
-  let fixtureRoot: string;
-  let projectDir: string;
-  let configDir: string;
-  let logDir: string;
+async function withFixture<T>(
+  callback: (fixture: {
+    projectDir: string;
+    readPluginLog: () => string;
+  }) => Promise<T>,
+): Promise<T> {
+  const originalEnv = { ...process.env };
 
-  const readPluginLog = (): string => {
-    const files = readDirSync(logDir).filter(
-      (f) => f.startsWith('oh-my-opencode-slim.') && f.endsWith('.log'),
-    );
-    return files
-      .map((f) => readFileSync(path.join(logDir, f), 'utf8'))
-      .join('');
-  };
+  return await withTmpDir(async (tmp) => {
+    const projectDir = path.join(tmp, 'project');
+    const configDir = path.join(tmp, 'config');
+    const logDir = path.join(tmp, 'logs');
+    const readPluginLog = (): string => {
+      const files = readDirSync(logDir).filter(
+        (file) =>
+          file.startsWith('oh-my-opencode-slim.') && file.endsWith('.log'),
+      );
+      return files
+        .map((file) => readFileSync(path.join(logDir, file), 'utf8'))
+        .join('');
+    };
 
-  beforeEach(async () => {
-    originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-compaction-'));
-    projectDir = path.join(fixtureRoot, 'project');
-    configDir = path.join(fixtureRoot, 'config');
-    logDir = path.join(fixtureRoot, 'logs');
     await Bun.write(
       path.join(configDir, 'oh-my-opencode-slim.json'),
-      // Minimal hermetic fixture (mirrors setup.e2e.test.ts): empty
-      // plugin config, companion disabled.
-      JSON.stringify({ companion: { enabled: false } }),
+      // Exercise compaction with the upstream native lifecycle. This reduced
+      // host has no tool domain for the optional admission queue.
+      JSON.stringify({
+        companion: { enabled: false },
+        backgroundJobs: { mode: 'native' },
+      }),
     );
     process.env.OPENCODE_CONFIG_DIR = configDir;
-    process.env.XDG_CONFIG_HOME = path.join(fixtureRoot, 'xdg-config');
-    process.env.XDG_DATA_HOME = path.join(fixtureRoot, 'xdg-data');
-    process.env.XDG_CACHE_HOME = path.join(fixtureRoot, 'xdg-cache');
+    process.env.XDG_CONFIG_HOME = path.join(tmp, 'xdg-config');
+    process.env.XDG_DATA_HOME = path.join(tmp, 'xdg-data');
+    process.env.XDG_CACHE_HOME = path.join(tmp, 'xdg-cache');
     process.env.OPENCODE_LOG_DIR = logDir;
     delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
-  });
 
-  afterEach(async () => {
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
+    try {
+      return await callback({ projectDir, readPluginLog });
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (!(key in originalEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, originalEnv);
     }
-    Object.assign(process.env, originalEnv);
-    await rm(fixtureRoot, { recursive: true, force: true });
   });
+}
 
-  function makeCtx(options?: {
-    rejectCompaction?: boolean;
-    switchModel?: boolean;
-  }): {
+describe('createV2Setup compaction hook', () => {
+  function makeCtx(
+    projectDir: string,
+    options?: { rejectCompaction?: boolean; switchModel?: boolean },
+  ): {
     ctx: V2Context;
     hooks: string[];
     rejected: string[];
@@ -382,81 +387,83 @@ describe('createV2Setup compaction hook', () => {
   test.each([true, false])(
     'registers the retry hook only with switchModel (%p)',
     async (switchModel) => {
-      const { ctx, hooks } = makeCtx({ switchModel });
-      const cleanup = await createV2Setup()(ctx);
-      try {
-        expect(hooks.includes('retry')).toBe(switchModel);
-      } finally {
-        await cleanup();
-      }
+      await withFixture(async ({ projectDir }) => {
+        const { ctx, hooks } = makeCtx(projectDir, { switchModel });
+        const cleanup = await createV2Setup()(ctx);
+        try {
+          expect(hooks.includes('retry')).toBe(switchModel);
+        } finally {
+          await cleanup();
+        }
+      });
     },
     20_000,
   );
 
   test('registers the compaction hook; the registered callback keeps the board', async () => {
-    const { ctx, hooks, getCompactionCb, getContextCb } = makeCtx();
-    const cleanup = await createV2Setup()(ctx);
+    await withFixture(async ({ projectDir, readPluginLog }) => {
+      const { ctx, hooks, getCompactionCb, getContextCb } = makeCtx(projectDir);
+      const cleanup = await createV2Setup()(ctx);
 
-    try {
-      expect(hooks).toContain('context');
-      expect(hooks).toContain('compaction');
-      expect(getContextCb()).toBeFunction();
-      const cb = getCompactionCb();
-      expect(cb).toBeFunction();
-      if (!cb) throw new Error('compaction hook not captured');
+      try {
+        expect(hooks).toContain('context');
+        expect(hooks).toContain('compaction');
+        expect(getContextCb()).toBeFunction();
+        const cb = getCompactionCb();
+        expect(cb).toBeFunction();
+        if (!cb) throw new Error('compaction hook not captured');
 
-      const message = {
-        id: 'msg_1',
-        role: 'user',
-        content: [
+        const message = {
+          id: 'msg_1',
+          role: 'user',
+          content: [
+            { type: 'text', text: 'user text' },
+            createTaggedSyntheticPart({
+              text: 'BOARD',
+              metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
+            }),
+          ],
+        };
+        const event = makeCompactionEvent([message]);
+        await cb(event);
+        expect(message.content).toEqual([
           { type: 'text', text: 'user text' },
           createTaggedSyntheticPart({
             text: 'BOARD',
             metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
           }),
-        ],
-      };
-      const event = makeCompactionEvent([message]);
-      await cb(event);
-      expect(message.content).toEqual([
-        { type: 'text', text: 'user text' },
-        createTaggedSyntheticPart({
-          text: 'BOARD',
-          metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
-        }),
-      ]);
+        ]);
 
-      await flushLoggerForTesting();
-      expect(readPluginLog()).toContain(
-        '[v2] compaction bridge registered (session.compaction)',
-      );
-    } finally {
-      await cleanup();
-    }
+        await flushLoggerForTesting();
+        expect(readPluginLog()).toContain(
+          '[v2] compaction bridge registered (session.compaction)',
+        );
+      } finally {
+        await cleanup();
+      }
+    });
   }, 20_000);
 
   test('host rejecting the compaction hook name fails setup loudly', async () => {
-    // Hook-name rejection is a host contract
-    // violation, not a degrade path — the error propagates out of setup
-    // instead of being swallowed with a fallback log line.
-    const { ctx, hooks, rejected, getContextCb } = makeCtx({
-      rejectCompaction: true,
+    await withFixture(async ({ projectDir, readPluginLog }) => {
+      const { ctx, hooks, rejected, getContextCb } = makeCtx(projectDir, {
+        rejectCompaction: true,
+      });
+      await expect(createV2Setup()(ctx)).rejects.toThrow(
+        'unknown session hook: compaction',
+      );
+
+      // Registration failures are host-contract violations. Setup unwinds
+      // earlier resources and does not log the unavailable/degrade path.
+      expect(rejected).toEqual(['compaction']);
+      expect(hooks).toContain('context');
+      expect(getContextCb()).toBeFunction();
+      await flushLoggerForTesting();
+      const logText = readPluginLog();
+      expect(logText).not.toContain('compaction sees tagged content');
+      expect(logText).not.toContain(
+        '[v2] compaction bridge registered (session.compaction)',
+      );
     });
-    await expect(createV2Setup()(ctx)).rejects.toThrow(
-      'unknown session hook: compaction',
-    );
-
-    // The compaction registration was attempted exactly once and
-    // rejected; bridges registered before the failure are intact.
-    expect(rejected).toEqual(['compaction']);
-    expect(hooks).toContain('context');
-    expect(getContextCb()).toBeFunction();
-
-    await flushLoggerForTesting();
-    const logText = readPluginLog();
-    expect(logText).not.toContain('compaction sees tagged content');
-    expect(logText).not.toContain(
-      '[v2] compaction bridge registered (session.compaction)',
-    );
   }, 20_000);
 });

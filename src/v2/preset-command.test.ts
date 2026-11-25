@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   createPresetCommand,
   PRESET_COMMAND_DESCRIPTION,
@@ -80,7 +80,7 @@ beforeEach(() => {
   previousConfigDir = process.env.OPENCODE_CONFIG_DIR;
   previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
   previousPresetEnv = process.env.OH_MY_OPENCODE_SLIM_PRESET;
-  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-preset-command-'));
+  tempDir = createTmpDir();
   process.env.XDG_CONFIG_HOME = path.join(tempDir, 'xdg-config');
   delete process.env.OPENCODE_CONFIG_DIR;
   delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
@@ -96,7 +96,7 @@ afterEach(() => {
   if (previousPresetEnv === undefined)
     delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
   else process.env.OH_MY_OPENCODE_SLIM_PRESET = previousPresetEnv;
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeTmpDir(tempDir);
 });
 
 describe('presetListFeedback', () => {

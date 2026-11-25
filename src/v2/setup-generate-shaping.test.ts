@@ -15,9 +15,9 @@
  * - messages are deliberately NOT shaped by the generate path
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { createV2Setup } from './setup';
 import type {
   V2Context,
@@ -101,7 +101,7 @@ describe('createV2Setup generate hook shaping', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-generate-'));
+    fixtureRoot = createTmpDir('omo-v2-generate-');
     projectDir = path.join(fixtureRoot, 'project');
     configDir = path.join(fixtureRoot, 'config');
     logDir = path.join(fixtureRoot, 'logs');
@@ -134,7 +134,7 @@ describe('createV2Setup generate hook shaping', () => {
       if (!(key in originalEnv)) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
-    await rm(fixtureRoot, { recursive: true, force: true });
+    removeTmpDir(fixtureRoot);
   });
 
   function makeCtx(): {

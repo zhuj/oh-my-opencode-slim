@@ -28,7 +28,9 @@ mock.module('../../utils/logger', () => ({
   log: logMock,
 }));
 
+const actualCompat = await import('../../utils/compat');
 mock.module('../../utils/compat', () => ({
+  ...actualCompat,
   crossSpawn: crossSpawnMock,
 }));
 
@@ -36,6 +38,16 @@ let importCounter = 0;
 
 const SOCKET = '/tmp/tmux-test/default';
 const TMUX_ENV = `${SOCKET},123,0`;
+
+/** Viewer commands as tmux builds them: `env` prefix + `opencode mini`. */
+const MINI_SHARED_CMD =
+  "env OPENCODE_DISABLE_TERMINAL_TITLE=1 OH_MY_OPENCODE_SLIM_PANE_VIEWER=1 opencode mini --session 'session-1'";
+const MINI_REMOTE_CMD =
+  'env OPENCODE_DISABLE_TERMINAL_TITLE=1 OH_MY_OPENCODE_SLIM_PANE_VIEWER=1 opencode mini --server ' +
+  "'http://localhost:4096' --session 'session-1'";
+const MINI_V1_CMD =
+  'env OPENCODE_DISABLE_TERMINAL_TITLE=1 OH_MY_OPENCODE_SLIM_PANE_VIEWER=1 opencode attach ' +
+  "'http://localhost:4096' --session 'session-1' --dir '/repo' --mini";
 
 function createSpawnResult(
   exitCode = 0,
@@ -451,26 +463,114 @@ describe('TmuxMultiplexer', () => {
     expect(sharedSplit).not.toContain('OPENCODE_PASSWORD');
   });
 
-  test('viewer "mini" runs opencode mini and pins the split directory', async () => {
+  test('viewerSurface mini sets the pane cwd for v2-shared (no directory argument)', async () => {
     const { TmuxMultiplexer } = await importFreshTmux();
     const tmux = new TmuxMultiplexer('main-vertical', 60);
 
     await tmux.spawnPane(
-      'session-mini',
+      'session-1',
       'Mini worker',
       'http://localhost:4096',
       '/repo',
       { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
     );
 
+    // `opencode mini` carries no directory, so the pane cwd is the only way
+    // the project is selected. `-c` sits with the other split-window options,
+    // right before the viewer command.
+    expect(commandContaining('split-window')?.slice(0, 14)).toEqual([
+      '/usr/bin/tmux',
+      '-S',
+      SOCKET,
+      'split-window',
+      '-h',
+      '-d',
+      '-P',
+      '-F',
+      '#{pane_id}',
+      '-t',
+      '%1',
+      '-c',
+      '/repo',
+      MINI_SHARED_CMD,
+    ]);
+  });
+
+  test('viewerSurface mini keeps the v2-remote server flag and the -e secret entry', async () => {
+    const { TmuxMultiplexer } = await importFreshTmux();
+    const tmux = new TmuxMultiplexer('main-vertical', 60);
+
+    await tmux.spawnPane(
+      'session-1',
+      'Mini remote worker',
+      'http://localhost:4096',
+      '/repo',
+      {
+        viewerFlavor: 'v2-remote',
+        viewerSurface: 'mini',
+        viewerPassword: 'pw',
+      },
+    );
+
     const split = commandContaining('split-window');
-    // Mini commands omit the directory, so the split pins it with `-c`.
     const cwdIndex = split?.indexOf('-c') ?? -1;
     expect(cwdIndex).toBeGreaterThan(-1);
     expect(split?.[cwdIndex + 1]).toBe('/repo');
     const cmd = viewerCommand(split);
-    expect(cmd).toContain("opencode mini --session 'session-mini'");
+    expect(cmd).toBe(MINI_REMOTE_CMD);
+    expect((split ?? []).filter((arg) => arg.includes('pw'))).toEqual([
+      'OPENCODE_PASSWORD=pw',
+    ]);
+    expect(JSON.stringify(logMock.mock.calls)).not.toContain(
+      'OPENCODE_PASSWORD=pw',
+    );
     expect(cmd).not.toContain('/repo');
+  });
+
+  test('viewerSurface mini keeps the v1 attach form and gains no pane cwd', async () => {
+    const { TmuxMultiplexer } = await importFreshTmux();
+    const tmux = new TmuxMultiplexer('main-vertical', 60);
+
+    await tmux.spawnPane(
+      'session-1',
+      'Mini attach worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v1', viewerSurface: 'mini' },
+    );
+
+    // v1 keeps `--dir` on the command line, so the pane cwd is not needed and
+    // must stay unset (tmux silently degrades a missing directory).
+    const split = commandContaining('split-window');
+    expect(split).not.toContain('-c');
+    expect(viewerCommand(split)).toBe(MINI_V1_CMD);
+  });
+
+  test('viewerSurface tui is byte-identical to omitting it for every flavor', async () => {
+    const { TmuxMultiplexer } = await importFreshTmux();
+    const flavors = ['v1', 'v2-shared', 'v2-remote'] as const;
+
+    for (const flavor of flavors) {
+      crossSpawnMock.mockReset();
+      installDefaultMock();
+      const tmux = new TmuxMultiplexer('main-vertical', 60);
+
+      await tmux.spawnPane('session-1', 'A', 'http://localhost:4096', '/repo', {
+        viewerFlavor: flavor,
+      });
+      const omitted = commandContaining('split-window');
+
+      crossSpawnMock.mockClear();
+      await tmux.spawnPane('session-1', 'A', 'http://localhost:4096', '/repo', {
+        viewerFlavor: flavor,
+        viewerSurface: 'tui',
+      });
+      const explicit = commandContaining('split-window');
+
+      // Same inputs, so any difference is attributable to `viewerSurface` alone.
+      expect(explicit).toEqual(omitted);
+      expect(explicit).not.toContain('-c');
+    }
   });
 
   test('spawnPane re-resolves the anchor from the environment at spawn time', async () => {

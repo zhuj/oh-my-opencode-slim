@@ -25,7 +25,7 @@ describe('native continuation through the shared tool guard bridge', () => {
     expect(event.input).toEqual({ sessionID: CHILD, prompt: 'Continue' });
   });
 
-  test.each(['ses', 'ses_unknown', 'ses_foreign', 'exp-1', ''])(
+  test.each(['ses_unknown', 'ses_foreign', 'exp-1'])(
     'leaves resume reference %j for the host rather than inventing a replacement',
     async (sessionID) => {
       const event = continuation({ sessionID, prompt: 'Continue' });
@@ -35,6 +35,21 @@ describe('native continuation through the shared tool guard bridge', () => {
       expect(event.input).toEqual({ sessionID, prompt: 'Continue' });
     },
   );
+
+  test('normalizes the legacy new-session placeholder to omission', async () => {
+    const event = continuation({ sessionID: 'ses', prompt: 'Continue' });
+    await createToolExecuteBridges(async () => {}, undefined).beforeBridge(
+      event,
+    );
+    expect(event.input).toEqual({ prompt: 'Continue' });
+  });
+
+  test('rejects an empty resume reference when it reaches the bridge', async () => {
+    const event = continuation({ sessionID: '', prompt: 'Continue' });
+    await expect(
+      createToolExecuteBridges(async () => {}, undefined).beforeBridge(event),
+    ).rejects.toThrow('Omit sessionID to start a new session');
+  });
 
   test('preset capture still runs for a continuation that omitted the agent', async () => {
     const capture = mock(async () => undefined);

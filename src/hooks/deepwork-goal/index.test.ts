@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import {
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { withTmpDirSync } from '../../test-utils';
 import { stripTaggedContent } from '../cache-safe-injection';
 import { routerHeadAnnouncement } from '../deepwork';
 import type { MessageWithParts } from '../types';
@@ -123,7 +123,7 @@ describe('createDeepworkGoalHook', () => {
     expect(part.synthetic).toBe(true);
     expect(part.text).toStartWith('<system-reminder>');
     expect(part.text).toEndWith('</system-reminder>');
-    expect(part.text).toContain('`.slim/deepwork/s1.md`');
+    expect(part.text).toContain('`.local/.slim/deepwork/s1.md`');
     // State-neutral: no run status in the text, the file is authoritative.
     expect(part.text).not.toContain('active');
     // Dual-tagged: a first-class resident of the board's volatile zone.
@@ -587,14 +587,11 @@ describe('isCompletedFlip', () => {
 });
 
 describe('createDeepworkHeadGate', () => {
-  let dir: string;
-
   test('gate follows the head file lifecycle (fail open on doubt)', () => {
-    dir = mkdtempSync('deepwork-goal-gate-');
-    try {
+    withTmpDirSync((dir) => {
       const gate = createDeepworkHeadGate(dir);
-      const head = `${dir}/.slim/deepwork/${SESSION}.md`;
-      mkdirSync(`${dir}/.slim/deepwork`, { recursive: true });
+      const head = `${dir}/.local/.slim/deepwork/${SESSION}.md`;
+      mkdirSync(`${dir}/.local/.slim/deepwork`, { recursive: true });
       // Force distinct mtimes: the gate caches by mtimeMs, and consecutive
       // writes inside one timestamp granularity would read as unchanged.
       let mtime = 1_700_000_000_000;
@@ -626,8 +623,6 @@ describe('createDeepworkHeadGate', () => {
       // Deleted → closed.
       rmSync(head);
       expect(gate(SESSION)).toBe(false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 });

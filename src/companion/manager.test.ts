@@ -17,8 +17,8 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import * as loggerModule from '../utils/logger';
 import { acquirePidFileLock } from '../utils/pid-file-lock';
 import { mapV2EventToV1 } from '../v2/event-adapter';
@@ -34,8 +34,7 @@ import { pruneDisabledCompanionRuntime } from './runtime';
 import { normalizeCompanionSessionStatus } from './status';
 
 // Point writes at a temp dir so tests don't touch the real state file.
-const TEST_DIR = path.join(os.tmpdir(), `companion-test-${process.pid}`);
-const XDG_DIR = path.join(TEST_DIR, 'xdg');
+let testDir: string;
 const managers: CompanionManager[] = [];
 const attachmentPidsByDirectory = new Map<string, number>();
 const attachmentChildren: ChildProcess[] = [];
@@ -112,11 +111,11 @@ const previousOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
 const previousPresetEnv = process.env.OH_MY_OPENCODE_SLIM_PRESET;
 
 beforeEach(() => {
-  mkdirSync(TEST_DIR, { recursive: true });
-  process.env.XDG_DATA_HOME = XDG_DIR;
+  testDir = createTmpDir();
+  process.env.XDG_DATA_HOME = path.join(testDir, 'xdg');
   attachmentPidsByDirectory.clear();
   usedAttachmentPids.clear();
-  process.env.XDG_CONFIG_HOME = path.join(TEST_DIR, 'config');
+  process.env.XDG_CONFIG_HOME = path.join(testDir, 'config');
   delete process.env.OPENCODE_CONFIG_DIR;
   delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
   const configDir = path.join(process.env.XDG_CONFIG_HOME, 'opencode');
@@ -133,7 +132,7 @@ afterEach(() => {
     manager.onExit();
   }
   for (const child of attachmentChildren.splice(0)) child.kill();
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTmpDir(testDir);
   if (previousXdg === undefined) delete process.env.XDG_DATA_HOME;
   else process.env.XDG_DATA_HOME = previousXdg;
   if (previousXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -363,7 +362,7 @@ describe('CompanionManager', () => {
       '/headless-project',
       {
         enabled: true,
-        binaryPath: path.join(TEST_DIR, 'missing-companion'),
+        binaryPath: path.join(testDir, 'missing-companion'),
       },
     );
     managers.push(headless);
@@ -371,7 +370,7 @@ describe('CompanionManager', () => {
 
     const attached = make('attached-project', '/attached-project', {
       enabled: true,
-      binaryPath: path.join(TEST_DIR, 'working-companion-stub'),
+      binaryPath: path.join(testDir, 'working-companion-stub'),
     });
     attached.onLoad();
     const internal = attached as unknown as {
@@ -394,7 +393,7 @@ describe('CompanionManager', () => {
     try {
       const a = make('session-a', '/project-a', {
         enabled: true,
-        binaryPath: path.join(TEST_DIR, 'missing-companion'),
+        binaryPath: path.join(testDir, 'missing-companion'),
       });
       a.onLoad();
       const aPid = attachmentPidsByDirectory.get(path.resolve('/project-a'));
@@ -410,7 +409,7 @@ describe('CompanionManager', () => {
       // TUI C attaches to another project; its state row is not published yet.
       const c = make('session-c', '/project-c', {
         enabled: true,
-        binaryPath: path.join(TEST_DIR, 'missing-companion'),
+        binaryPath: path.join(testDir, 'missing-companion'),
       });
       reconcile(a); // spawn path records A; C must stay out of the record
       const cPid = attachmentPidsByDirectory.get(path.resolve('/project-c'));
@@ -440,7 +439,7 @@ describe('CompanionManager', () => {
     try {
       const a = make('session-a', '/project-a', {
         enabled: true,
-        binaryPath: path.join(TEST_DIR, 'missing-companion'),
+        binaryPath: path.join(testDir, 'missing-companion'),
       });
       a.onLoad();
       const aPid = attachmentPidsByDirectory.get(path.resolve('/project-a'));
@@ -460,7 +459,7 @@ describe('CompanionManager', () => {
 
       const c = make('session-c', '/project-c', {
         enabled: true,
-        binaryPath: path.join(TEST_DIR, 'missing-companion'),
+        binaryPath: path.join(testDir, 'missing-companion'),
       });
       writeFileSync(companionPidFile(), String(process.pid));
       reconcile(a);
@@ -487,7 +486,7 @@ describe('CompanionManager', () => {
     try {
       const a = make('session-a', '/project-a', {
         enabled: true,
-        binaryPath: path.join(TEST_DIR, 'missing-companion'),
+        binaryPath: path.join(testDir, 'missing-companion'),
       });
       a.onLoad();
       writeFileSync(companionPidFile(), String(process.pid));
@@ -500,7 +499,7 @@ describe('CompanionManager', () => {
       // A headless project (no row) disposes; it must not erase the record.
       const headless = new CompanionManager('headless-b', '/project-b', {
         enabled: true,
-        binaryPath: path.join(TEST_DIR, 'missing-companion'),
+        binaryPath: path.join(testDir, 'missing-companion'),
       });
       managers.push(headless);
       headless.onExit();
@@ -521,7 +520,7 @@ describe('CompanionManager', () => {
   it('keeps the user-quit guard when another attached project disposes', () => {
     const config = {
       enabled: true,
-      binaryPath: path.join(TEST_DIR, 'missing-companion'),
+      binaryPath: path.join(testDir, 'missing-companion'),
     };
     const first = make('session-a', '/project-a', config);
     const second = make('session-b', '/project-b', config);
@@ -660,7 +659,7 @@ describe('CompanionManager', () => {
   it('does not respawn after Quit through a second project manager', () => {
     const config = {
       enabled: true,
-      binaryPath: path.join(TEST_DIR, 'missing-companion'),
+      binaryPath: path.join(testDir, 'missing-companion'),
     };
     const first = make('spawn-first', '/spawn-first', config);
     const second = make('spawn-second', '/spawn-second', config);
@@ -686,7 +685,7 @@ describe('CompanionManager', () => {
   it('retries spawning after plugin reload with unchanged attachments', () => {
     const config = {
       enabled: true,
-      binaryPath: path.join(TEST_DIR, 'missing-companion'),
+      binaryPath: path.join(testDir, 'missing-companion'),
     };
     const original = make('spawn-reload', '/spawn-reload', config);
     original.onLoad();
@@ -717,7 +716,7 @@ describe('CompanionManager', () => {
   it('remembers TUIs that attach while the Companion is running', () => {
     const m = make('remember-live-tuis', '/remember-live-tuis', {
       enabled: true,
-      binaryPath: path.join(TEST_DIR, 'missing-companion'),
+      binaryPath: path.join(testDir, 'missing-companion'),
     });
     m.onLoad();
     const attachmentA = attachmentPidsByDirectory.get(
@@ -763,7 +762,7 @@ describe('CompanionManager', () => {
   it('allows one new spawn attempt when a new TUI PID attaches', () => {
     const m = make('new-tui-spawn', '/new-tui-spawn', {
       enabled: true,
-      binaryPath: path.join(TEST_DIR, 'missing-companion'),
+      binaryPath: path.join(testDir, 'missing-companion'),
     });
     m.onLoad();
     const logSpy = spyOn(loggerModule, 'log');
@@ -789,7 +788,7 @@ describe('CompanionManager', () => {
   it('clears spawn history when the attachment set becomes empty', () => {
     const m = make('clear-spawn-history', '/clear-spawn-history', {
       enabled: true,
-      binaryPath: path.join(TEST_DIR, 'missing-companion'),
+      binaryPath: path.join(testDir, 'missing-companion'),
     });
     m.onLoad();
     reconcile(m);
@@ -801,7 +800,7 @@ describe('CompanionManager', () => {
   });
 
   it('retries spawning after a busy PID lock clears without saving spawn history', () => {
-    const binary = path.join(TEST_DIR, 'fake-companion');
+    const binary = path.join(testDir, 'fake-companion');
     writeFileSync(binary, '#!/bin/sh\nexit 0\n');
     chmodSync(binary, 0o755);
     const m = make('lock-retry', '/lock-retry', {
@@ -837,7 +836,7 @@ describe('CompanionManager', () => {
   });
 
   it('does not consume a preset request after the eighth unattached tick drops its row', () => {
-    const projectDir = path.join(TEST_DIR, 'unattached-preset');
+    const projectDir = path.join(testDir, 'unattached-preset');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -847,7 +846,7 @@ describe('CompanionManager', () => {
     const originalConfig = JSON.stringify({ preset: 'old' });
     writeFileSync(projectConfigPath, originalConfig);
     writeFileSync(
-      path.join(TEST_DIR, 'config', 'opencode', 'oh-my-opencode-slim.json'),
+      path.join(testDir, 'config', 'opencode', 'oh-my-opencode-slim.json'),
       JSON.stringify({
         presets: {
           old: { orchestrator: { model: 'old-model' } },
@@ -882,7 +881,7 @@ describe('CompanionManager', () => {
   });
 
   it('publishes presets and applies a project-local preset request', () => {
-    const projectDir = path.join(TEST_DIR, 'project');
+    const projectDir = path.join(testDir, 'project');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -898,7 +897,7 @@ describe('CompanionManager', () => {
     );
 
     const userConfigPath = path.join(
-      path.join(TEST_DIR, 'config'),
+      path.join(testDir, 'config'),
       'opencode',
       'oh-my-opencode-slim.json',
     );
@@ -921,7 +920,7 @@ describe('CompanionManager', () => {
 
     state.sessions.push({
       session_id: 'other-session',
-      cwd: path.join(TEST_DIR, 'other-project'),
+      cwd: path.join(testDir, 'other-project'),
       active_agents: ['intro'],
       status: 'idle',
       pid: process.pid,
@@ -967,7 +966,7 @@ describe('CompanionManager', () => {
   });
 
   it('does not reapply a preset after post-apply acknowledgement failure', () => {
-    const projectDir = path.join(TEST_DIR, 'preset-ack-failure');
+    const projectDir = path.join(testDir, 'preset-ack-failure');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -977,7 +976,7 @@ describe('CompanionManager', () => {
     writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
 
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1041,7 +1040,7 @@ describe('CompanionManager', () => {
   });
 
   it('restores the applied-request fence after manager restart', () => {
-    const projectDir = path.join(TEST_DIR, 'preset-restart-fence');
+    const projectDir = path.join(testDir, 'preset-restart-fence');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -1052,7 +1051,7 @@ describe('CompanionManager', () => {
     writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
 
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1120,7 +1119,7 @@ describe('CompanionManager', () => {
   });
 
   it('reports the v2 ancestor preset after an Inherit request', () => {
-    const workspace = path.join(TEST_DIR, 'workspace');
+    const workspace = path.join(testDir, 'workspace');
     const worktree = path.join(workspace, 'worktrees', 'feature');
     mkdirSync(path.join(workspace, '.opencode'), { recursive: true });
     mkdirSync(path.join(worktree, '.opencode'), { recursive: true });
@@ -1179,8 +1178,8 @@ describe('CompanionManager', () => {
   });
 
   it('keeps per-project overrides isolated while global preset refreshes inheriting projects', () => {
-    const projectLocal = path.join(TEST_DIR, 'project-local');
-    const projectInherited = path.join(TEST_DIR, 'project-inherited');
+    const projectLocal = path.join(testDir, 'project-local');
+    const projectInherited = path.join(testDir, 'project-inherited');
     mkdirSync(path.join(projectLocal, '.opencode'), { recursive: true });
     mkdirSync(projectInherited, { recursive: true });
     writeFileSync(
@@ -1189,7 +1188,7 @@ describe('CompanionManager', () => {
     );
 
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1279,10 +1278,10 @@ describe('CompanionManager', () => {
   });
 
   it('keeps legacy unscoped Companion requests on effective semantics', () => {
-    const projectDir = path.join(TEST_DIR, 'legacy-effective-project');
+    const projectDir = path.join(testDir, 'legacy-effective-project');
     mkdirSync(projectDir, { recursive: true });
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1328,7 +1327,7 @@ describe('CompanionManager', () => {
   });
 
   it('refreshes published preset state after an external config edit', () => {
-    const projectDir = path.join(TEST_DIR, 'refresh-project');
+    const projectDir = path.join(testDir, 'refresh-project');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -1338,7 +1337,7 @@ describe('CompanionManager', () => {
     writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
 
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1373,7 +1372,7 @@ describe('CompanionManager', () => {
   });
 
   it('preserves request acknowledgement across a racing external refresh', () => {
-    const projectDir = path.join(TEST_DIR, 'ack-refresh-project');
+    const projectDir = path.join(testDir, 'ack-refresh-project');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -1383,7 +1382,7 @@ describe('CompanionManager', () => {
     writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
 
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1442,7 +1441,7 @@ describe('CompanionManager', () => {
   });
 
   it('keeps the last-known preset state when an external edit is malformed', () => {
-    const projectDir = path.join(TEST_DIR, 'malformed-project');
+    const projectDir = path.join(testDir, 'malformed-project');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -1452,7 +1451,7 @@ describe('CompanionManager', () => {
     writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
 
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1483,7 +1482,7 @@ describe('CompanionManager', () => {
   });
 
   it('keeps the last-known preset state when a v2 edit adds a positive limit', () => {
-    const projectDir = path.join(TEST_DIR, 'retired-mode-project');
+    const projectDir = path.join(testDir, 'retired-mode-project');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -1493,7 +1492,7 @@ describe('CompanionManager', () => {
     writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
 
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1545,8 +1544,8 @@ describe('CompanionManager', () => {
     });
   });
 
-  it('fails a preset request against a v2 config with retired keys without mutating it', () => {
-    const projectDir = path.join(TEST_DIR, 'retired-limit-project');
+  it('fails a preset request against a v2 wall-clock limit without mutating it', () => {
+    const projectDir = path.join(testDir, 'retired-limit-project');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectConfigPath = path.join(
@@ -1556,7 +1555,7 @@ describe('CompanionManager', () => {
     writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
 
     const userConfigPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -1583,7 +1582,7 @@ describe('CompanionManager', () => {
 
     const rejected = JSON.stringify({
       preset: 'old',
-      backgroundJobs: { concurrency: { defaultConcurrency: 2 } },
+      backgroundJobs: { wallClockTimeoutMs: 120_000 },
     });
     writeFileSync(projectConfigPath, rejected);
     const state = readState();
@@ -2443,7 +2442,7 @@ describe('CompanionManager', () => {
   });
 
   it('resolves a configured companion binary path', () => {
-    const customBin = path.join(TEST_DIR, 'custom-companion');
+    const customBin = path.join(testDir, 'custom-companion');
     writeFileSync(customBin, '#!/bin/sh\n');
 
     expect(resolveCompanionBinaryPath({ binaryPath: customBin })).toBe(
@@ -2454,7 +2453,7 @@ describe('CompanionManager', () => {
   it('returns null when configured companion binary path does not exist', () => {
     expect(
       resolveCompanionBinaryPath({
-        binaryPath: path.join(TEST_DIR, 'missing-companion'),
+        binaryPath: path.join(testDir, 'missing-companion'),
       }),
     ).toBeNull();
   });
@@ -2544,7 +2543,7 @@ describe('CompanionManager', () => {
   });
 
   it('stores the spawned child PID in the PID file', () => {
-    const bin = path.join(TEST_DIR, 'fake-companion');
+    const bin = path.join(testDir, 'fake-companion');
     writeFileSync(bin, '#!/bin/sh\nexit 0\n');
     chmodSync(bin, 0o755);
 
@@ -2666,18 +2665,18 @@ describe('CompanionManager', () => {
   });
 
   it('persists only bounded known workspaces registered by plugin managers', () => {
-    const m = make('known-root', path.join(TEST_DIR, 'known-root'));
+    const m = make('known-root', path.join(testDir, 'known-root'));
     m.onLoad();
     const state = readState();
     expect(state.known_projects).toHaveLength(1);
-    expect(state.known_projects[0].cwd).toBe(path.join(TEST_DIR, 'known-root'));
+    expect(state.known_projects[0].cwd).toBe(path.join(testDir, 'known-root'));
     expect(resolveKnownCompanionProject(state, '/tmp/unregistered')).toBeNull();
     expect(resolveKnownCompanionProject(state, '../relative')).toBeNull();
 
     for (let index = 0; index < 80; index++) {
       rememberKnownCompanionProject(
         state,
-        path.join(TEST_DIR, `remembered-${index}`),
+        path.join(testDir, `remembered-${index}`),
         undefined,
         index,
       );
@@ -2687,8 +2686,8 @@ describe('CompanionManager', () => {
   });
 
   it('updates a remembered offline project without changing the relay project', () => {
-    const liveDir = path.join(TEST_DIR, 'running');
-    const closedDir = path.join(TEST_DIR, 'remembered');
+    const liveDir = path.join(testDir, 'running');
+    const closedDir = path.join(testDir, 'remembered');
     mkdirSync(path.join(liveDir, '.opencode'), { recursive: true });
     mkdirSync(path.join(closedDir, '.opencode'), { recursive: true });
     const liveFile = path.join(
@@ -2707,7 +2706,7 @@ describe('CompanionManager', () => {
       '{\n  // Keep the offline project comment.\n  "preset": "old",\n}',
     );
     const globalPath = path.join(
-      TEST_DIR,
+      testDir,
       'config',
       'opencode',
       'oh-my-opencode-slim.json',
@@ -2758,7 +2757,7 @@ describe('CompanionManager', () => {
   });
 
   it('publishes the inherited selection after clearing an offline project override', () => {
-    const closedDir = path.join(TEST_DIR, 'closed');
+    const closedDir = path.join(testDir, 'closed');
     mkdirSync(path.join(closedDir, '.opencode'), { recursive: true });
     const configFile = path.join(
       closedDir,
@@ -2767,7 +2766,7 @@ describe('CompanionManager', () => {
     );
     writeFileSync(configFile, '{ "preset": "local" }');
     writeFileSync(
-      path.join(TEST_DIR, 'config', 'opencode', 'oh-my-opencode-slim.json'),
+      path.join(testDir, 'config', 'opencode', 'oh-my-opencode-slim.json'),
       JSON.stringify({
         preset: 'global',
         presets: {
@@ -2804,7 +2803,7 @@ describe('CompanionManager', () => {
   });
 
   it('rejects unregistered offline target without modifying its JSONC', () => {
-    const knownDir = path.join(TEST_DIR, 'unknown-target');
+    const knownDir = path.join(testDir, 'unknown-target');
     mkdirSync(path.join(knownDir, '.opencode'), { recursive: true });
     const targetFile = path.join(
       knownDir,
@@ -2812,7 +2811,7 @@ describe('CompanionManager', () => {
       'oh-my-opencode-slim.jsonc',
     );
     writeFileSync(targetFile, '{ "preset": "old" }');
-    const manager = make('reject-relay', path.join(TEST_DIR, 'relay'));
+    const manager = make('reject-relay', path.join(testDir, 'relay'));
     manager.onLoad();
     const state = readState();
     state.preset_requests = [
@@ -2836,7 +2835,7 @@ describe('CompanionManager', () => {
   });
 
   it('refuses to rewrite malformed offline project JSONC and reports failure', () => {
-    const projectDir = path.join(TEST_DIR, 'malformed-known');
+    const projectDir = path.join(testDir, 'malformed-known');
     const projectConfigDir = path.join(projectDir, '.opencode');
     mkdirSync(projectConfigDir, { recursive: true });
     const projectFile = path.join(
@@ -2845,7 +2844,7 @@ describe('CompanionManager', () => {
     );
     const original = '{ // Invalid project JSONC\\n "preset": }';
     writeFileSync(projectFile, original);
-    const manager = make('malformed-relay', path.join(TEST_DIR, 'relay'));
+    const manager = make('malformed-relay', path.join(testDir, 'relay'));
     manager.onLoad();
     const state = readState();
     rememberKnownCompanionProject(state, projectDir, undefined);
@@ -2875,8 +2874,8 @@ describe('CompanionManager', () => {
   });
 
   it('reports a deleted remembered project without touching the relay', () => {
-    const missing = path.join(TEST_DIR, 'deleted-project');
-    const live = path.join(TEST_DIR, 'live');
+    const missing = path.join(testDir, 'deleted-project');
+    const live = path.join(testDir, 'live');
     mkdirSync(live, { recursive: true });
     const manager = make('missing-relay', live);
     manager.onLoad();

@@ -22,6 +22,16 @@ function activeSeats(
   return preset ? Object.entries(preset) : [];
 }
 
+/** Active registered seat names, shared with scoped delegation. */
+export function councillorSeatNames(
+  runtime: RuntimeConfig,
+  disabled: ReadonlySet<string>,
+): string[] {
+  return activeSeats(runtime, disabled)
+    .map(([name]) => `${COUNCILLOR_AGENT_PREFIX}${name}`)
+    .filter((name) => !disabled.has(name));
+}
+
 /**
  * Build dynamic councillor agents from council config presets.
  * Each councillor gets its own agent (name + model) so the orchestrator

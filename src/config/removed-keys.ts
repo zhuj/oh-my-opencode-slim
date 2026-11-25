@@ -1,6 +1,6 @@
 /**
  * Config keys removed in this version (dropped, not migrated, except that
- * `backgroundJobs.enabled: false` maps to `"off"` and `"managed"` to `"native"`).
+ * `backgroundJobs.enabled: false` maps to `"off"`).
  *
  * A stale removed key must not invalidate the whole config file: the loader
  * strips each one from the raw layer before schema validation and reports a
@@ -15,7 +15,6 @@ const REMOVED_MANAGED_KEYS = [
   'backgroundJobs.maxSessionsPerAgent',
   'backgroundJobs.stopConfirmationMs',
   'backgroundJobs.wallClockTimeoutMs',
-  'backgroundJobs.concurrency',
   'backgroundJobs.sameProviderPolicy',
   'backgroundJobs.waitForUserGuard',
   'backgroundJobs.childInputWake',
@@ -128,13 +127,6 @@ export function stripRemovedConfigKeys(
     jobs.mode === undefined
   ) {
     jobs.mode = 'off';
-  }
-  if (isPlainObject(jobs) && jobs.mode === 'managed') {
-    jobs.mode = 'native';
-    onRemoved(
-      'Config value backgroundJobs.mode "managed" was removed; "native" is applied instead. Use "off" to disable Slim task tools and (by default) session presets.',
-      'backgroundJobs.mode',
-    );
   }
   const removed: string[] = [];
   for (const path of REMOVED_CONFIG_KEYS) {

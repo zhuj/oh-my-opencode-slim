@@ -8,9 +8,7 @@ import {
   spyOn,
   test,
 } from 'bun:test';
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 import { isInternalInitiatorPart } from '../../utils';
 import {
   INTERNAL_INITIATOR_METADATA_KEY,
@@ -1071,9 +1069,7 @@ describe('ForegroundFallbackManager v2 content-filter refusal', () => {
 
   test('a recovered interview refusal reports only the continued turn', async () => {
     jest.useRealTimers();
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'interview-refusal-'),
-    );
+    const directory = createTmpDir('interview-refusal-');
     const { manager, mocks } = fixture();
     const synthetic = mock(async (_input: Record<string, unknown>) => ({}));
     const bridge = createV2InterviewBridge(
@@ -1143,7 +1139,7 @@ describe('ForegroundFallbackManager v2 content-filter refusal', () => {
     } finally {
       await bridge.dispose();
       manager.dispose();
-      await fs.rm(directory, { recursive: true, force: true });
+      removeTmpDir(directory);
     }
   });
 

@@ -84,6 +84,33 @@ describe('RuntimeConfig', () => {
     expect(runtime.agent('explorer')?.model).toBe('original');
   });
 
+  test('snapshot cloning preserves prototype-named permission rules', () => {
+    resetRegistry();
+    const agent = JSON.parse(
+      '{"skills":["*"],"permission":{"skill":{"*":"allow","__proto__":"deny","constructor":"ask"}}}',
+    );
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: { oracle: agent },
+    });
+    runtime.captureHostConfig({ agent: { oracle: agent } });
+
+    for (const snapshot of [
+      runtime.plugin?.agents?.oracle,
+      runtime.hostAgent('oracle'),
+      runtime.agents().oracle,
+    ]) {
+      const rules = snapshot?.permission?.skill;
+      expect(Object.hasOwn(rules, '__proto__')).toBe(true);
+      expect(Object.entries(rules)).toEqual([
+        ['*', 'allow'],
+        ['__proto__', 'deny'],
+        ['constructor', 'ask'],
+      ]);
+      expect(Object.getPrototypeOf(rules)).toBe(Object.prototype);
+    }
+    expect(Object.hasOwn(Object.prototype, 'skill')).toBe(false);
+  });
+
   test('seed precedence: host override > runtime override > plugin file', () => {
     resetRegistry();
     const plugin: PluginConfig = {
@@ -248,8 +275,14 @@ describe('RuntimeConfig', () => {
     expect(runtime.imageRouting).toBe('direct');
     expect(runtime.companion).toBeUndefined();
     expect(runtime.council).toBeUndefined();
+    expect(runtime.resourcePrefixes).toEqual([
+      '.local',
+      '.local/.slim',
+      '.opencode',
+    ]);
     expect(runtime.featureGates).toEqual({
       backgroundJobsMode: 'native',
+      admissionQueue: true,
       presetRouting: true,
       replaceBuiltinSubagents: true,
       tui: true,
@@ -360,26 +393,26 @@ describe('RuntimeConfig', () => {
     expect(v2.featureGates.backgroundJobsMode).toBe('native');
   });
 
-  test('rejects v2 managed runtime seeds before replacing the prior snapshot', () => {
+  test('legacy managed runtime seeds add an admission queue to native task controls', () => {
     resetRegistry();
-    const runtime = RuntimeConfig.init(DIRECTORY, { tui: false }, 'v2');
-    const gates = runtime.featureGates;
-    expect(() =>
-      RuntimeConfig.init(
-        DIRECTORY,
-        { backgroundJobs: { mode: 'managed' } } as unknown as PluginConfig,
-        'v2',
-      ),
-    ).toThrow(/Unsupported backgroundJobs\.mode "managed"/);
-    expect(runtime.featureGates).toBe(gates);
-    expect(runtime.plugin).toEqual({ tui: false });
-    expect(() =>
-      RuntimeConfig.createDetached(
-        DIRECTORY,
-        { backgroundJobs: { mode: 'managed' } } as unknown as PluginConfig,
-        'v2',
-      ),
-    ).toThrow(/Unsupported backgroundJobs\.mode "managed"/);
+    const runtime = RuntimeConfig.init(
+      DIRECTORY,
+      { backgroundJobs: { mode: 'managed' } },
+      'v2',
+    );
+    expect(runtime.featureGates).toMatchObject({
+      backgroundJobsMode: 'native',
+      admissionQueue: true,
+    });
+    const detached = RuntimeConfig.createDetached(
+      DIRECTORY,
+      { backgroundJobs: { mode: 'managed', queue: { enabled: false } } },
+      'v2',
+    );
+    expect(detached.featureGates).toMatchObject({
+      backgroundJobsMode: 'native',
+      admissionQueue: false,
+    });
   });
 
   test('updateCheckerEnabled is off only for autoUpdate false', () => {
@@ -626,6 +659,7 @@ describe('RuntimeConfig', () => {
       setDefaultAgent: false,
       compactSidebar: false,
       sidebar: false,
+      resource_prefixes: ['.custom'],
       image_routing: 'auto',
       disabled_agents: ['observer', 'orchestrator'],
       disabled_tools: ['webfetch'],
@@ -642,6 +676,7 @@ describe('RuntimeConfig', () => {
     expect(runtime.setDefaultAgent).toBe(false);
     expect(runtime.compactSidebar).toBe(false);
     expect(runtime.sidebarEnabled).toBe(false);
+    expect(runtime.resourcePrefixes).toEqual(['.custom']);
     expect(runtime.imageRouting).toBe('auto');
     // orchestrator is protected and cannot be disabled
     expect(runtime.disabledAgents).toEqual(new Set(['observer']));
@@ -658,6 +693,94 @@ describe('RuntimeConfig', () => {
     expect(runtime.acpAgents.myAcp.command).toBe('echo');
     expect(runtime.multiplexer.type).toBe('tmux');
   });
+
+  test('supplemental project names are opt-in and reset on reinitialization', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: {
+        oracle: { skills: ['?ask', '!deny'], skills_include_local: true },
+      },
+    });
+    runtime.setProjectSkillPermissionNames(['extra', 'extra']);
+    expect(runtime.agents().oracle?.skills).toEqual(['?ask', '!deny', 'extra']);
+    runtime.setProjectSkillPermissionNames(['not-granted']);
+    RuntimeConfig.init(DIRECTORY, { agents: { oracle: { skills: ['base'] } } });
+    expect(runtime.agents().oracle?.skills).toEqual(['base']);
+  });
+
+  test.each(['deny', 'ask', 'allow'] as const)(
+    'automatic local skill discovery preserves exact %s permission rules',
+    (rule) => {
+      resetRegistry();
+      const runtime = RuntimeConfig.init(DIRECTORY, {
+        agents: {
+          oracle: {
+            skills_include_local: true,
+            permission: { skill: { exact: rule } },
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['exact', 'other']);
+      expect(runtime.agents().oracle?.skills).toContain('other');
+      expect(runtime.agents().oracle?.skills).not.toContain('exact');
+    },
+  );
+
+  test('wildcard skill permission suppresses automatic local additions', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: {
+        oracle: {
+          skills: ['explicit'],
+          skills_add: ['added'],
+          skills_include_local: true,
+          permission: { skill: { '*': 'deny' } },
+        },
+      },
+    });
+    runtime.setProjectSkillPermissionNames(['local']);
+    expect(runtime.agents().oracle?.skills).toEqual(['explicit', 'added']);
+  });
+
+  test.each([true, false])(
+    'marketplace defaults do not contaminate the ordinary agent cache (defaults first: %s)',
+    (defaultsFirst) => {
+      resetRegistry();
+      const runtime = RuntimeConfig.init(DIRECTORY, {
+        agents: {
+          packaged: {
+            skills_remove: ['removed'],
+            skills_include_local: true,
+            permission: { skill: { restricted: 'deny' } },
+          },
+        },
+      });
+      runtime.setProjectSkillPermissionNames(['local', 'restricted']);
+      const defaults = { packaged: ['bundled', 'removed'] };
+      const first = defaultsFirst ? runtime.agents(defaults) : runtime.agents();
+      const second = defaultsFirst
+        ? runtime.agents()
+        : runtime.agents(defaults);
+      const withDefaults = defaultsFirst ? first : second;
+      const ordinary = defaultsFirst ? second : first;
+
+      expect(withDefaults.packaged.skills).toEqual(['bundled', 'local']);
+      expect(ordinary.packaged.skills).toEqual(['local']);
+      expect(runtime.agents()).toEqual(ordinary);
+      expect(runtime.agents()).not.toBe(ordinary);
+      expect(withDefaults.packaged.permission).toEqual({
+        skill: { restricted: 'deny' },
+      });
+
+      defaults.packaged = ['replacement'];
+      expect(runtime.agents(defaults).packaged.skills).toEqual([
+        'replacement',
+        'local',
+      ]);
+      expect(runtime.agents()).toEqual(ordinary);
+      expect(runtime.agents()).not.toBe(ordinary);
+    },
+  );
 
   test('runtimeChains derives from array models, alias-aware', () => {
     resetRegistry();

@@ -37,6 +37,28 @@ export function subagentArgsToV1(input: unknown): Record<string, unknown> {
   return out;
 }
 
+/** Legacy new-session sentinels mean omission, before native validation.
+ * Real resume IDs stay byte-identical and are resolved by OpenCode. */
+export function normalizeNewSessionResume(args: Record<string, unknown>): void {
+  const value = args.task_id;
+  if (typeof value === 'string' && value.trim() === '') {
+    throw new Error(
+      'subagent() received an empty sessionID. Omit sessionID to start a new session.',
+    );
+  }
+  const trimmed = typeof value === 'string' ? value.trim() : undefined;
+  if (
+    value === undefined ||
+    value === null ||
+    trimmed === 'ses:new' ||
+    trimmed === 'ses_new' ||
+    trimmed === 'ses_<<new>>' ||
+    trimmed === 'ses_' ||
+    (trimmed !== undefined && /^ses\?*$/.test(trimmed))
+  )
+    delete args.task_id;
+}
+
 /** v1 task args → v2 subagent args (shallow copy, reverse mapping).
  * A hook deleting task_id → result has no sessionID; a hook writing
  * task_id → sessionID stays in sync. `task_id` is never emitted: the

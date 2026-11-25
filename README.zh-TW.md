@@ -224,15 +224,14 @@ bun run build
 當 `backgroundJobs.mode: "off"` 時，V2 的委派會完全維持原生：工作階段
 綁定會被停用，而已設定的全域預設組合仍會決定啟動時註冊的
 代理設定。
-在 v1 上，套用預設組合後請重新載入 OpenCode。範圍與時機請參閱
+範圍與時機請參閱
 [預設組合切換](docs/presets/preset-switching.md)，繼承的範例與優先順序規則請參閱
 [設定](docs/configuration.md#preset-inheritance)。
 
 ### 預設組合文件
 
 `.opencode/oh-my-opencode-slim.json[c]` 中的專案設定會從上層
-目錄繼承，與主機的探索方式一致：v2 會一路往上走到檔案系統
-根目錄；v1 則停在 Git 工作樹的邊界。`OPENCODE_DISABLE_PROJECT_CONFIG`
+目錄繼承，並一路往上搜尋到檔案系統根目錄。`OPENCODE_DISABLE_PROJECT_CONFIG`
 可停用往上尋找專案設定。
 越近的設定會覆寫相符的欄位。提示詞檔案與選用的
 `skills_include_local` 授權也會搜尋上層的 `.opencode` 目錄，
@@ -755,7 +754,7 @@ bunx oh-my-opencode-slim@latest companion install
 | **[多工器整合](docs/multiplexer-integration.md)** | 在 Tmux、Zellij、Herdr、cmux、kitty、WezTerm 或 Orca 窗格中即時觀看代理工作 |
 | **[Codemap](docs/skills.md#codemap)** | 產生階層式程式碼地圖，更快理解大型程式碼庫 |
 | **[Clonedeps](docs/skills.md#clonedeps)** | 把選定的相依套件原始碼複製到被忽略的本機工作區中以供檢視 |
-| **[Worktrees](docs/skills.md#worktrees)** | 使用 `.slim/worktrees/` 通道處理隔離的平行或高風險開發工作 |
+| **[Worktrees](docs/skills.md#worktrees)** | 使用 `.local/.slim/worktrees/` 通道處理隔離的平行或高風險開發工作 |
 | **[預設組合切換](docs/presets/preset-switching.md)** | 以 `/preset` 在執行期間切換代理模型的預設組合 |
 | **[Interview](docs/interview.md)** | 透過瀏覽器內的問答流程，把粗略的想法轉成結構化的 markdown 規格，再用 `/implement` 實作 |
 | **[Companion](docs/companion.md)** | 用於解析、說明與型別的浮動視窗伴侶 |
@@ -764,7 +763,7 @@ bunx oh-my-opencode-slim@latest companion install
 
 | 文件 | 涵蓋內容 |
 |-----|----------------|
-| **[安裝指南](docs/installation.md)** | 安裝外掛、使用 CLI 旗標、重設設定，以及排解安裝問題 |
+| **[安裝指南](docs/installation.md)** | 需要 OpenCode 2.4.0 以上版本。安裝外掛、使用 CLI 旗標、重設設定，以及排解安裝問題 |
 | **[OpenCode 2 介接](src/v2/codemap.md)** | 主機合約、請求處理、權限與驗證 |
 | **[執行效率](docs/runtime-efficiency.md)** | 共用的設定讀取、請求範圍內的事實、選用實作的載入與驗證 |
 | **[設定](docs/configuration.md)** | 設定檔位置、JSONC 支援、提示詞覆寫與完整的選項參考 |

@@ -54,7 +54,7 @@ describe('smartfetch/utils', () => {
     }
   });
 
-  test('bounds markdown cleaning generators below one second', () => {
+  test('bounds 1 MiB markdown cleaning generators', () => {
     const mib = 1024 * 1024;
     const PL = '"Permanent link")';
     const generators: Array<
@@ -114,9 +114,14 @@ describe('smartfetch/utils', () => {
       run(make(8192));
       const start = performance.now();
       run(make(mib));
-      expect(performance.now() - start, name).toBeLessThan(1_000);
+      // The budget guards against catastrophic backtracking, which on 1 MiB input
+      // costs orders of magnitude more than linear. The slowest generator runs
+      // ~950ms isolated and ~3s when the full suite contends for CPU, so the
+      // ceiling sits above that contention noise while still failing a real
+      // super-linear regression.
+      expect(performance.now() - start, name).toBeLessThan(10_000);
     }
-  });
+  }, 120_000);
 
   test('suppresses css-tree warnings and preserves F10 unextracted HTML', async () => {
     const originalWarn = console.warn;

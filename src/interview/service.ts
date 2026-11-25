@@ -69,6 +69,7 @@ import type {
   InterviewMessage,
   InterviewRecord,
   InterviewState,
+  SpecBlock,
 } from './types';
 
 const COMMAND_NAME = 'interview';
@@ -185,6 +186,16 @@ function lastHostMessageID(messages: InterviewMessage[]): string | undefined {
     );
 }
 
+/** Derived values only; the document is still read under lock on every poll. */
+interface InterviewSyncSnapshot {
+  fingerprint: string;
+  parseKey: string;
+  parsed: ReturnType<typeof findLatestAssistantState>;
+  fallbackState: ReturnType<typeof buildFallbackState>;
+  document: string;
+  blocks: SpecBlock[];
+}
+
 export function createInterviewService(
   ctx: PluginInput,
   config?: InterviewConfig,
@@ -259,6 +270,7 @@ export function createInterviewService(
   const activeInterviewIds = new Map<string, string>();
   const interviewsById = new Map<string, InterviewRecord>();
   const activeSyncs = new Map<string, Promise<InterviewState>>();
+  const syncSnapshots = new Map<string, InterviewSyncSnapshot>();
   const sessionBusy = new Map<string, boolean>();
   const browserOpened = new Set<string>(); // Track interviews that have opened browser
   let resolveBaseUrl: (() => Promise<string>) | null = null;
@@ -421,6 +433,7 @@ export function createInterviewService(
         interviewsById.delete(record.id);
         interviewMemory.delete(record.id);
         browserOpened.delete(record.id);
+        syncSnapshots.delete(record.id);
       });
   }
 
@@ -740,7 +753,6 @@ export function createInterviewService(
       });
     }
   }
-
   async function performSyncInterview(
     interview: InterviewRecord,
   ): Promise<InterviewState> {
@@ -763,6 +775,18 @@ export function createInterviewService(
       };
     }
     const allMessages = await loadMessages(interview.sessionID);
+    const interviewState = await refreshInterviewSnapshot(
+      interview,
+      allMessages,
+    );
+    onStateChange?.(interview.id, interviewState);
+    return interviewState;
+  }
+
+  async function refreshInterviewSnapshot(
+    interview: InterviewRecord,
+    allMessages: InterviewMessage[],
+  ): Promise<InterviewState> {
     const baseMessageID = interview.baseMessageID;
     const baseIndex = baseMessageID
       ? allMessages.findIndex((message) => message.info?.id === baseMessageID)
@@ -778,6 +802,10 @@ export function createInterviewService(
             )
           : allMessages.slice(interview.baseMessageCount)
     ).filter(isUserVisibleMessage);
+    // Compare the entire slice: earlier messages can be edited in place.
+    const fingerprint = JSON.stringify(interviewMessages);
+    const cached = syncSnapshots.get(interview.id);
+    const sameTranscript = cached?.fingerprint === fingerprint;
     const latestAssistant = [...interviewMessages]
       .reverse()
       .find((message) => message.info?.role === 'assistant');
@@ -823,10 +851,26 @@ export function createInterviewService(
       return hasInterviewStateBlock(flattenMessage(message));
     });
 
-    const parsed = findLatestAssistantState(
-      newerAssistantMessages,
-      maxQuestions,
-    );
+    const parseKey = JSON.stringify({
+      candidates: newerAssistantMessages.map((message) => ({
+        id: message.info?.id,
+        text: flattenMessage(message),
+      })),
+      appliedMessageID,
+      toolMessageID,
+      latestAssistantId,
+      hasNewerStateBearingText,
+    });
+    const parsed =
+      newerAssistantMessages.length === 0
+        ? { state: null, latestAssistantError: undefined }
+        : cached?.parseKey === parseKey
+          ? cached.parsed
+          : findLatestAssistantState(newerAssistantMessages, maxQuestions);
+    const fallbackState =
+      sameTranscript && cached
+        ? cached.fallbackState
+        : buildFallbackState(interviewMessages);
 
     const rememberedForLatest =
       remembered && !hasNewerStateBearingText ? remembered : undefined;
@@ -920,7 +964,6 @@ export function createInterviewService(
       );
     }
 
-    const fallbackState = buildFallbackState(interviewMessages);
     const effectivePatchError =
       patchError?.message ?? memoryFor(interview.id).lastPatchError;
     const effectiveState = effectivePatchError
@@ -944,7 +987,17 @@ export function createInterviewService(
         contextWindow: patchError.contextWindow,
       };
     }
-    const blocks = parseSpecBlocks(document);
+    const stableBlocks =
+      cached?.document === document ? cached.blocks : parseSpecBlocks(document);
+    const questions = state.questions.map((question) => ({
+      ...question,
+      options: [...question.options],
+    }));
+    // A consumed state supplies questions, not permission to restore an older
+    // spec. With no patch, the document remains authoritative for its summary.
+    const summary = effectiveState?.patch?.trim()
+      ? state.summary
+      : extractSummarySection(document);
 
     const interviewState: InterviewState = {
       interview,
@@ -974,17 +1027,20 @@ export function createInterviewService(
         ? 'The spec patch did not apply.'
         : (latestAssistantError ?? memory.answerHistoryError),
       isBusy: sessionBusy.get(interview.sessionID) === true,
-      summary: state.summary,
-      questions: state.questions,
+      summary,
+      questions,
       document,
-      blocks,
+      blocks: stableBlocks.map((block) => ({ ...block })),
     };
-
-    // Push state to dashboard if callback is set (dashboard mode)
-    if (onStateChange) {
-      onStateChange(interview.id, interviewState);
-    }
-
+    const snapshot: InterviewSyncSnapshot = {
+      fingerprint,
+      parseKey,
+      parsed,
+      fallbackState,
+      document,
+      blocks: stableBlocks,
+    };
+    syncSnapshots.set(interview.id, snapshot);
     return interviewState;
   }
 

@@ -1,6 +1,6 @@
 # Installation Guide
 
-The current source requires **OpenCode 2.3.0 or newer**. Published npm tags can
+The current source requires **OpenCode 2.4.0 or newer**. Published npm tags can
 lag `master`; use a local checkout when testing unreleased changes.
 
 ## For Humans
@@ -110,32 +110,30 @@ JSONC files that take precedence, ancestor `.opencode` directories and
 each project. The [discovery rules](configuration.md#config-files) apply to both
 runtime and diagnostics.
 
-OpenCode now owns child execution, same-session continuation, steering, durable
-Jobs, restart recovery and completion notifications. Slim has no job board,
-short aliases, reusable-session pool, periodic idle TODO scheduler or managed
-limits. The default task mode is `native`; `off` removes Slim task tools and
-session-preset routing by default. `sessionPresetRouting` remains independently
-selectable.
+OpenCode owns child execution, continuation, steering, durable Jobs, restart
+recovery and completion notifications. Slim limits admission to native
+execution when the queue is active. Omitting `backgroundJobs.mode` enables
+the queue. Explicit `native` enables it when `backgroundJobs.queue.enabled`
+is true or concurrency limits are configured, unless the queue is explicitly
+disabled. Mode `off` removes Slim task tools and the queue.
+`sessionPresetRouting` can be set independently.
 
 | Older setting | Current behavior |
 |---|---|
-| `backgroundJobs.mode: "managed"` | Existing loader applies `native` with a warning; choose `off` if no Slim task controls are wanted |
+| `backgroundJobs.mode: "managed"` | Uses native execution with the Slim admission queue enabled by default |
 | `backgroundJobs.enabled: false` without `mode` | Existing loader preserves the opt-out as `off`, with a warning |
-| Positive `backgroundJobs.concurrency` limits | Startup refused: Slim cannot enforce them on the native host |
-| Positive `backgroundJobs.wallClockTimeoutMs` | Startup refused for the same reason |
+| Positive `backgroundJobs.concurrency` limits | Apply to native admission when the Slim queue is active |
+| Positive `backgroundJobs.wallClockTimeoutMs` | Startup refused because the native host owns execution deadlines |
 | Old board/reuse/wake/deadline settings | Removed; no equivalent plugin mechanism is created |
 | Root `webfetch` block | Removed; use `disabled_tools: ["webfetch"]` to retain native fetch only |
 | Disabled `auto-update-checker` hook | Removed; use `autoUpdate: false` |
 | `fallback.continuationPolicy`, `fallback.initialRetryDelayMs` | Startup refused: neither controls native V2 fallback; remove the keys, even with task mode/hook off |
-| `routingBlock` | Remove the key. Native `subagent` lists the permitted agents and their descriptions; Slim no longer renders a separate `<Agents>` block |
-| Slim `agents.<name>.subagents` and preset equivalents | Replace required restrictions with [native subagent permissions](configuration.md#native-delegation-permissions), then remove the key. Loading fails rather than dropping the layer and loosening permissions |
+| `routingBlock` | Optional static inventory in the stock orchestrator prompt. The native tool supplies the permission-filtered roster by default |
+| Slim `agents.<name>.subagents` and preset equivalents | Exact names are compiled into native delegation rules for primary agents. Use [native subagent permissions](configuration.md#native-delegation-permissions) for wildcard patterns |
 
-Explicit host limits are checked before merging, even if a closer layer selects
-`off`. Errors name the source file and setting. For example:
-
-```text
-<config path>: Unsupported backgroundJobs.concurrency.providerConcurrency.openai = 2 on OpenCode v2: Slim no longer enforces this limit. Remove the key or set it to 0, then run /reload.
-```
+Explicit wall-clock limits are checked before merging, even if a closer layer
+selects `off`. Errors identify the source file and setting, such as
+`backgroundJobs.wallClockTimeoutMs = 60000`.
 
 When activation is refused, use `/plugins` → view error or `doctor`, correct the
 named file and `/reload`. Disabled features and invalid limits are different:

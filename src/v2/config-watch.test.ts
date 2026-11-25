@@ -102,7 +102,13 @@ async function withWatch(
 
 describe('getPluginConfigCandidates', () => {
   test('includes ancestor configs above a nested worktree location', () => {
-    const nested = path.join(env.projectDir, '.slim', 'worktrees', 'feature');
+    const nested = path.join(
+      env.projectDir,
+      '.local',
+      '.slim',
+      'worktrees',
+      'feature',
+    );
     const candidates = getPluginConfigCandidates(nested);
     expect(candidates).toContain(
       path.join(env.projectDir, '.opencode', 'oh-my-opencode-slim.json'),
@@ -155,7 +161,13 @@ describe('watchPluginConfigFiles scheduling', () => {
     fs.mkdirSync(configDir);
     const configPath = path.join(configDir, 'oh-my-opencode-slim.json');
     fs.writeFileSync(configPath, '{}');
-    const nested = path.join(env.projectDir, '.slim', 'worktrees', 'feature');
+    const nested = path.join(
+      env.projectDir,
+      '.local',
+      '.slim',
+      'worktrees',
+      'feature',
+    );
     fs.mkdirSync(nested, { recursive: true });
     const seam = makeWatchSeam();
     let calls = 0;

@@ -1,13 +1,11 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { withTmpDir } from '../../test-utils';
 
 // Module mocks elsewhere are process-wide; keep binary recovery isolated.
 async function runRecovery(mode: string) {
-  const dir = mkdtempSync(join(tmpdir(), 'omos-sg-recovery-'));
-  try {
+  return withTmpDir(async (dir) => {
     const source = `
       import { mock } from 'bun:test';
       import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -125,9 +123,7 @@ async function runRecovery(mode: string) {
     if (exitCode !== 0) throw new Error(`Recovery child: ${stderr}`);
     expect(stderr).not.toContain('Unhandled');
     return JSON.parse(stdout.split('REPORT:')[1]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  });
 }
 
 test('bounds retries when acquisition returns the same unexecutable binary', async () => {

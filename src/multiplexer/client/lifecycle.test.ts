@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { Multiplexer, PaneResult } from '../types';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 import {
   DIAGNOSTIC_EVENT_NO_PANE,
   DIAGNOSTIC_EVENT_PANE_CREATED,
@@ -134,6 +134,8 @@ interface SpawnCall {
   directory: string;
   parentSessionId?: string;
   subagentType?: string;
+  viewerFlavor?: string;
+  viewerSurface?: PaneSpawnOptions['viewerSurface'];
 }
 
 class FakeAdapter implements Multiplexer {
@@ -163,7 +165,7 @@ class FakeAdapter implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
-    options?: { parentSessionId?: string; subagentType?: string },
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     this.spawnCalls.push({
       sessionId,
@@ -172,6 +174,8 @@ class FakeAdapter implements Multiplexer {
       directory,
       parentSessionId: options?.parentSessionId,
       subagentType: options?.subagentType,
+      viewerFlavor: options?.viewerFlavor,
+      viewerSurface: options?.viewerSurface,
     });
     if (this.spawnBarrier) await this.spawnBarrier;
     if (this.spawnError) throw this.spawnError;

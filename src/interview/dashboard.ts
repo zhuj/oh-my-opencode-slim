@@ -15,9 +15,11 @@ import { loadPluginConfig } from '../config/loader';
 import { InterviewOutputFolderSchema } from '../config/schema';
 import { log } from '../utils';
 import {
+  createInterviewDirectoryPath,
   DEFAULT_OUTPUT_FOLDER,
   extractSummarySection,
   extractTitle,
+  normalizeOutputFolder,
   parseFrontmatter,
   parseSpecBlocks,
 } from './document';
@@ -114,28 +116,30 @@ function jitterMs(): number {
 function dedupRecovered(
   interviewId: string,
   cache: Map<string, InterviewStateEntry>,
+  rebuildingFiles: Set<Set<string>>,
 ): void {
   if (interviewId.startsWith('recovered-')) return;
   const filePath = cache.get(interviewId)?.filePath;
   if (!filePath) return;
+  for (const files of rebuildingFiles) files.add(filePath);
   for (const [id, entry] of cache) {
     if (id.startsWith('recovered-') && entry.filePath === filePath)
       cache.delete(id);
   }
 }
 
-/**
- * Check whether the cache already contains a live (non-recovered) entry
- * whose file matches the given one. Used by rebuildFromFiles to skip
- * adding a recovered entry when a live session already covers it.
- */
-function hasLiveForFile(
-  filePath: string,
+// Recovered rows never count as live ownership. Index once per rebuild so
+// scanning N documents against M cached rows is O(N + M), not O(N * M).
+function collectLiveFiles(
   cache: Map<string, InterviewStateEntry>,
-): boolean {
-  return [...cache.values()].some(
-    (e) => !e.interviewId.startsWith('recovered-') && e.filePath === filePath,
-  );
+): Set<string> {
+  const files = new Set<string>();
+  for (const entry of cache.values()) {
+    if (entry.interviewId.startsWith('recovered-')) continue;
+    const filePath = entry.filePath;
+    if (filePath) files.add(filePath);
+  }
+  return files;
 }
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -244,6 +248,8 @@ export function createDashboardServer(config: DashboardConfig): {
   // Interview state cache
   const stateCache = new Map<string, InterviewStateEntry>();
   const pendingClaims = new Map<string, PendingClaim>();
+  // Pushes can arrive while rebuilds await disk I/O; update their snapshots.
+  const rebuildingFiles = new Set<Set<string>>();
   let claimCounter = 0;
 
   function claimKey(interviewId: string, kind: PendingKind): string {
@@ -389,7 +395,11 @@ export function createDashboardServer(config: DashboardConfig): {
   let cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   // File scan cache (TTL 10s)
-  let fileCache: { items: InterviewFileItem[]; at: number } | null = null;
+  let fileCache: {
+    items: InterviewFileItem[];
+    directories: string[];
+    at: number;
+  } | null = null;
   const FILE_CACHE_TTL = 10_000;
 
   // ─── Auth ─────────────────────────────────────────────────────────
@@ -442,17 +452,205 @@ export function createDashboardServer(config: DashboardConfig): {
     return dirs;
   }
 
-  function outputFolderFor(dir: string): string {
-    const registered = [...sessions.values()]
-      .filter((session) => session.directory === dir && session.outputFolder)
-      .sort((a, b) => b.registeredAt - a.registeredAt)[0];
-    if (registered?.outputFolder) return registered.outputFolder;
+  function projectOutputFolder(dir: string): string {
     return (
       loadPluginConfig(dir, {
         silent: true,
         hostFlavor: config.hostFlavor,
       }).interview?.outputFolder ?? DEFAULT_OUTPUT_FOLDER
     );
+  }
+
+  function getInterviewDirectories(): Map<string, string> {
+    const directories = new Map<string, string>();
+    for (const dir of getKnownDirectories()) {
+      const folders = new Set<string>();
+      let fallback: string | undefined;
+      for (const session of sessions.values()) {
+        if (session.directory !== dir) continue;
+        if (session.outputFolder) {
+          folders.add(session.outputFolder);
+        } else {
+          fallback ??= projectOutputFolder(dir);
+          folders.add(fallback);
+        }
+      }
+      if (folders.size === 0) folders.add(projectOutputFolder(dir));
+      for (const folder of folders) {
+        directories.set(createInterviewDirectoryPath(dir, folder), dir);
+      }
+    }
+    return directories;
+  }
+
+  function documentDirectories(entry: InterviewStateEntry): string[] {
+    const session = sessions.get(entry.sessionID);
+    if (!session) return [...getInterviewDirectories().keys()];
+    return [
+      createInterviewDirectoryPath(
+        session.directory,
+        session.outputFolder ?? projectOutputFolder(session.directory),
+      ),
+    ];
+  }
+
+  type DocumentSnapshot = {
+    filePath: string;
+    version: string;
+    document: string;
+    blocks: ReturnType<typeof parseSpecBlocks>;
+  };
+  const documents = new WeakMap<InterviewStateEntry, DocumentSnapshot>();
+  // Explicit/pushed paths remain authoritative; inferred paths follow routing.
+  const fallbackPaths = new WeakMap<InterviewStateEntry, string>();
+  const missingPaths = new WeakMap<
+    InterviewStateEntry,
+    {
+      slug: string;
+      directories: Map<string, { path: string; version: string }>;
+    }
+  >();
+  const emptyDocument = { document: '', blocks: parseSpecBlocks('') };
+
+  async function statVersion(filePath: string): Promise<string> {
+    const stat = await fs.stat(filePath, { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  }
+
+  async function readDocument(entry: InterviewStateEntry, filePath: string) {
+    try {
+      const version = await statVersion(filePath);
+      const cached = documents.get(entry);
+      if (cached?.filePath === filePath && cached.version === version) {
+        return cached;
+      }
+      const document = await fs.readFile(filePath, 'utf8');
+      const snapshot = {
+        filePath,
+        version,
+        document,
+        blocks: parseSpecBlocks(document),
+      };
+      // Do not cache a read spanning an external write or atomic replacement.
+      if ((await statVersion(filePath)) === version) {
+        documents.set(entry, snapshot);
+      } else {
+        documents.delete(entry);
+      }
+      return snapshot;
+    } catch (error) {
+      documents.delete(entry);
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+      ) {
+        return null;
+      }
+      return undefined;
+    }
+  }
+
+  function isMissingPathError(error: unknown): boolean {
+    return (
+      error instanceof Error &&
+      'code' in error &&
+      (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+    );
+  }
+
+  async function watchDirectory(directory: string) {
+    let current = directory;
+    for (;;) {
+      try {
+        return { path: current, version: await statVersion(current) };
+      } catch (error) {
+        if (!isMissingPathError(error)) return undefined;
+        try {
+          const component = await fs.lstat(current);
+          // Existing directories and dangling symlinks cannot use a parent
+          // watch: their contents/targets can appear without parent changes.
+          if (component.isDirectory() || component.isSymbolicLink()) {
+            return undefined;
+          }
+        } catch (error) {
+          if (!isMissingPathError(error)) return undefined;
+        }
+        const parent = path.dirname(current);
+        if (parent === current) return undefined;
+        current = parent;
+      }
+    }
+  }
+
+  async function isMissingPath(candidate: string): Promise<boolean> {
+    try {
+      // lstat distinguishes an absent entry from a dangling symlink.
+      await fs.lstat(candidate);
+      return false;
+    } catch (error) {
+      return (
+        error instanceof Error &&
+        'code' in error &&
+        (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+      );
+    }
+  }
+
+  async function resolveDocument(entry: InterviewStateEntry) {
+    let filePath = entry.filePath;
+    const fallbackPath = fallbackPaths.get(entry);
+    const directories =
+      !filePath || fallbackPath === filePath ? documentDirectories(entry) : [];
+    if (
+      fallbackPath === filePath &&
+      filePath &&
+      !directories.includes(path.dirname(filePath))
+    ) {
+      filePath = '';
+      entry.filePath = '';
+      fallbackPaths.delete(entry);
+      documents.delete(entry);
+    }
+    if (filePath) {
+      return (
+        (await readDocument(entry, filePath)) ?? { ...emptyDocument, filePath }
+      );
+    }
+    let missing = missingPaths.get(entry);
+    if (!missing) {
+      missing = {
+        slug: extractResumeSlug(entry.interviewId),
+        directories: new Map(),
+      };
+      missingPaths.set(entry, missing);
+    }
+    for (const directory of directories) {
+      const previous = missing.directories.get(directory);
+      if (previous) {
+        try {
+          if ((await statVersion(previous.path)) === previous.version) continue;
+        } catch {
+          // Removed watch targets must be resolved again from an ancestor.
+        }
+      }
+      const watch = await watchDirectory(directory);
+      const candidate = path.join(directory, `${missing.slug}.md`);
+      const snapshot = await readDocument(entry, candidate);
+      if (snapshot) {
+        if (!entry.filePath) {
+          entry.filePath = candidate;
+          fallbackPaths.set(entry, candidate);
+        }
+        missingPaths.delete(entry);
+        return snapshot;
+      }
+      // Only absence is cacheable; permission and transient read errors retry.
+      if (snapshot === null && watch && (await isMissingPath(candidate))) {
+        missing.directories.set(directory, watch);
+      } else missing.directories.delete(directory);
+    }
+    return { ...emptyDocument, filePath };
   }
 
   async function discoverSessionDirectories(): Promise<void> {
@@ -482,15 +680,23 @@ export function createDashboardServer(config: DashboardConfig): {
   // ─── File Scanning ───────────────────────────────────────────────
 
   async function scanInterviewFiles(): Promise<InterviewFileItem[]> {
-    if (fileCache && Date.now() - fileCache.at < FILE_CACHE_TTL) {
-      return fileCache.items;
+    const directories = getInterviewDirectories();
+    const scanPaths = [...directories.keys()];
+    const cached = fileCache;
+    if (
+      cached &&
+      Date.now() - cached.at < FILE_CACHE_TTL &&
+      scanPaths.length === cached.directories.length &&
+      scanPaths.every(
+        (directory, index) => directory === cached.directories[index],
+      )
+    ) {
+      return cached.items;
     }
 
-    const directories = getKnownDirectories();
     const items: InterviewFileItem[] = [];
 
-    for (const dir of directories) {
-      const interviewDir = path.join(dir, outputFolderFor(dir));
+    for (const [interviewDir, dir] of directories) {
       let entries: string[];
       try {
         entries = await fs.readdir(interviewDir);
@@ -527,80 +733,80 @@ export function createDashboardServer(config: DashboardConfig): {
     }
 
     const sorted = items.sort((a, b) => a.title.localeCompare(b.title));
-    fileCache = { items: sorted, at: Date.now() };
+    fileCache = { items: sorted, directories: scanPaths, at: Date.now() };
     return sorted;
   }
 
   // ─── Failover: rebuild state from .md frontmatter ──────────────
 
   async function rebuildFromFiles(): Promise<void> {
-    const directories = getKnownDirectories();
+    const directories = getInterviewDirectories();
+    const liveFiles = collectLiveFiles(stateCache);
+    rebuildingFiles.add(liveFiles);
     let rebuilt = 0;
 
-    for (const dir of directories) {
-      const interviewDir = path.join(dir, outputFolderFor(dir));
-      let entries: string[];
-      try {
-        entries = await fs.readdir(interviewDir);
-      } catch {
-        continue;
-      }
-
-      for (const entry of entries) {
-        if (!entry.endsWith('.md')) continue;
-
-        let content: string;
+    try {
+      for (const [interviewDir, dir] of directories) {
+        let entries: string[];
         try {
-          content = await fs.readFile(path.join(interviewDir, entry), 'utf8');
+          entries = await fs.readdir(interviewDir);
         } catch {
           continue;
         }
 
-        // Parse frontmatter for session ID
-        const fm = parseFrontmatter(content);
-        if (!fm?.sessionID) continue;
+        for (const entry of entries) {
+          if (!entry.endsWith('.md')) continue;
 
-        // Extract title and summary using shared extractors
-        const title = extractTitle(content) || entry.replace(/\.md$/, '');
-        const summary = extractSummarySection(content);
+          let content: string;
+          try {
+            content = await fs.readFile(path.join(interviewDir, entry), 'utf8');
+          } catch {
+            continue;
+          }
 
-        const filePath = path.join(interviewDir, entry);
-        const interviewId = `recovered-${crypto.createHash('sha256').update(filePath).digest('hex')}`;
+          const filePath = path.join(interviewDir, entry);
+          const interviewId = `recovered-${crypto.createHash('sha256').update(filePath).digest('hex')}`;
+          const fm = parseFrontmatter(content);
+          if (!fm?.sessionID) continue;
 
-        // Only add if not already in cache (sessions may have re-pushed)
-        if (stateCache.has(interviewId)) continue;
+          // Extract title and summary using shared extractors
+          const title = extractTitle(content) || entry.replace(/\.md$/, '');
+          const summary = extractSummarySection(content);
 
-        if (hasLiveForFile(filePath, stateCache)) continue;
+          if (stateCache.has(interviewId) || liveFiles.has(filePath)) continue;
 
-        stateCache.set(interviewId, {
-          interviewId,
-          sessionID: fm.sessionID,
-          idea: title,
-          mode: 'session-disconnected',
-          summary,
-          title,
-          questions: [],
-          pendingAnswers: null,
-          lastUpdatedAt: fm.updatedAt
-            ? new Date(fm.updatedAt).getTime()
-            : Date.now(),
-          filePath,
-          nudgeAction: null,
-          pendingBlockComment: null,
-          pendingChatMessage: null,
-        });
-
-        // Also register the session directory
-        if (!sessions.has(fm.sessionID)) {
-          sessions.set(fm.sessionID, {
+          stateCache.set(interviewId, {
+            interviewId,
             sessionID: fm.sessionID,
-            directory: dir,
-            pid: 0,
-            registeredAt: Date.now(),
+            idea: title,
+            mode: 'session-disconnected',
+            summary,
+            title,
+            questions: [],
+            pendingAnswers: null,
+            lastUpdatedAt: fm.updatedAt
+              ? new Date(fm.updatedAt).getTime()
+              : Date.now(),
+            filePath,
+            nudgeAction: null,
+            pendingBlockComment: null,
+            pendingChatMessage: null,
           });
+
+          // Also register the session directory
+          if (!sessions.has(fm.sessionID)) {
+            sessions.set(fm.sessionID, {
+              sessionID: fm.sessionID,
+              directory: dir,
+              pid: 0,
+              registeredAt: Date.now(),
+            });
+          }
+          rebuilt++;
         }
-        rebuilt++;
       }
+    } finally {
+      rebuildingFiles.delete(liveFiles);
     }
 
     if (rebuilt > 0) {
@@ -669,11 +875,16 @@ export function createDashboardServer(config: DashboardConfig): {
 
     // ── Health check (no auth required) ────────────────────────────
     if (request.method === 'GET' && pathname === '/api/health') {
-      // Stable signature: changes only when stateCache or session count changes
-      const sig = [...stateCache.values()]
-        .map((e) => `${e.interviewId}:${e.mode}:${e.lastUpdatedAt}`)
-        .sort()
-        .join('|');
+      // Keyed so predictable IDs cannot be recovered from this public value.
+      const sig = crypto
+        .createHmac('sha256', authToken)
+        .update(
+          [...stateCache.values()]
+            .map((e) => `${e.interviewId}:${e.mode}:${e.lastUpdatedAt}`)
+            .sort()
+            .join('|'),
+        )
+        .digest('hex');
       sendJson(response, 200, {
         status: 'ok',
         sessions: sessions.size,
@@ -777,7 +988,7 @@ export function createDashboardServer(config: DashboardConfig): {
             directory: session?.directory,
           };
         });
-      const outputFolder = config.outputFolder;
+      const outputFolder = normalizeOutputFolder(config.outputFolder);
       setSessionCookie(response);
       sendHtml(
         response,
@@ -853,7 +1064,6 @@ export function createDashboardServer(config: DashboardConfig): {
         pid: pid ?? 0,
         registeredAt: Date.now(),
       });
-      fileCache = null; // invalidate
       sendJson(response, 200, { status: 'registered' });
       return;
     }
@@ -918,7 +1128,7 @@ export function createDashboardServer(config: DashboardConfig): {
         pendingBlockComment: null,
         pendingChatMessage: null,
       });
-      dedupRecovered(interviewId, stateCache);
+      dedupRecovered(interviewId, stateCache, rebuildingFiles);
       fileCache = null;
 
       const interviewUrl = `${baseUrl}/interview/${interviewId}`;
@@ -1018,13 +1228,16 @@ export function createDashboardServer(config: DashboardConfig): {
         if (state.summary) existing.summary = state.summary;
         if (state.title) existing.title = state.title;
         if (state.questions) existing.questions = state.questions;
-        if (state.filePath) existing.filePath = state.filePath;
+        if (state.filePath) {
+          existing.filePath = state.filePath;
+          fallbackPaths.delete(existing);
+        }
         if (state.document !== undefined) existing.document = state.document;
         if (state.document !== undefined)
           existing.blocks = state.blocks ?? parseSpecBlocks(state.document);
         else if (state.blocks !== undefined) existing.blocks = state.blocks;
         existing.lastUpdatedAt = Date.now();
-        dedupRecovered(interviewId, stateCache);
+        dedupRecovered(interviewId, stateCache, rebuildingFiles);
         broadcastSse(interviewId, existing);
       } else {
         // New entry
@@ -1050,6 +1263,7 @@ export function createDashboardServer(config: DashboardConfig): {
               : undefined),
         };
         stateCache.set(interviewId, entry);
+        dedupRecovered(interviewId, stateCache, rebuildingFiles);
         broadcastSse(interviewId, entry);
       }
 
@@ -1080,31 +1294,11 @@ export function createDashboardServer(config: DashboardConfig): {
         return;
       }
 
-      // Read .md document from disk for completed/disconnected interviews
-      let document = '';
-      let markdownPath = entry.filePath;
-      if (entry.filePath) {
-        try {
-          document = await fs.readFile(entry.filePath, 'utf8');
-        } catch {
-          // File may not exist yet
-        }
-      } else {
-        // Fallback: try to find file in known session directories
-        const dirs = getKnownDirectories();
-        for (const dir of dirs) {
-          const slug = extractResumeSlug(interviewId);
-          const candidate = path.join(dir, outputFolderFor(dir), `${slug}.md`);
-          try {
-            document = await fs.readFile(candidate, 'utf8');
-            markdownPath = candidate;
-            entry.filePath = candidate;
-            break;
-          } catch {
-            // Not in this directory
-          }
-        }
-      }
+      const {
+        document,
+        blocks,
+        filePath: markdownPath,
+      } = await resolveDocument(entry);
 
       // Use just the filename to avoid leaking absolute paths
       const displayPath = markdownPath
@@ -1133,7 +1327,7 @@ export function createDashboardServer(config: DashboardConfig): {
         document,
         lastUpdatedAt: entry.lastUpdatedAt,
         nudgeAction: entry.nudgeAction,
-        blocks: parseSpecBlocks(document),
+        blocks,
       });
       return;
     }
@@ -1647,7 +1841,6 @@ export function createDashboardServer(config: DashboardConfig): {
     registerSession: (info) => {
       const wasEmpty = sessions.size === 0;
       sessions.set(info.sessionID, info);
-      fileCache = null;
       // Rebuild from files when first session registers (failover recovery)
       if (wasEmpty) {
         rebuildFromFiles().catch(() => {});
@@ -1690,7 +1883,7 @@ export function createDashboardServer(config: DashboardConfig): {
         }
       }
       stateCache.set(entry.interviewId, entry);
-      dedupRecovered(entry.interviewId, stateCache);
+      dedupRecovered(entry.interviewId, stateCache, rebuildingFiles);
       broadcastSse(entry.interviewId, entry);
     },
     getState: (id) => stateCache.get(id),

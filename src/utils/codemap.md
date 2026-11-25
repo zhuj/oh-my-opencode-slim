@@ -1,5 +1,7 @@
 # src/utils/
 
+**Last Updated:** 2026-11-15
+
 ## Responsibility
 
 Centralized utilities and shared abstractions used across the oh-my-opencode-slim plugin. This folder provides:
@@ -115,7 +117,9 @@ export { extractZip } from './zip-extractor';
 ```
 
 This allows consumers to import from `src/utils` rather than individual files.
-Session metadata, the opencode client accessor, and the type-only call-shape contract are intentionally imported directly from their modules (not re-exported).
+The snapshot store is imported directly by the task-session manager. Session
+metadata, the opencode client accessor, and the type-only call-shape contract
+are also imported directly from their modules (not re-exported).
 
 ## Files
 

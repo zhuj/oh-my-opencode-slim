@@ -3,6 +3,7 @@ import type { PluginConfig } from '../config';
 import { CouncilConfigSchema } from '../config/council-schema';
 import { RuntimeConfig } from '../config/runtime';
 import { createAgents, getAgentConfigs } from './index';
+import { prependBaseAgentPrompt } from './prompt-layers';
 
 const TEST_DIRECTORY = 'runtime-test-agents-display-name';
 function runtimeFor(config: PluginConfig | undefined = {}) {
@@ -43,7 +44,9 @@ describe('displayName', () => {
       );
       expect(configs.researcher.mode).toBe('subagent');
       expect(configs.explorer.hidden).toBe(true);
-      expect(configs.orchestrator.prompt).toBe('Brief @researcher.');
+      expect(configs.orchestrator.prompt).toBe(
+        prependBaseAgentPrompt('Brief @researcher.'),
+      );
     },
   );
 

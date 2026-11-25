@@ -31,15 +31,16 @@ import {
 } from 'bun:test';
 import * as fs from 'node:fs';
 import { existsSync, readdirSync as readDirSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
+import { Schema } from 'effect';
 import type { BundledSkillInfo } from '../cli/custom-skills';
 import { withTuiAttachment } from '../companion/attachment-test-helper';
 import { stateFilePath } from '../companion/manager';
 import { RuntimeConfig } from '../config/runtime';
 import { acquireMarketplaceLease } from '../marketplace/lease';
 import { MarketplaceStore } from '../marketplace/store';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { flushLoggerForTesting } from '../utils/logger';
 import { compilePermissionPolicy } from './permissions';
 import { createV2Setup } from './setup';
@@ -434,7 +435,7 @@ describe('createV2Setup e2e', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-setup-e2e-'));
+    fixtureRoot = createTmpDir('omo-v2-setup-e2e-');
     projectDir = path.join(fixtureRoot, 'project');
     configDir = path.join(fixtureRoot, 'config');
     logDir = path.join(fixtureRoot, 'logs');
@@ -444,6 +445,13 @@ describe('createV2Setup e2e', () => {
       // Minimal fixture: empty plugin config with the companion disabled so
       // factory init stays hermetic (no user config, no side processes).
       JSON.stringify({ companion: { enabled: false } }),
+    );
+    // This suite exercises the upstream native-mode baseline. Queue-specific
+    // cases explicitly enable admission and use a complete native tool schema.
+    await mkdir(configDir, { recursive: true });
+    await Bun.write(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({ backgroundJobs: { mode: 'native' } }),
     );
     process.env.OPENCODE_CONFIG_DIR = configDir;
     process.env.XDG_CONFIG_HOME = path.join(fixtureRoot, 'xdg-config');
@@ -458,7 +466,7 @@ describe('createV2Setup e2e', () => {
       if (!(key in originalEnv)) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
-    await rm(fixtureRoot, { recursive: true, force: true });
+    removeTmpDir(fixtureRoot);
   });
 
   test('registers agents, tools, commands, mcp, and hooks on a full ctx', async () => {
@@ -503,6 +511,200 @@ describe('createV2Setup e2e', () => {
 
     await cleanup();
     expect(calls.disposed.length).toBeGreaterThan(0);
+  }, 20_000);
+
+  test('native admission gates dependencies and preserves native prompts and results', async () => {
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: { enabled: false },
+        interview: { enabled: false },
+        sidebar: false,
+        sessionPresetRouting: false,
+        backgroundJobs: {
+          mode: 'native',
+          queue: { enabled: true },
+          concurrency: { defaultConcurrency: 1 },
+        },
+      }),
+    );
+    const { ctx, calls, events, nativeSubagent } =
+      makeMockV2Context(projectDir);
+    const parentID = 'ses_queue_parent';
+    const admitted: Array<{ sessionID: string; prompt: string }> = [];
+    const promptHooks: Array<(event: never) => Promise<void>> = [];
+    const originalHook = ctx.session.hook.bind(ctx.session);
+    ctx.session.hook = (async (
+      name: string,
+      callback: (event: never) => Promise<void>,
+    ) => {
+      if (name === 'prompt') promptHooks.push(callback);
+      return originalHook(name as never, callback);
+    }) as typeof ctx.session.hook;
+    ctx.agent.list = async () => ({
+      data: [
+        {
+          id: 'explorer',
+          model: { providerID: 'ollama', id: 'qwen:latest' },
+          permissions: [],
+        },
+      ],
+    });
+    ctx.session.get = async ({ sessionID }) => ({
+      id: sessionID,
+      directory: projectDir,
+      agent: sessionID === parentID ? 'orchestrator' : 'explorer',
+      ...(sessionID === parentID ? {} : { parentID }),
+      model: { providerID: 'ollama', id: 'qwen:latest' },
+    });
+    ctx.session.list = async () => ({ data: [], cursor: {} });
+    const native = nativeSubagent as typeof nativeSubagent & { input: unknown };
+    native.input = Schema.Struct({
+      agent: Schema.String,
+      description: Schema.String,
+      prompt: Schema.String,
+      model: Schema.optionalKey(Schema.String),
+      sessionID: Schema.optionalKey(
+        Schema.String.check(Schema.isStartingWith('ses')),
+      ),
+    });
+    const emit = (
+      sessionID: string,
+      seq: number,
+      type: string,
+      data: Record<string, unknown> = {},
+    ) => {
+      events.push({
+        type,
+        created: seq,
+        location: ctx.location,
+        durable: { aggregateID: sessionID, seq },
+        data: { sessionID, ...data },
+      });
+    };
+    native.execute = async (input, context) => {
+      const args = input as Record<string, unknown>;
+      expect(args.id).toBeUndefined();
+      expect(args.depends_on).toBeUndefined();
+      const sessionID = `ses_queue_child_${admitted.length + 1}`;
+      await (
+        context as { progress: (update: unknown) => Promise<void> }
+      ).progress({ sessionID });
+      const messageID = `msg_queue_${sessionID}`;
+      const prompt = { text: args.prompt as string };
+      for (const callback of promptHooks) {
+        await callback({ sessionID, messageID, prompt } as never);
+      }
+      admitted.push({ sessionID, prompt: prompt.text });
+      emit(sessionID, 1, 'session.inbox.enqueued', { inboxID: messageID });
+      emit(sessionID, 2, 'session.inbox.delivered', { inboxID: messageID });
+      emit(sessionID, 3, 'session.execution.started');
+      return {
+        output: {
+          sessionID,
+          status: 'running',
+          output: 'Native background work',
+        },
+        content: 'Native background work',
+        metadata: { sessionID, status: 'running' },
+      };
+    };
+    const cleanup = await createV2Setup()(ctx);
+    const { acquireNativeAdmissionRuntime } = await import(
+      './native-admission'
+    );
+    const lease = acquireNativeAdmissionRuntime(projectDir, {
+      defaultConcurrency: 1,
+    });
+    const originalAcquire = lease.scheduler.acquire.bind(lease.scheduler);
+    const queued = Promise.withResolvers<void>();
+    const acquisition = spyOn(lease.scheduler, 'acquire').mockImplementation(
+      (request) => {
+        const ticket = originalAcquire(request);
+        if (request.id === 'verify') queued.resolve();
+        return ticket;
+      },
+    );
+    const context = {
+      sessionID: parentID,
+      id: 'call_queue',
+      signal: new AbortController().signal,
+      progress: async () => {},
+    };
+    const execute = async (args: Record<string, unknown>) => {
+      const schema = native.input as {
+        '~standard': {
+          validate: (
+            input: unknown,
+          ) => Promise<{ value: unknown; issues?: unknown }>;
+        };
+      };
+      const checked = await schema['~standard'].validate(args);
+      expect(checked.issues).toBeUndefined();
+      return native.execute(checked.value, context) as Promise<
+        Record<string, unknown>
+      >;
+    };
+    try {
+      const first = await execute({
+        agent: 'explorer',
+        description: 'Build',
+        prompt: 'Build the feature.',
+        id: 'build',
+      });
+      expect(first.output).toEqual({
+        sessionID: 'ses_queue_child_1',
+        status: 'running',
+        output: 'Native background work',
+      });
+      expect(first.metadata).toEqual(
+        expect.objectContaining({
+          id: 'build',
+          sessionID: 'ses_queue_child_1',
+        }),
+      );
+      const second = execute({
+        agent: 'explorer',
+        description: 'Verify',
+        prompt: 'Check the feature.',
+        id: 'verify',
+        depends_on: ['build'],
+      });
+      void second.catch(() => undefined);
+      await queued.promise;
+      expect(admitted).toEqual([
+        { sessionID: 'ses_queue_child_1', prompt: 'Build the feature.' },
+      ]);
+      const queueList = calls.toolAdds.find(
+        (tool) => tool.name === 'task_queue_list',
+      );
+      if (!queueList) throw new Error('task_queue_list was not registered');
+      const page = (await queueList.execute({}, context)) as {
+        content: string;
+      };
+      expect(JSON.parse(page.content).admissions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'verify', lifecycle_state: 'queued' }),
+        ]),
+      );
+      emit('ses_queue_child_1', 4, 'session.execution.succeeded');
+      await second;
+      expect(admitted[1]).toEqual({
+        sessionID: 'ses_queue_child_2',
+        prompt: 'Check the feature.',
+      });
+      const wait = calls.toolAdds.find((tool) => tool.name === 'task_wait');
+      if (!wait) throw new Error('task_wait was not registered');
+      const waited = wait.execute({ ids: ['verify'] }, context);
+      emit('ses_queue_child_2', 4, 'session.execution.succeeded');
+      expect(
+        JSON.parse(((await waited) as { content: string }).content),
+      ).toEqual(expect.objectContaining({ state: 'completed' }));
+    } finally {
+      acquisition.mockRestore();
+      await lease.release();
+      await cleanup();
+    }
   }, 20_000);
 
   test('session preset RPC and native execute bind one captured team before progress and first prompt', async () => {
@@ -556,6 +758,7 @@ describe('createV2Setup e2e', () => {
     );
     const config = JSON.stringify({
       companion: { enabled: false },
+      backgroundJobs: { mode: 'native' },
       preset: 'A',
       agents: {
         orchestrator: { displayName: 'lead-team' },
@@ -2041,8 +2244,8 @@ describe('createV2Setup e2e', () => {
       '1.0.0',
       'v2.2.7',
       '2.2.9',
-      '2.3.0-dev',
-      '2.3.0-rc.1+build',
+      '2.4.0-dev',
+      '2.4.0-rc.1+build',
     ]) {
       test(`rejects ${version} before any registration`, async () => {
         const { ctx, calls } = makeMockV2Context(projectDir);
@@ -2055,7 +2258,7 @@ describe('createV2Setup e2e', () => {
       }, 20_000);
     }
 
-    for (const version of ['2.3.0', '2.3.0+build', 'v2.3.0', '3.0.0']) {
+    for (const version of ['2.4.0', '2.4.0+build', 'v2.4.0', '3.0.0']) {
       test(`accepts ${version} and completes registration`, async () => {
         const { ctx, calls } = makeMockV2Context(projectDir);
         setVersion(ctx, version);
@@ -2084,7 +2287,7 @@ describe('createV2Setup e2e', () => {
       setVersion(ctx, '1.0.0');
       const reduced = { app: ctx.app } as unknown as V2Context;
       await expect(createV2Setup()(reduced)).rejects.toThrow(
-        /requires OpenCode 2.3.0/,
+        /requires OpenCode 2.4.0/,
       );
     }, 20_000);
 
@@ -2097,7 +2300,7 @@ describe('createV2Setup e2e', () => {
         location: ctx.location,
       } as unknown as V2Context;
       await expect(createV2Setup()(embedded)).rejects.toThrow(
-        /requires OpenCode 2.3.0/,
+        /requires OpenCode 2.4.0/,
       );
     }, 20_000);
   });
@@ -3693,7 +3896,8 @@ describe('createV2Setup e2e', () => {
 
     const cleanup = await createV2Setup()(ctx);
     try {
-      expect(skillReads).toBe(0);
+      // No supplemental skills need a collision scan in this fixture.
+      expect(skillReads).toBe(1); // initial isolated command inventory
       calls.rebuildSkills();
       expect(calls.skillAdds.map(({ id }) => id)).toContain('deepwork');
       await calls.activatePlugins();
@@ -3706,8 +3910,9 @@ describe('createV2Setup e2e', () => {
         headers: {},
         body: {},
       };
+      const readsBeforeRequest = skillReads;
       await calls.modelRequestHookCb?.(request);
-      expect(skillReads).toBe(1);
+      expect(skillReads).toBe(readsBeforeRequest + 1);
       inventory = [];
       includeBundled = false;
       await expect(calls.modelRequestHookCb?.(request)).rejects.toThrow(
@@ -4415,7 +4620,9 @@ describe('createV2Setup e2e', () => {
         expect.objectContaining({ action: 'host-only_*', effect: 'deny' }),
       );
       await flushLoggerForTesting();
-      expect(readPluginLog()).toContain('[v2] agents registered {"count":5}');
+      expect(readPluginLog()).toContain(
+        '[v2] agent draft applied {"count":5,"names":[',
+      );
       expect(await earlyPrompt).toMatchObject({
         message: 'transient inference refresh',
       });
@@ -4870,7 +5077,10 @@ describe('createV2Setup e2e', () => {
       path.join(configDir, 'oh-my-opencode-slim.json'),
       JSON.stringify({
         companion: { enabled: false },
-        backgroundJobs: { sameProviderPolicy: { openai: 'foreground' } },
+        backgroundJobs: {
+          mode: 'native',
+          sameProviderPolicy: { openai: 'foreground' },
+        },
       }),
     );
     const { ctx, calls } = makeMockV2Context(projectDir);

@@ -1,10 +1,14 @@
 # src/tools/
 
+**Last Updated:** 2026-10-20
+
 ## Responsibility
 
 Centralized tool factory and registry for the OpenCode plugin system. This directory defines all executable tools exposed to OpenCode agents, including:
 
-- **Task lifecycle tools**: Background task communication, cancellation, status (with live-status policy), results, revival, and HITL continuation control
+- **Native-session lifecycle tools**: Retained background task listing, communication, request replies, cancellation, status (with live-status policy), results, and revival
+- **Logical scheduler tools**: Admission queue inspection/management, dependency inspection, and completion waits; separate from native child-session lifecycle controls
+- **HITL continuation control**: Explicit external user waits through `wait_for_user` on v1; v2 uses the host's native `question` boundary
 - **Code intelligence tools**: AST-grep pattern matching and transformation across languages
 - **Web capabilities**: Smart web fetching with caching and content extraction
 - **ACP integration**: External agent protocol execution

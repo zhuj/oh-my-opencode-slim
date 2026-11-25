@@ -1,4 +1,8 @@
-import { resolveEffectiveSkills } from '../cli/skills';
+import {
+  resolveSkillSelection,
+  type SkillSelection,
+  skillSelectionValues,
+} from '../cli/skills';
 import { AGENT_ALIASES, ALL_AGENT_NAMES } from './constants';
 import { mergeAgentOverrides } from './presets';
 import type { AgentOverrideConfig, PluginConfig } from './schema';
@@ -142,6 +146,33 @@ function reconcileAliasSkillDirectives(
   return result;
 }
 
+/** Local discovery supplies literal IDs, never directive tokens. */
+export function resolveAgentSkillSelection(
+  name: string,
+  override: AgentOverrideConfig,
+  sources: {
+    readonly localNames?: readonly string[];
+    readonly defaults?: readonly string[];
+  } = {},
+): SkillSelection {
+  const explicitOverrides = new Set(
+    [...(override.skills ?? []), ...(override.skills_add ?? [])]
+      .filter((token) => /^[!?]/.test(token))
+      .map((token) => token.slice(1)),
+  );
+  return resolveSkillSelection({
+    agentName: name,
+    base: override.skills,
+    add: override.skills_add,
+    remove: override.skills_remove,
+    defaults: sources.defaults,
+    localNames:
+      override.skills_include_local === true
+        ? sources.localNames?.filter((skill) => !explicitOverrides.has(skill))
+        : [],
+  });
+}
+
 /**
  * Fold per-agent skill directives (`skills_add` / `skills_remove` /
  * `skills_include_local`) into the effective `skills` list so downstream
@@ -168,17 +199,10 @@ export function normalizeAgentSkillDirectives(
     }
 
     changed = true;
-    const additions =
-      override.skills_include_local === true
-        ? [...(override.skills_add ?? []), ...localSkillNames]
-        : override.skills_add;
-    const effective = resolveEffectiveSkills(
-      name,
-      override.skills,
-      additions,
-      override.skills_remove,
-      defaultSkills[name],
-    );
+    const effective = resolveAgentSkillSelection(name, override, {
+      localNames: localSkillNames,
+      defaults: defaultSkills[name],
+    });
     const {
       skills: _skills,
       skills_add: _skillsAdd,
@@ -187,8 +211,13 @@ export function normalizeAgentSkillDirectives(
       ...rest
     } = override;
     const entry: AgentOverrideConfig = { ...rest };
-    if (effective !== undefined) {
-      entry.skills = effective;
+    if (
+      override.skills !== undefined ||
+      override.skills_add?.length ||
+      override.skills_remove?.length ||
+      (override.skills_include_local === true && localSkillNames.length)
+    ) {
+      entry.skills = skillSelectionValues(effective);
     }
     result[name] = entry;
   }

@@ -8,8 +8,8 @@ import {
   test,
 } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { createTmpDir, removeTmpDir } from './test-utils';
 import tuiPlugin, { readConfigState, readTuiGates } from './tui';
 import { readTuiGatesOnly } from './tui-gates';
 
@@ -29,7 +29,7 @@ const ENV_KEYS = [
 ] as const;
 
 function makeTestEnvironment(): TestEnvironment {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-gates-'));
+  const root = createTmpDir('omos-tui-gates-');
   const projectDir = path.join(root, 'project');
   fs.mkdirSync(projectDir, { recursive: true });
   const original = Object.fromEntries(
@@ -147,7 +147,7 @@ describe('TUI feature gates', () => {
 
   afterEach(() => {
     env.restore();
-    fs.rmSync(env.root, { recursive: true, force: true });
+    removeTmpDir(env.root);
   });
 
   test('question timeout defaults off and follows the configured value', () => {
@@ -279,11 +279,11 @@ describe('TUI feature gates', () => {
     expect(cleanup).toBeUndefined();
   });
 
-  test('surfaces a rejected positive limit and clears it after repair', () => {
+  test('surfaces a rejected wall-clock limit and clears it after repair', () => {
     writeUserConfig({ backgroundJobs: { mode: 'off' } });
     const good = readTuiGates(env.projectDir, 'v2');
     writeUserConfig({
-      backgroundJobs: { concurrency: { providerConcurrency: { openai: 2 } } },
+      backgroundJobs: { wallClockTimeoutMs: 60_000 },
     });
     const refused = readTuiGates(env.projectDir, 'v2', true);
     expect(refused.readFailed).toBe(false);
@@ -296,6 +296,30 @@ describe('TUI feature gates', () => {
     const repaired = readTuiGates(env.projectDir, 'v2', true);
     expect(repaired.gates.configInvalid).toBe(false);
     expect(repaired.fingerprint).not.toBe(refused.fingerprint);
+  });
+
+  test('inherited admission concurrency enables the queue without changing preset routing', () => {
+    writeUserConfig({ backgroundJobs: { mode: 'native' } });
+    const native = readTuiGates(env.projectDir, 'v2').gates;
+    expect(native.admissionQueueEnabled).toBe(false);
+    expect(native.presetRouting).toBe(true);
+
+    writeProjectConfig(env.projectDir, {
+      backgroundJobs: { concurrency: { providerConcurrency: { openai: 2 } } },
+    });
+    const limited = readTuiGates(env.projectDir, 'v2', true).gates;
+    expect(limited.configInvalid).toBe(false);
+    expect(limited.admissionQueueEnabled).toBe(true);
+    expect(limited.presetRouting).toBe(true);
+
+    writeProjectConfig(env.projectDir, {
+      backgroundJobs: { mode: 'off', queue: { enabled: true } },
+      sessionPresetRouting: true,
+    });
+    const off = readTuiGates(env.projectDir, 'v2', true).gates;
+    expect(off.configInvalid).toBe(false);
+    expect(off.admissionQueueEnabled).toBe(false);
+    expect(off.presetRouting).toBe(true);
   });
 
   test('v2 off disables session preset routing without disabling preset editing', () => {

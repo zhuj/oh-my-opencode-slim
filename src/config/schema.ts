@@ -1,10 +1,13 @@
 import { z } from 'zod';
 import { MarketplacePackageIdSchema } from '../marketplace/id-schema';
+import { SkillCommandModeSchema } from '../skill-command-mode';
+import { parseModelReference } from '../utils/session';
 import { AGENT_THEME_COLORS, STRING_ONLY_PERMISSION_KEYS } from './constants';
 import { CouncilConfigSchema } from './council-schema';
 import { ProviderModelIdSchema } from './model-id-schema';
+import { isLegacyModelSentinel } from './model-sentinel';
 
-export { ProviderModelIdSchema } from './model-id-schema';
+export { ProviderModelIdSchema };
 
 // Permission schemas — mirror the SDK's PermissionConfig type with shallow
 // validation. Action values are validated; unknown tool keys pass through.
@@ -54,22 +57,44 @@ const AgentColorSchema = z.union([
 // Agent override configuration (distinct from SDK's AgentConfig)
 const ModelInheritanceSourceSchema = z.enum(['session', 'orchestrator']);
 
+// Agent configs also accept bare host model IDs and legacy model sentinels.
+const AgentModelIdSchema = z
+  .string()
+  .refine(
+    (value) => parseModelReference(value) !== null,
+    'Use provider/model[#variant]',
+  );
+const ChainModelIdSchema = AgentModelIdSchema.refine(
+  (value) => !isLegacyModelSentinel(value),
+  'Selected-model aliases apply to a scalar model. For a fallback chain use inheritModelFrom.',
+);
+
+export const SubagentScopeSchema = z.array(
+  z
+    .string()
+    .refine(
+      (value) => /^@?[a-z][a-z0-9_-]*$/i.test(value.trim()),
+      'Expected a specialist agent name or @mention',
+    ),
+);
+
 export const AgentOverrideConfigSchema = z
   .object({
     model: z
       .union([
-        z.string(),
+        AgentModelIdSchema,
         z
           .array(
             z.union([
-              z.string(),
+              ChainModelIdSchema,
               z.object({
-                id: z.string(),
+                id: ChainModelIdSchema,
                 variant: z.string().optional(),
               }),
             ]),
           )
           .min(1),
+        z.object({ dynamic: z.enum(['selected']) }),
       ])
       .optional(),
     inheritModelFrom: ModelInheritanceSourceSchema.optional(),
@@ -92,7 +117,7 @@ export const AgentOverrideConfigSchema = z
       .boolean()
       .optional()
       .describe(
-        "When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees to this agent's effective skills before `skills_remove`. Global and external skill sources are excluded.",
+        'When true, adds valid skills from the current/ancestor project `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees and accepted supplemental resource roots before `skills_remove`. Global and external skill sources are excluded.',
       ),
     mcps: z.array(z.string()).optional(), // MCPs this agent can use ("*" = all, "!item" = exclude)
     prompt: z.string().min(1).optional(),
@@ -103,6 +128,13 @@ export const AgentOverrideConfigSchema = z
       'Agent display color as #RRGGBB or an OpenCode theme color',
     ),
     description: z.string().min(1).optional(),
+    primary: z
+      .boolean()
+      .optional()
+      .describe('Expose a custom agent in the host primary-agent roster.'),
+    subagents: SubagentScopeSchema.optional().describe(
+      'Restrict a primary agent to the listed delegates using native subagent permissions. An explicit delegation permission takes precedence.',
+    ),
     permission: PermissionConfigSchema.optional(), // tool-level permission rules enforced by the SDK
   })
   .strict();
@@ -365,6 +397,10 @@ export const PresetAgentsSchema = z.record(
   AgentOverrideConfigSchema,
 );
 
+/** Dynamic model reference resolved at runtime (e.g. the UI-selected model).
+ *  `dynamic` is an enum so additional strategies can be added later. */
+export type DynamicModelRef = { dynamic: 'selected' };
+
 export type Preset = z.infer<typeof PresetAgentsSchema>;
 
 const MarketplacePackageIdsSchema = z
@@ -489,6 +525,13 @@ export const InterviewOutputFolderSchema = z
     'outputFolder must be a relative path without parent-directory traversal',
   );
 
+const ResourcePrefixSchema = z
+  .string()
+  .regex(
+    /^(?![\\/])(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/,
+    'resource prefixes must be relative paths without parent-directory traversal',
+  );
+
 export const InterviewConfigSchema = z.object({
   enabled: z
     .boolean()
@@ -516,6 +559,25 @@ export const InterviewConfigSchema = z.object({
 
 export type InterviewConfig = z.infer<typeof InterviewConfigSchema>;
 
+const AdmissionLimitSchema = z.number().int().min(0).max(1000);
+const BackgroundAdmissionConcurrencySchema = z
+  .object({
+    defaultConcurrency: AdmissionLimitSchema.optional().describe(
+      'Default open admission cap. 0 means unlimited.',
+    ),
+    providerConcurrency: z
+      .record(z.string().min(1), AdmissionLimitSchema)
+      .optional()
+      .describe('Caps by provider. A cap of 0 is unlimited for that provider.'),
+    modelConcurrency: z
+      .record(z.string().min(1), AdmissionLimitSchema)
+      .optional()
+      .describe(
+        'Caps by provider/model. Model overrides provider, then the default.',
+      ),
+  })
+  .strict();
+
 const BackgroundJobsConfigStrictSchema = z.object({
   strategy: z
     .never({
@@ -524,11 +586,22 @@ const BackgroundJobsConfigStrictSchema = z.object({
     })
     .optional(),
   mode: z
-    .enum(['native', 'off'])
+    .enum(['managed', 'native', 'off'])
     .optional()
     .describe(
-      'Slim task controls: "native" (default) exposes task_status, task_cancel, task_reply and task_report; "off" registers none. Both use the native OpenCode lifecycle. Session preset routing defaults to on in native and off in off; sessionPresetRouting overrides that default.',
+      'OpenCode owns execution in every mode. An omitted mode or the legacy "managed" value enables Slim admission and task controls. "native" keeps native task controls and enables admission when configured. "off" disables Slim task tools and admission. The separate sessionPresetRouting setting overrides preset routing.',
     ),
+  queue: z
+    .object({
+      enabled: z
+        .boolean()
+        .optional()
+        .describe(
+          'Override admission queue enablement. mode "off" disables the queue.',
+        ),
+    })
+    .strict()
+    .optional(),
   enabled: z
     .never({
       error: 'backgroundJobs.enabled was removed; use backgroundJobs.mode',
@@ -588,12 +661,7 @@ const BackgroundJobsConfigStrictSchema = z.object({
         'backgroundJobs.stopConfirmationMs was removed with the managed lifecycle',
     })
     .optional(),
-  concurrency: z
-    .never({
-      error:
-        'backgroundJobs.concurrency was removed with the managed lifecycle',
-    })
-    .optional(),
+  concurrency: BackgroundAdmissionConcurrencySchema.optional(),
   sameProviderPolicy: z
     .never({
       error:
@@ -657,16 +725,18 @@ export function sanitizeBackgroundJobsConfig(value: unknown): unknown {
     );
     return {};
   }
-  if (
-    !Object.hasOwn(value, 'mode') ||
-    BackgroundJobsConfigStrictSchema.shape.mode.safeParse(value.mode).success
-  )
-    return value;
+  const dropped = (['mode', 'queue', 'concurrency'] as const).filter(
+    (key) =>
+      Object.hasOwn(value, key) &&
+      !BackgroundJobsConfigStrictSchema.shape[key].safeParse(value[key])
+        .success,
+  );
+  if (!dropped.length) return value;
   emitBackgroundJobsDiagnostic(
-    `${BACKGROUND_JOBS_INVALID_VALUE_MESSAGE} (dropped backgroundJobs keys: mode)`,
+    `${BACKGROUND_JOBS_INVALID_VALUE_MESSAGE} (dropped backgroundJobs keys: ${dropped.join(', ')})`,
   );
   const result = { ...value };
-  delete result.mode;
+  for (const key of dropped) delete result[key];
   return result;
 }
 
@@ -822,11 +892,18 @@ export const DISABLED_COMMANDS_VALUES = [
   'preset',
   'killall',
   'subagent',
+  'queue',
 ] as const;
 
 const RawPluginConfigSchema = z
   .object({
     preset: z.string().optional(),
+    routingBlock: z
+      .boolean()
+      .optional()
+      .describe(
+        'Opt in to a static agent inventory in the orchestrator prompt. OpenCode always provides the native permission-filtered roster.',
+      ),
     setDefaultAgent: z.boolean().optional(),
     sessionPresetRouting: z
       .boolean()
@@ -850,8 +927,11 @@ const RawPluginConfigSchema = z
       .boolean()
       .optional()
       .describe(
-        'Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, update notice). When false, the TUI entry registers nothing and the server records no sidebar state; other server-side features are untouched. Defaults to true.',
+        'Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, /queue, update notice). When false, the TUI entry registers nothing and the server records no sidebar state; other server-side features are untouched. Defaults to true.',
       ),
+    skillCommandMode: SkillCommandModeSchema.optional().describe(
+      'Mode for plugin-generated skill slash commands: "full" (default) inlines the skill body, "reference" asks the skill tool to load the exact skill ID, and "none" omits the generated command. SKILL.md slim.command overrides this value, including when it is "none". Does not disable skills or explicit commands. Reload required for global changes.',
+    ),
     compactSidebar: z
       .boolean()
       .optional()
@@ -868,7 +948,7 @@ const RawPluginConfigSchema = z
       .boolean()
       .optional()
       .describe(
-        'Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When false, the plugin never registers or renders the sidebar and writes no sidebar state; the other OMOS TUI surfaces (/preset, /killall, /subagent, update notice) are unaffected, and the native host sidebar is untouched. Defaults to true.',
+        'Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When false, the plugin never registers or renders the sidebar and writes no sidebar state; the other OMOS TUI surfaces (/preset, /killall, /subagent, /queue, update notice) are unaffected, and the native host sidebar is untouched. Defaults to true.',
       ),
     liveConfigRefresh: z
       .boolean()
@@ -970,6 +1050,12 @@ const RawPluginConfigSchema = z
     tmux: z
       .never({ error: 'tmux config was removed; use multiplexer.*' })
       .optional(),
+    resource_prefixes: z
+      .array(ResourcePrefixSchema)
+      .optional()
+      .describe(
+        'Ordered project-local resource roots. Defaults to .local, .local/.slim, and .opencode. An empty array disables supplemental discovery.',
+      ),
   })
   .superRefine((value, ctx) => {
     if (value.agents) {

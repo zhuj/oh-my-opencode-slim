@@ -27,6 +27,11 @@ import {
   createInternalSyntheticMessageID,
   recordInternalAdmission,
 } from './internal-admissions';
+import {
+  createLiveModelListShim,
+  createModelListShim,
+  type V2ModelListSnapshot,
+} from './model-list-shim';
 import type { V2Context } from './types';
 
 /** v2 model reference translated from a v1 prompt body. */
@@ -167,6 +172,15 @@ function toV1Message(m: Record<string, unknown>) {
       ...(m.finish !== undefined ? { finish: m.finish } : {}),
       ...(m.rawFinish !== undefined ? { rawFinish: m.rawFinish } : {}),
       ...(m.error !== undefined ? { error: m.error } : {}),
+      ...(isRecord(m.tokens) ? { tokens: m.tokens } : {}),
+      ...(isRecord(m.model)
+        ? {
+            model: {
+              providerID: m.model.providerID,
+              modelID: m.model.modelID ?? m.model.id,
+            },
+          }
+        : {}),
     },
     parts:
       text === undefined
@@ -204,8 +218,8 @@ export function resetClientShimGenerationWarnings(): void {
   warnedRemoveUnavailable = false;
 }
 
-/** v1 body model (`{providerID, modelID}`) → v2 model ref
- * (`{id, providerID}`). */
+/** v1 body model (`{providerID, modelID, variant?}`) → v2 model ref
+ * (`{id, providerID, variant?}`). */
 function modelRefFromBody(body: {
   model?: {
     id?: string;
@@ -285,7 +299,21 @@ function toV1SessionInfo(
   if (typeof info.agent === 'string') out.agent = info.agent;
   // v2 Session.Info.outcome appears only on terminal transition.
   if (typeof info.outcome === 'string') out.outcome = info.outcome;
-  if (isRecord(info.model)) out.model = info.model;
+  if (isRecord(info.model)) {
+    out.model = {
+      ...(typeof info.model.providerID === 'string'
+        ? { providerID: info.model.providerID }
+        : {}),
+      ...(typeof (info.model.modelID ?? info.model.id) === 'string'
+        ? { modelID: info.model.modelID ?? info.model.id }
+        : {}),
+      ...(typeof info.model.variant === 'string'
+        ? { variant: info.model.variant }
+        : {}),
+    };
+  }
+  if (isRecord(info.tokens)) out.tokens = info.tokens;
+  if (isRecord(info.summary)) out.summary = info.summary;
   if (isRecord(info.metadata)) out.metadata = info.metadata;
   // v2 carries the directory on `location` (Location.Ref); v1 had it flat.
   if (isRecord(info.location)) {
@@ -393,11 +421,18 @@ export function createSessionListShim(
 export function buildPluginInput(
   ctx: V2Context,
   extras?: ExperimentalV2,
+  modelListSnapshot?: V2ModelListSnapshot,
+  liveList?: () => Promise<unknown>,
 ): Record<string, unknown> {
   // Null-safe: reduced hosts may load the factory without a session domain;
   // every method then degrades honestly instead of crashing construction.
   const s = (ctx.session ?? {}) as V2Context['session'];
   const permission = ctx.permission;
+  const modelList = modelListSnapshot
+    ? liveList
+      ? createLiveModelListShim(liveList, modelListSnapshot)
+      : createModelListShim(modelListSnapshot)
+    : undefined;
   const client = {
     session: {
       // `get` is exposed only when the host provides session.get — callers
@@ -406,7 +441,12 @@ export function buildPluginInput(
       ...(s.get
         ? {
             get: async (args: Record<string, unknown>) => ({
-              data: await s.get?.({ sessionID: sessionIDOf(args) }),
+              data: toV1SessionInfo(
+                (await s.get?.({ sessionID: sessionIDOf(args) })) as Record<
+                  string,
+                  unknown
+                >,
+              ),
             }),
           }
         : {}),
@@ -782,6 +822,30 @@ export function buildPluginInput(
         });
       },
     },
+    ...(modelList ? { model: { list: modelList } } : {}),
+    ...(modelList
+      ? {
+          provider: {
+            list: async () => {
+              const result = await modelList();
+              if (!result) return undefined;
+              const providers = new Map<string, Record<string, unknown>>();
+              for (const row of result.data) {
+                let provider = providers.get(row.provider);
+                if (!provider) {
+                  provider = { id: row.provider, models: {} };
+                  providers.set(row.provider, provider);
+                }
+                (provider.models as Record<string, unknown>)[row.id] = {
+                  id: row.id,
+                  limit: row.limit,
+                };
+              }
+              return { data: { all: [...providers.values()] } };
+            },
+          },
+        }
+      : {}),
   };
 
   const directory = resolveV2Directory(ctx);
@@ -793,10 +857,10 @@ export function buildPluginInput(
     hostFlavor: 'v2',
     project: {
       id: ctx.location?.project?.id ?? 'global',
-      directory,
+      directory: ctx.location?.project?.directory ?? directory,
     },
     directory,
-    worktree: directory,
+    worktree: ctx.location?.project?.directory,
     experimental_workspace: { register() {} },
     $: typeof Bun !== 'undefined' ? Bun.$ : undefined,
     ...(extras?.modelDomain || switchModel || nativeReportSession

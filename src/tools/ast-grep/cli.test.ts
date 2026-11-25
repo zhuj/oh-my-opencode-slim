@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createTmpDir, removeTmpDir } from '../../test-utils';
 import type { RunOptions } from './cli';
 import type { SgResult } from './types';
 import { formatReplaceResult } from './utils';
@@ -62,13 +62,13 @@ describe('runSg rewrite', () => {
   let file: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'omos-ast-grep-'));
+    dir = createTmpDir('omos-ast-grep-');
     file = join(dir, 'repro.js');
     writeFileSync(file, SOURCE);
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   });
 
   test('writes the rewrite to disk when updateAll is set', async () => {

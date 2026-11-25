@@ -2,14 +2,54 @@
 
 Skills are prompt-based workflows, not running MCP servers. OpenCode lists
 eligible skill metadata and loads the full body when invoked. Slim assigns
-permissions and registers bundled skills in-process; it does not maintain a
-second skill catalog or copy new skills into the user directory.
+permissions and supplements the native inventory with bundled and eligible
+project skills through OpenCode’s skill editor.
 
 Plugin changes apply after restart/reload. `disabled_skills` omits selected
 bundled registrations and grants. A same-named user skill directory overrides
 the bundled version. Legacy unedited copies are cleaned up; edited copies are
 retained, or moved outside discovery to
 `<user-config>/.oh-my-opencode-slim-skill-backups/` when disabled.
+
+## Skill Slash Commands
+
+Use `/<skill-id> <arguments>` to invoke a skill from the native OpenCode
+inventory. The command uses the skill ID, which can differ from its display
+name. Explicit commands take precedence on a collision.
+
+Set the plugin’s root `skillCommandMode` to choose the default:
+
+| Mode | Behavior |
+|---|---|
+| `full` (default) | Sends the skill body in a `<skill-instruction>` block, followed by the arguments in `<user-request>`. |
+| `reference` | Asks the model to load the exact skill ID using the native `skill` tool, followed by the original arguments. Skill loading is subject to the tool’s normal availability and permissions. |
+| `none` | Omits the generated slash command. The skill remains available according to its native permissions. |
+
+Override a skill’s mode in its `SKILL.md` YAML frontmatter:
+
+```yaml
+---
+name: project-review
+description: Review changes against project conventions.
+slim:
+  command: reference
+---
+```
+
+An absent or invalid override inherits the plugin setting. A per-skill
+`full` or `reference` override also works with a global default of `none`.
+The `full` mode inlines the body directly in the submitted user prompt,
+including when the session’s agent lacks access to the native skill tool.
+The selected agent, tool permissions, user arguments, attachments and
+delivery mode are carried through the native session invocation.
+
+OpenCode skill and plugin inventory updates refresh the generated catalog
+for the current location and workspace. Reload the plugin after changing
+`skillCommandMode`, resource prefixes, or the set of supplemental project
+skill files. The host editor is add-only for commands. If an earlier
+transform adds an explicit command after the initial snapshot and under
+the same generated name, a reload allows that definition to reclaim the
+name.
 
 ## Available Skills
 
@@ -19,6 +59,7 @@ retained, or moved outside discovery to
 | `codemap` | Hierarchical repository maps and change tracking | Orchestrator |
 | `clonedeps` | Approved, pinned dependency-source mirrors | Orchestrator |
 | `deepwork` | Heavy multi-pass coding workflow | Orchestrator |
+| `delegation` | Guidance for scoping, handing off, and integrating work | Orchestrator |
 | `verification-planning` | Design project-specific evidence before implementation | Orchestrator |
 | `step-back` | Reassess snowballing patches and cleaner alternatives | Orchestrator |
 | `deanchor` | Derive requirements without copying incidental examples | Orchestrator |
@@ -85,13 +126,15 @@ source.
 
 Identity is read from frontmatter. On V2, keep the name equal to the directory's
 path-derived native ID. Symlinked roots escaping their ancestor and symlinked
-entries are skipped. Newly added files are discovered on reload. Permission and
-registration remain native host responsibilities.
+entries are skipped. Supplemental skills under configured `resource_prefixes`
+are eligible for the same opt-in once their files and identities pass
+containment and collision checks. See [Project-local Customization](project-local-customization.md)
+for directory layout, precedence, and examples.
 
 ## codemap
 
 Use for an unfamiliar repository or changed module layout. It creates
-hierarchical `codemap.md` descriptions and `.slim/codemap.json` hashes; agents
+hierarchical `codemap.md` descriptions and `.local/.slim/codemap.json` hashes; agents
 read the maps rather than repeatedly scanning unchanged source.
 
 Ask the Orchestrator to run codemap. Manual commands from the bundled skill
@@ -105,27 +148,29 @@ node scripts/codemap.mjs update --root /repo
 
 The state tracks selected files and folder changes. Folder templates contain
 responsibility, design, flow and integration sections for the writer to fill.
-The existing script can migrate old cartography state; it is not a runtime
-plugin lifecycle. Source: [Codemap skill](../src/skills/codemap/SKILL.md).
+Generated maps live under `.local/.slim/codemaps/`, mirroring source directories.
+The script can copy legacy codemap or cartography state into the new local
+state path while retaining the original file. It is not a runtime plugin
+lifecycle. Source: [Codemap skill](../src/skills/codemap/SKILL.md).
 
 ## clonedeps
 
 Use when pinned dependency source answers a version-specific question better
-than ordinary documentation. Read `.slim/clonedeps.json` first, propose a small
+than ordinary documentation. Read `.local/.slim/clonedeps.json` first, propose a small
 clone plan for approval, then use direct Git operations. There is no helper
 script or per-request dependency scanner.
 
-- Clones live at `.slim/clonedeps/repos/<owner>__<repo>/`, read-only and ignored.
+- Clones live at `.local/.slim/clonedeps/repos/<owner>__<repo>/`, read-only and ignored.
   One repository path is shared by entries with different `packagePath` values;
   package/version suffixes do not create extra clone copies.
-- The committable `.slim/clonedeps.json` records dependency name/version,
+- The local `.local/.slim/clonedeps.json` records dependency name/version,
   repository URL, pinned ref/commit, path, package path and reason.
 - Root `AGENTS.md` gets a concise **Cloned Dependency Source** section with
   paths and purposes.
 - Prefer 0–3 recommendations and at most 3–5 core dependencies, HTTPS and pinned
   tags/commits. Never run install/build/test/lifecycle scripts from a clone.
-- Ignore-file edits touch only owned marker blocks and ignore the repositories,
-  not the manifest. Skip trivial utilities, transitive inventories and ordinary
+- Ignore-file edits touch only owned marker blocks and ignore generated local
+  state and repositories. Skip trivial utilities, transitive inventories and ordinary
   docs lookups.
 
 Source: [Clonedeps skill](../src/skills/clonedeps/SKILL.md).
@@ -136,8 +181,8 @@ Use isolated writer lanes for parallel/risky work or when another branch is
 unfinished. The Orchestrator proposes slug, path, branch/base, purpose and owner,
 checks workspace state, and coordinates validation/integration.
 
-Worktrees live under `.slim/worktrees/<slug>/`; the ignored
-`.slim/worktrees.json` records slug, branch, path, base, purpose, owner, status,
+Worktrees live under `.local/.slim/worktrees/<slug>/`; the ignored
+`.local/.slim/worktrees.json` records slug, branch, path, base, purpose, owner, status,
 areas and creation time. Branches default to `omos/<slug>` unless the user
 chooses another pattern. Specialists write and test only within their lane.
 
@@ -164,12 +209,12 @@ self-contained and injects the bundled body even when `deepwork` is in
 
 Resume state stays small:
 
-- `.slim/deepwork/<session-id>.md`: status/slug router head.
-- `.slim/deepwork/<task-slug>/progress.md`: current pass, next step, decisions,
+- `.local/.slim/deepwork/<session-id>.md`: status/slug router head.
+- `.local/.slim/deepwork/<task-slug>/progress.md`: current pass, next step, decisions,
   lanes, ranked issues and project references; no activity log.
 - Durable research/verdicts belong in existing tracked project documentation;
   generated or pinned assets stay at their producing paths.
-- `.slim/deepwork/` is ignored. Obsolete receipt artifacts can be removed after
+- `.local/.slim/deepwork/` is ignored. Obsolete receipt artifacts can be removed after
   review; do not bulk-migrate transient process notes into new archives.
 
 Source: [Deepwork skill](../src/skills/deepwork/SKILL.md).

@@ -41,7 +41,11 @@ oh-my-opencode-slim은 OpenCode에서 여러 전문 에이전트의 작업을 �
   Orchestrator가 전문 에이전트에게 백그라운드 작업을 배정하고 진행 상황을
   추적합니다. 결과를 검토하고 종합한 뒤 다음 작업을 진행하며, 기본적으로
   병렬로 작업합니다. 작업이 최종 결과를 내면 대기 중인 Orchestrator를 깨우고,
-  작업이 다시 열리면 상태를 갱신합니다.
+  작업이 다시 열리면 상태를 갱신합니다. 선택적 `id`/`depends_on`으로
+  의존 순서를 지정하고 `task_wait`로 작업 그룹의 성공적인 완료를 기다립니다.
+  `task_dependency_tree`는 크기가 제한된 의존 트리와 차단 원인을 보여 줍니다.
+  `task_queue_list`로 조회하고 `task_queue_manage`로 실행 중인 작업을 중단하지
+  않고 대기 작업을 관리하며, 로컬 `/queue`는 선택한 부모 세션의 큐를 표시합니다.
 - **[번들 스킬](#skills)** - `deepwork`, `codemap`,
   `verification-planning`, `reflect` 같은 프롬프트 기반 워크플로를 에이전트별로
   할당합니다.
@@ -197,7 +201,6 @@ OpenCode v2에서는 서버의 설정 감시 기능이 변경을 반영한 뒤, 
 첫 요청 전에 확정되며 이후에는 바뀌지 않습니다. 잘못된 설정 파일을 감지하면
 마지막으로 확인한 정상 설정을 유지합니다. 기존 세션의 설정과 프롬프트, 도구,
 정책, 스킬, MCP 변경은 OpenCode를 완전히 다시 로드해야 반영됩니다.
-v1에서도 변경 사항을 적용하려면 OpenCode를 다시 로드하세요.
 상속 예시와 우선순위는 **[설정 문서](docs/configuration.md#preset-inheritance)**를
 참고하세요.
 
@@ -626,7 +629,7 @@ bunx oh-my-opencode-slim@latest companion install
 | **[멀티플렉서 통합](docs/multiplexer-integration.md)** | Tmux, Zellij, Herdr, cmux, kitty 또는 WezTerm 분할 창에서 에이전트 작업을 실시간으로 확인 |
 | **[Codemap](docs/skills.md#codemap)** | 계층형 코드맵을 생성하여 대규모 코드베이스를 빠르게 파악 |
 | **[Clonedeps](docs/skills.md#clonedeps)** | 선택한 의존성 소스를 Git 추적에서 제외된 로컬 작업 공간에 복제해 내부 구현 확인 |
-| **[Worktrees](docs/skills.md#worktrees)** | `.slim/worktrees/`의 독립된 작업 공간에서 병렬·고위험 코딩 작업 수행 |
+| **[Worktrees](docs/skills.md#worktrees)** | `.local/.slim/worktrees/`의 독립된 작업 공간에서 병렬·고위험 코딩 작업 수행 |
 | **[프리셋 전환](docs/presets/preset-switching.md)** | `/preset`으로 실행 중에 에이전트 모델 프리셋 전환 |
 | **[Interview](docs/interview.md)** | 브라우저 기반 질의응답으로 아직 구체화되지 않은 아이디어를 구조화된 마크다운 명세로 변환 |
 | **[Companion](docs/companion.md)** | 파싱, 도움말, 타입을 위한 플로팅 창 Companion |
@@ -635,7 +638,7 @@ bunx oh-my-opencode-slim@latest companion install
 
 | 문서 | 내용 |
 |-----|------|
-| **[설치 가이드](docs/installation.md)** | 플러그인 설치, 명령줄 인터페이스(CLI) 옵션 사용, 설정 초기화, 설치 문제 해결 |
+| **[설치 가이드](docs/installation.md)** | OpenCode 2.4.0 이상이 필요합니다. 플러그인 설치, CLI 옵션, 설정 초기화, 설치 문제 해결 |
 | **[OpenCode 2 어댑터](src/v2/codemap.md)** | 호스트 계약, 요청 처리, 권한 및 검증 |
 | **[설정](docs/configuration.md)** | 설정 파일 위치, 주석을 지원하는 JSON(JSONC), 프롬프트 재정의, 전체 옵션 설명 |
 | **[마켓플레이스](docs/marketplace.md)** | 마켓플레이스 에이전트 패키지 설치, 확인, 활성화, 업데이트 |

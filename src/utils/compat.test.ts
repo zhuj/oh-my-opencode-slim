@@ -1,18 +1,18 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import {
   buildWindowsCommandLine,
   crossWrite,
   resolveWindowsCommand,
 } from './compat';
 
-const TEST_DIR = path.join(os.tmpdir(), `compat-test-${process.pid}`);
+const TEST_DIR = createTmpDir();
 
 afterAll(() => {
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTmpDir(TEST_DIR);
 });
 
 function testFile(name: string): string {

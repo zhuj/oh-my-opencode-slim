@@ -106,6 +106,28 @@ describe('buildV2EventSubscriptionTypes', () => {
     expect(types).not.toContain('server.connected');
   });
 
+  test('subscribes to skill inventory invalidations only when requested', () => {
+    const enabled = buildV2EventSubscriptionTypes({ ...off, skills: true });
+    expect(enabled).toContain('skill.updated');
+    expect(enabled).toContain('plugin.updated');
+    expect(enabled).not.toContain('command.updated');
+    const disabled = buildV2EventSubscriptionTypes({ ...off, skills: false });
+    expect(disabled).not.toContain('skill.updated');
+    expect(disabled).not.toContain('plugin.updated');
+  });
+
+  test('queue observes native execution events without status or idle', () => {
+    const types = buildV2EventSubscriptionTypes({ ...off, queue: true });
+    expect(types).toEqual([
+      ...IDENTITY,
+      ...LIFECYCLE.slice(0, 4),
+      'session.inbox.enqueued',
+      'session.inbox.delivered',
+      'session.inbox.cancelled',
+      'session.model.selected',
+    ]);
+  });
+
   test('the union is frozen once built — no per-request surface changes', () => {
     const types = buildV2EventSubscriptionTypes(off);
     expect(Object.isFrozen(types)).toBe(true);

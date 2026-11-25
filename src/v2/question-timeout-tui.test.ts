@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PANE_VIEWER_ENV } from '../multiplexer/shared';
+import { createTmpDir, removeTmpDir } from '../test-utils';
 import { flushLoggerForTesting, resetLogger } from '../utils/logger';
 import { createTimerHarness } from '../utils/test-timers';
 import { registerQuestionTimeout } from './question-timeout-tui';
@@ -10,7 +10,7 @@ import { registerQuestionTimeout } from './question-timeout-tui';
 let logDirectory: string;
 let previousLogDirectory: string | undefined;
 beforeEach(() => {
-  logDirectory = mkdtempSync(join(tmpdir(), 'question-timeout-log-'));
+  logDirectory = createTmpDir('question-timeout-log-');
   previousLogDirectory = process.env.OPENCODE_LOG_DIR;
   resetLogger();
   process.env.OPENCODE_LOG_DIR = logDirectory;
@@ -20,7 +20,7 @@ afterEach(async () => {
   resetLogger();
   if (previousLogDirectory === undefined) delete process.env.OPENCODE_LOG_DIR;
   else process.env.OPENCODE_LOG_DIR = previousLogDirectory;
-  rmSync(logDirectory, { recursive: true, force: true });
+  removeTmpDir(logDirectory);
 });
 
 function setup(env: Record<string, string | undefined> = {}) {
